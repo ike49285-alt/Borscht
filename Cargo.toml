@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/borscht-core", "crates/borscht-cli", "crates/borscht-wasm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/ike49285-alt/Borscht"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# Keep tests fast enough that the long-run ecology gate is practical.
+[profile.test]
+opt-level = 2
+
+[profile.bench]
+inherits = "release"

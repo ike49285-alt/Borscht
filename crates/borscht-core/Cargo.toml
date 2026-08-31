@@ -1,0 +1,21 @@
+[package]
+name = "borscht-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic evolution simulation core: plants, animals, genomes and neural brains."
+
+[dependencies]
+# Intentionally none. The core must build for wasm32-unknown-unknown with no
+# toolchain beyond stable rustc, and determinism is easier to guarantee without
+# third-party float or RNG code. rayon is opt-in below for the native runner.
+rayon = { version = "1.10", optional = true }
+
+[features]
+default = []
+parallel = ["dep:rayon"]
+
+[lib]
+crate-type = ["rlib"]

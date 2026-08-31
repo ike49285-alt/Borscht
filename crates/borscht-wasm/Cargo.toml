@@ -1,0 +1,14 @@
+[package]
+name = "borscht-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Raw extern \"C\" WebAssembly surface for the Borscht evolution simulator."
+
+[dependencies]
+borscht-core = { path = "../borscht-core" }
+
+[lib]
+crate-type = ["cdylib", "rlib"]

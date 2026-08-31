@@ -1,0 +1,15 @@
+[package]
+name = "borscht-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless runner, benchmarks and image/CSV export for the Borscht evolution simulator."
+
+[[bin]]
+name = "borscht"
+path = "src/main.rs"
+
+[dependencies]
+borscht-core = { path = "../borscht-core", features = ["parallel"] }
