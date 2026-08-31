@@ -49,7 +49,10 @@ impl Env {
             let latitude = crate::fastmath::cos(TAU * f);
             self.row_temp[row] =
                 cfg.latitude_amplitude * latitude + cfg.season_amplitude * season;
-            let daylight = 0.55 + 0.45 * latitude;
+            // Weighted so the world-average daylight is 0.7 rather than 0.55.
+            // The poles still get materially less light than the equator, but
+            // not so little that half the map cannot support plants.
+            let daylight = 0.7 + 0.3 * latitude;
             self.row_light[row] = clamp(
                 cfg.base_light * daylight * (1.0 + cfg.light_season_amplitude * season),
                 0.0,

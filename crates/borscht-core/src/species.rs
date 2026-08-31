@@ -317,7 +317,6 @@ mod tests {
     #[test]
     fn retired_slots_are_reused() {
         let mut r = reg();
-        let mut rng = Rng::new(4, 1);
         let a = r.found([0; N], 0.0, 0);
         r.begin_census();
         r.end_census(1);
@@ -326,7 +325,6 @@ mod tests {
         let b = r.found([9; N], 0.2, 2);
         assert_eq!(r.free.len(), before - 1);
         assert!(r.records[b as usize].alive);
-        let _ = rng;
     }
 
     /// A species must never be retired while members still carry its id.

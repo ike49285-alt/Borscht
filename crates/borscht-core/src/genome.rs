@@ -108,7 +108,7 @@ pub const ANIMAL_GENES: [GeneSpec; ANIMAL_GENE_COUNT] = [
 ];
 
 pub const PLANT_GENES: [GeneSpec; PLANT_GENE_COUNT] = [
-    g("growth_rate", 0.004, 0.090, 1.2),
+    g("growth_rate", 0.010, 0.180, 1.2),
     g("max_size", 0.5, 20.0, 1.0),
     g("seed_range", 1.0, 40.0, 0.7),
     g("seed_invest", 0.05, 0.50, 0.5),
@@ -117,6 +117,22 @@ pub const PLANT_GENES: [GeneSpec; PLANT_GENE_COUNT] = [
     g("temp_tolerance", 0.15, 1.50, 0.5),
     g("hue", 0.0, 1.0, 0.0),
 ];
+
+/// Tolerance at which the generalist penalty is exactly neutral. Genomes
+/// narrower than this get a bonus, wider ones a penalty.
+const REFERENCE_TOLERANCE: f32 = 0.5;
+
+/// Peak height of the temperature fitness curve for a given breadth.
+///
+/// Specialists beat generalists on their home ground and lose everywhere else.
+/// The exponent is deliberately mild: an earlier version normalised against the
+/// *minimum* tolerance with a square root, which pushed a mid-range genome to
+/// 0.43 of peak and left photosynthesis unable to outrun maintenance, so plants
+/// never reached seeding size and the whole food web starved.
+fn temp_peak(tolerance: f32) -> f32 {
+    let t = if tolerance < 1e-3 { 1e-3 } else { tolerance };
+    fastmath::clamp(fastmath::powf(REFERENCE_TOLERANCE / t, 0.35), 0.3, 1.6)
+}
 
 /// Decode tables. Built once; every gene read in the hot loop is one indexed
 /// load out of these.
@@ -158,15 +174,14 @@ impl GeneTables {
         for b in 0..256 {
             let t = animal[ag::TEMP_TOLERANCE][b];
             inv_animal_tolerance[b] = 1.0 / t;
-            // Generalist penalty: peak fitness falls as the curve widens.
-            animal_temp_peak[b] = 1.0 / fastmath::sqrt(t / ANIMAL_GENES[ag::TEMP_TOLERANCE].lo);
+            animal_temp_peak[b] = temp_peak(t);
         }
         let mut inv_plant_tolerance = [0.0f32; 256];
         let mut plant_temp_peak = [0.0f32; 256];
         for b in 0..256 {
             let t = plant[pg::TEMP_TOLERANCE][b];
             inv_plant_tolerance[b] = 1.0 / t;
-            plant_temp_peak[b] = 1.0 / fastmath::sqrt(t / PLANT_GENES[pg::TEMP_TOLERANCE].lo);
+            plant_temp_peak[b] = temp_peak(t);
         }
         GeneTables {
             animal,
@@ -269,14 +284,33 @@ pub fn plant_distance(a: &PlantGenome, b: &PlantGenome) -> f32 {
 /// Digestive efficiency for plant and animal food given a diet gene.
 ///
 /// A generalist sits at 0.5 and is mediocre at both; the endpoints are
-/// specialists. Without this penalty diet has no cost and every lineage drifts
+/// specialists. Without some penalty, diet has no cost and every lineage drifts
 /// to omnivory, collapsing the food web into one trophic mush.
+///
+/// The penalty must stay *shallow*, though. It carves a fitness valley between
+/// herbivory and carnivory, and a herbivore population can only evolve into
+/// predators by crossing it. At a steep setting the intermediate diets lose far
+/// more plant digestion than the scarce meat repays, selection pushes diet
+/// straight back to zero, and carnivores never appear at all -- the food web
+/// stays one trophic level deep forever.
+/// The two curves are deliberately different shapes.
+///
+/// Plant digestion falls linearly with diet, because living on plants needs
+/// elaborate machinery -- fermentation chambers, cellulose breakdown -- that only
+/// works in proportion to how much of the body is committed to it. Meat
+/// digestion rises as a square root, because flesh is nutritionally easy and
+/// even a modest carnivore adaptation captures a good share of the value.
+///
+/// Making both linear leaves an impassable valley: at low diet, meat digestion
+/// is so small that a hunt returns less than the grazing turn it costs, so every
+/// step toward carnivory is selected against and diet pins to zero forever. The
+/// concave meat curve pays a part-time predator enough to make the first step
+/// worthwhile, while a full carnivore still digests meat more than three times
+/// better than a quarter-carnivore does.
 #[inline(always)]
-pub fn digestion(diet: f32) -> (f32, f32) {
-    const SPECIALIST_BONUS: f32 = 0.45;
-    let plant = (1.0 - diet) * (1.0 - SPECIALIST_BONUS * diet * 4.0 * (1.0 - diet));
-    let meat = diet * (1.0 - SPECIALIST_BONUS * diet * 4.0 * (1.0 - diet));
-    (plant, meat)
+pub fn digestion(diet: f32, specialism: f32) -> (f32, f32) {
+    let penalty = 1.0 - specialism * diet * 4.0 * (1.0 - diet);
+    ((1.0 - diet) * penalty, fastmath::sqrt(diet) * penalty)
 }
 
 #[cfg(test)]
@@ -299,6 +333,20 @@ mod tests {
             assert!((plant_trait(&lo_genome, gi) - spec.lo).abs() < 1e-5, "{}", spec.name);
             assert!((plant_trait(&hi_genome, gi) - spec.hi).abs() < 1e-5, "{}", spec.name);
         }
+    }
+
+    /// A generalist must be worse than a matched specialist but not so much
+    /// worse that a mid-range genome cannot make a living at all.
+    #[test]
+    fn temperature_breadth_trades_off_sanely() {
+        assert!((temp_peak(REFERENCE_TOLERANCE) - 1.0).abs() < 1e-4);
+        assert!(temp_peak(0.15) > temp_peak(1.5), "specialists should peak higher");
+        assert!(temp_peak(1.5) > 0.6, "generalists must still be viable: {}", temp_peak(1.5));
+        assert!(temp_peak(0.15) < 1.6);
+        // On its own optimum a specialist wins; two units away it loses badly.
+        let (spec, gen) = (0.2f32, 1.2f32);
+        assert!(temp_peak(spec) * fastmath::gaussian(0.0, spec) > temp_peak(gen) * fastmath::gaussian(0.0, gen));
+        assert!(temp_peak(spec) * fastmath::gaussian(1.0, spec) < temp_peak(gen) * fastmath::gaussian(1.0, gen));
     }
 
     #[test]
@@ -369,12 +417,77 @@ mod tests {
 
     #[test]
     fn specialists_out_digest_generalists() {
-        let (herb_plant, herb_meat) = digestion(0.0);
-        let (gen_plant, gen_meat) = digestion(0.5);
-        let (carn_plant, carn_meat) = digestion(1.0);
+        let (herb_plant, herb_meat) = digestion(0.0, 0.2);
+        let (gen_plant, gen_meat) = digestion(0.5, 0.2);
+        let (carn_plant, carn_meat) = digestion(1.0, 0.2);
         assert!((herb_plant - 1.0).abs() < 1e-6 && herb_meat == 0.0);
         assert!((carn_meat - 1.0).abs() < 1e-6 && carn_plant == 0.0);
         assert!(gen_plant < herb_plant && gen_meat < carn_meat);
         assert!(gen_plant + gen_meat < 1.0, "omnivory must cost something");
+    }
+
+    #[test]
+    fn the_endpoints_are_pure_specialists() {
+        for specialism in [0.0f32, 0.2, 0.5] {
+            let (plant, meat) = digestion(0.0, specialism);
+            assert!((plant - 1.0).abs() < 1e-6 && meat == 0.0);
+            let (plant, meat) = digestion(1.0, specialism);
+            assert!(plant == 0.0 && (meat - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn digestion_is_monotone_in_diet() {
+        let (mut last_plant, mut last_meat) = (f32::MAX, -1.0f32);
+        for i in 0..=100 {
+            let (plant, meat) = digestion(i as f32 / 100.0, 0.2);
+            assert!(plant <= last_plant + 1e-6, "plant digestion rose with diet");
+            assert!(meat >= last_meat - 1e-6, "meat digestion fell with diet");
+            assert!((0.0..=1.0).contains(&plant) && (0.0..=1.0).contains(&meat));
+            last_plant = plant;
+            last_meat = meat;
+        }
+    }
+
+    /// A part-time predator must get materially more than its diet fraction of
+    /// meat value, or the first step toward carnivory never pays for itself.
+    #[test]
+    fn partial_carnivory_pays_more_than_its_share() {
+        let (_, quarter) = digestion(0.25, 0.2);
+        let (_, full) = digestion(1.0, 0.2);
+        assert!(quarter > 0.25 * full * 1.5, "quarter carnivore gets only {quarter}");
+        // But specialising is still clearly worth it.
+        assert!(full > quarter * 2.0, "full carnivory must stay worth reaching");
+    }
+
+    /// The valley between herbivory and carnivory has to stay crossable, or a
+    /// herbivore lineage can never evolve into a predator.
+    #[test]
+    fn the_omnivore_valley_is_shallow_enough_to_cross() {
+        let specialism = 0.2;
+        // Judge the specialism penalty on its own, against the pure linear
+        // tradeoff. Losing (1 - diet) of your plant digestion by being a quarter
+        // carnivore is the intended cost; what must stay small is the *extra*
+        // penalty layered on top for not being a specialist.
+        for step in 1..=3 {
+            let diet = step as f32 * 0.125;
+            let (linear_plant, linear_meat) = digestion(diet, 0.0);
+            let (plant, meat) = digestion(diet, specialism);
+            // The penalty bottoms out at exactly `1 - specialism`, at diet 0.5.
+            assert!(
+                plant >= linear_plant * (1.0 - specialism),
+                "diet {diet}: specialism costs {:.0}% extra plant digestion",
+                (1.0 - plant / linear_plant) * 100.0
+            );
+            assert!(meat >= linear_meat * (1.0 - specialism), "diet {diet}: and {meat} of meat");
+            assert!(meat > 0.0, "a partial carnivore must gain something real");
+        }
+        let (half_plant, _) = digestion(0.5, specialism);
+        assert!(
+            (half_plant / digestion(0.5, 0.0).0 - (1.0 - specialism)).abs() < 1e-5,
+            "the worst case should be exactly 1 - specialism"
+        );
+        // The bonus still has to be worth something at the extremes.
+        assert!(digestion(1.0, specialism).1 > digestion(0.5, specialism).1 * 1.5);
     }
 }

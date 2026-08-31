@@ -83,17 +83,33 @@ config_params! {
     /// Side length of the square, toroidal world in simulation units.
     world_size: f32 = 2048.0, "world", 128.0, 8192.0;
     /// Cells per side of the spatial grid. Must be a power of two.
-    grid_dim: u32 = 512, "world", 32.0, 2048.0;
+    grid_dim: u32 = 256, "world", 32.0, 2048.0;
+    /// Side length, in grid cells, of the block within which animals can
+    /// actually reach each other and the plants they eat.
+    ///
+    /// Sensing and interaction want opposite things from the grid. Gradients
+    /// need fine cells to point anywhere useful; grazing and predation need
+    /// cells with somebody in them. At equilibrium densities a single sensing
+    /// cell holds well under one animal, so cell-local predation is effectively
+    /// impossible and carnivores can never establish. Blocks stay disjoint, so
+    /// each still owns its organisms and its soil exclusively.
+    interaction_block: u32 = 4, "world", 1.0, 32.0;
     /// Hard cap on live plants. Reaching it simply makes seeding fail.
     max_plants: u32 = 700_000, "world", 1000.0, 4_000_000.0;
     /// Hard cap on live animals.
     max_animals: u32 = 300_000, "world", 100.0, 2_000_000.0;
     /// Plants seeded at reset.
-    initial_plants: u32 = 120_000, "world", 100.0, 4_000_000.0;
+    initial_plants: u32 = 300_000, "world", 100.0, 4_000_000.0;
     /// Animals seeded at reset.
     initial_animals: u32 = 12_000, "world", 10.0, 2_000_000.0;
     /// Distinct founder lineages, each starting from its own random genome.
     founder_lineages: u32 = 24, "world", 1.0, 512.0;
+    /// Fraction of full reserves that founding animals start with.
+    founder_energy: f32 = 0.60, "world", 0.05, 1.0;
+    /// How close to its maximum size a founding plant starts. Founders that
+    /// begin as seedlings take hundreds of ticks to reach seeding size, by
+    /// which time the founding animals have already starved.
+    founder_plant_fill: f32 = 0.70, "world", 0.05, 1.0;
 
     // ---- environment ----
     /// Ticks in a full seasonal cycle.
@@ -108,20 +124,22 @@ config_params! {
     base_light: f32 = 1.0, "environment", 0.0, 4.0;
     /// Seasonal swing in available light.
     light_season_amplitude: f32 = 0.25, "environment", 0.0, 1.0;
-    /// Total matter placed in the soil per cell at reset. The world runs on a
-    /// closed nutrient budget, so this sets the ceiling on total biomass.
-    initial_soil: f32 = 6.0, "environment", 0.0, 200.0;
+    /// Matter placed in the soil per unit of world area at reset. The world
+    /// runs on a closed nutrient budget, so this sets the ceiling on total
+    /// biomass. Expressed as a density, not a per-cell amount, so changing grid
+    /// resolution does not change how much matter the world contains.
+    soil_density: f32 = 0.375, "environment", 0.0, 20.0;
     /// Fraction of a cell's surplus nutrient that spreads to its neighbours
     /// each tick. Keeps dead zones from becoming permanent.
     soil_diffusion: f32 = 0.06, "environment", 0.0, 0.25;
-    /// Half-saturation constant for nutrient uptake.
-    soil_half: f32 = 1.5, "environment", 0.05, 20.0;
+    /// Soil density at which nutrient uptake runs at half rate.
+    soil_half: f32 = 0.09, "environment", 0.002, 4.0;
 
     // ---- plants ----
-    /// Local biomass at which shading halves the growth rate.
-    shade_half: f32 = 9.0, "plants", 0.1, 200.0;
+    /// Local biomass density at which shading halves the growth rate.
+    shade_half: f32 = 0.55, "plants", 0.005, 20.0;
     /// Fraction of biomass respired away each tick, returned to the soil.
-    plant_maintenance: f32 = 0.0016, "plants", 0.0, 0.05;
+    plant_maintenance: f32 = 0.0008, "plants", 0.0, 0.05;
     /// Biomass below which a plant dies.
     plant_min_biomass: f32 = 0.02, "plants", 0.0001, 1.0;
     /// Maximum plant age in ticks.
@@ -130,6 +148,8 @@ config_params! {
     toxicity_growth_cost: f32 = 0.45, "plants", 0.0, 1.0;
     /// Per-gene mutation probability for plants.
     plant_mutation_rate: f32 = 0.030, "plants", 0.0, 0.5;
+    /// Smallest biomass a seed may carry.
+    plant_seed_min: f32 = 0.05, "plants", 0.001, 5.0;
 
     // ---- animals ----
     /// Ticks between brain evaluations. Movement still integrates every tick.
@@ -140,7 +160,7 @@ config_params! {
     /// Body matter drawn from the soil per unit of body size.
     mass_per_size: f32 = 0.30, "animals", 0.01, 5.0;
     /// Baseline upkeep, multiplied by `size^0.75`.
-    metabolism: f32 = 0.055, "animals", 0.0, 1.0;
+    metabolism: f32 = 0.040, "animals", 0.0, 1.0;
     /// Upkeep surcharge for a fully developed sensory system.
     vision_upkeep: f32 = 0.020, "animals", 0.0, 0.5;
     /// Upkeep surcharge for maximum weapons and armour.
@@ -149,12 +169,44 @@ config_params! {
     longevity_upkeep: f32 = 0.020, "animals", 0.0, 0.5;
     /// Cost of movement, multiplied by size and the square of speed.
     move_cost: f32 = 0.085, "animals", 0.0, 2.0;
-    /// Plant biomass an animal can ingest per tick, per unit of size.
-    graze_rate: f32 = 0.22, "animals", 0.0, 5.0;
+    /// Plant biomass an animal can ingest per tick, per unit of size, when food
+    /// is abundant.
+    graze_rate: f32 = 0.30, "animals", 0.0, 5.0;
+    /// Fraction of a plant's maximum size that grazers cannot reach.
+    ///
+    /// Real grazed plants survive precisely because the crown and roots are out
+    /// of reach. Without a refuge, grazing pressure turns directly into plant
+    /// *mortality*: herbivores eat plants down past the death threshold, and the
+    /// stand can only recover from seed instead of regrowing. That converts a
+    /// gentle negative feedback into a violent one and is what makes the
+    /// plant-herbivore cycle swing by an order of magnitude.
+    graze_refuge: f32 = 0.15, "animals", 0.0, 0.9;
+    /// How much grazers get in each other's way, per unit of local animal
+    /// density.
+    ///
+    /// With intake set by food alone, per-capita income does not fall as the
+    /// herd grows, so the population has no intermediate equilibrium: growth is
+    /// either positive until it hits the hard cap or negative until extinction,
+    /// and the run alternates between the two. Interference between consumers
+    /// (the Beddington-DeAngelis term) makes income fall smoothly with crowding
+    /// and gives the population somewhere to settle.
+    graze_interference: f32 = 1.20, "animals", 0.0, 20.0;
+    /// Local plant density at which grazing runs at half its maximum rate.
+    ///
+    /// This is a Holling type II functional response, and it is what keeps the
+    /// herbivore-plant cycle from detonating. With intake capped only by a flat
+    /// rate, herbivores eat just as efficiently at low plant density as at high
+    /// and strip the world bare before starving; saturating intake gives sparse
+    /// plants an effective refuge and damps the oscillation.
+    graze_half: f32 = 0.35, "animals", 0.001, 20.0;
     /// Energy released per unit of biomass digested.
     energy_per_biomass: f32 = 5.5, "animals", 0.1, 50.0;
     /// How much of a plant's toxicity blocks energy extraction.
     toxicity_defence: f32 = 0.85, "animals", 0.0, 1.0;
+    /// How much better a dietary specialist digests its own food than an
+    /// omnivore does. Raising this deepens the valley between herbivory and
+    /// carnivory and can make predators unreachable by evolution.
+    diet_specialism: f32 = 0.20, "animals", 0.0, 1.0;
     /// Fraction of a killed animal's energy the predator absorbs.
     predation_efficiency: f32 = 0.62, "animals", 0.0, 1.0;
     /// Energy spent on a failed attack, per unit of size.
@@ -166,6 +218,12 @@ config_params! {
     /// Per-weight mutation probability for brains, relative to the animal's own
     /// mutation-rate gene.
     brain_mutation_scale: f32 = 1.4, "animals", 0.0, 10.0;
+    /// Extra upkeep paid when living away from the preferred temperature. This
+    /// is what makes the climate gradient a real cost rather than decoration.
+    temp_stress: f32 = 0.80, "animals", 0.0, 5.0;
+    /// Floor under attack and defence, so an animal with neither gene is still
+    /// not literally powerless.
+    combat_base: f32 = 0.30, "animals", 0.0, 2.0;
     /// Chance per tick that an animal dies for reasons the model does not
     /// represent. Stops immortal grazers from freezing the ecosystem.
     background_mortality: f32 = 0.00004, "animals", 0.0, 0.01;
@@ -227,6 +285,12 @@ impl Config {
     pub fn sanitize(&mut self) {
         self.world_size = self.world_size.clamp(16.0, 65_536.0);
         self.grid_dim = self.grid_dim.clamp(4, 4096).next_power_of_two();
+        // Blocks tile the grid exactly, so both must be powers of two and the
+        // block can never exceed the grid.
+        self.interaction_block = self
+            .interaction_block
+            .clamp(1, self.grid_dim)
+            .next_power_of_two();
         self.max_plants = self.max_plants.clamp(1, 8_000_000);
         self.max_animals = self.max_animals.clamp(1, 8_000_000);
         self.initial_plants = self.initial_plants.min(self.max_plants);
@@ -253,6 +317,9 @@ impl Config {
         // interaction rate, is unchanged.
         c.world_size *= crate::fastmath::sqrt(scale);
         c.grid_dim = ((c.grid_dim as f32 * crate::fastmath::sqrt(scale)) as u32).clamp(32, 4096);
+        // Interaction blocks are an absolute area, not a fraction of the grid:
+        // they exist to hold a workable number of organisms, and that number
+        // must not change when the world is rescaled.
         c.sanitize();
         c
     }
@@ -326,6 +393,29 @@ mod tests {
         assert!(!c.set_param(0, f32::NAN));
         assert!(!c.set_param(0, f32::INFINITY));
         assert_eq!(c, Config::default());
+    }
+
+    #[test]
+    fn interaction_blocks_tile_the_grid() {
+        let mut c = Config::default();
+        c.grid_dim = 256;
+        c.interaction_block = 3;
+        c.sanitize();
+        assert_eq!(c.interaction_block, 4);
+        assert_eq!(c.grid_dim % c.interaction_block, 0);
+
+        // A block larger than the grid must be clamped, not left to index out
+        // of bounds.
+        c.grid_dim = 32;
+        c.interaction_block = 512;
+        c.sanitize();
+        assert!(c.interaction_block <= c.grid_dim);
+        assert_eq!(c.grid_dim % c.interaction_block, 0);
+
+        for target in [20_000u32, 200_000, 1_000_000] {
+            let c = Config::for_population(target);
+            assert_eq!(c.grid_dim % c.interaction_block, 0, "target {target}");
+        }
     }
 
     #[test]

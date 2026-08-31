@@ -19,9 +19,7 @@ pub fn wrap(v: f32, size: f32) -> f32 {
     let w = v - size * floor(v / size);
     // Guard the case where `v` is a hair below a multiple of `size` and the
     // division rounds up, which would otherwise return exactly `size`.
-    if w >= size {
-        0.0
-    } else if w < 0.0 {
+    if !(0.0..size).contains(&w) {
         0.0
     } else {
         w
@@ -98,19 +96,90 @@ impl Buckets {
     }
 }
 
-/// Spatial index plus the sensory fields derived from it.
-pub struct Grid {
+/// Grid geometry, kept separate from the grid's data.
+///
+/// The per-cell update phases need to compute cell indices while holding the
+/// field arrays mutably. If these methods lived on `Grid` itself, every
+/// `cell_at` call would borrow the whole grid and conflict with writing `soil`.
+/// Being `Copy`, this can simply be pulled out and carried alongside.
+#[derive(Clone, Copy, Debug)]
+pub struct GridGeom {
     pub dim: u32,
     mask: u32,
+    shift: u32,
     pub cell_size: f32,
     inv_cell_size: f32,
     pub world_size: f32,
+}
+
+impl GridGeom {
+    #[inline(always)]
+    pub fn cells(&self) -> usize {
+        (self.dim as usize) * (self.dim as usize)
+    }
+
+    /// Grid column or row for a world coordinate. Positions are expected to be
+    /// already wrapped; the mask makes an out-of-range value harmless rather
+    /// than an out-of-bounds index.
+    #[inline(always)]
+    pub fn coord(&self, v: f32) -> u32 {
+        (v * self.inv_cell_size) as i32 as u32 & self.mask
+    }
+
+    #[inline(always)]
+    pub fn cell_of(&self, x: f32, y: f32) -> u32 {
+        (self.coord(y) << self.shift) | self.coord(x)
+    }
+
+    #[inline(always)]
+    pub fn cell_xy(&self, cell: u32) -> (u32, u32) {
+        (cell & self.mask, cell >> self.shift)
+    }
+
+    #[inline(always)]
+    pub fn row_of(&self, cell: u32) -> u32 {
+        cell >> self.shift
+    }
+
+    #[inline(always)]
+    pub fn cell_at(&self, cx: i32, cy: i32) -> usize {
+        let x = (cx as u32) & self.mask;
+        let y = (cy as u32) & self.mask;
+        ((y << self.shift) | x) as usize
+    }
+
+    /// Sample a field at a cell, plus its central-difference gradient over the
+    /// wrapped neighbourhood. This triple is the whole of an animal's distance
+    /// perception.
+    #[inline(always)]
+    pub fn sample(&self, field: &[f32], cx: i32, cy: i32) -> (f32, f32, f32) {
+        let here = field[self.cell_at(cx, cy)];
+        let east = field[self.cell_at(cx + 1, cy)];
+        let west = field[self.cell_at(cx - 1, cy)];
+        let north = field[self.cell_at(cx, cy + 1)];
+        let south = field[self.cell_at(cx, cy - 1)];
+        (here, (east - west) * 0.5, (north - south) * 0.5)
+    }
+}
+
+/// Spatial index plus the sensory fields derived from it.
+pub struct Grid {
+    pub geom: GridGeom,
 
     pub plants: Buckets,
     pub animals: Buckets,
 
-    /// Plant biomass per cell: the herbivore's food signal.
+    /// Total plant biomass per cell, used for shading.
     pub plant_mass: Vec<f32>,
+    /// Plant biomass per cell that grazers can actually reach, i.e. total less
+    /// each plant's refuge.
+    ///
+    /// Kept apart from `plant_mass` because a herbivore's food signal and a
+    /// plant's shade competitor are different quantities. Driving the grazing
+    /// response off total biomass makes a fully cropped stand still read as
+    /// abundant, so intake never falls off before the food is gone and the
+    /// population overshoots and crashes.
+    pub edible_mass: Vec<f32>,
     /// Animal body mass weighted by how herbivorous it is: what a predator
     /// hunts.
     pub prey_mass: Vec<f32>,
@@ -127,17 +196,22 @@ pub struct Grid {
 impl Grid {
     pub fn new(dim: u32, world_size: f32) -> Self {
         assert!(dim.is_power_of_two(), "grid dimension must be a power of two");
+        assert!(dim >= 4, "grid must be at least 4 cells on a side");
         let cells = (dim as usize) * (dim as usize);
         let cell_size = world_size / dim as f32;
         Grid {
-            dim,
-            mask: dim - 1,
-            cell_size,
-            inv_cell_size: 1.0 / cell_size,
-            world_size,
+            geom: GridGeom {
+                dim,
+                mask: dim - 1,
+                shift: dim.trailing_zeros(),
+                cell_size,
+                inv_cell_size: 1.0 / cell_size,
+                world_size,
+            },
             plants: Buckets::default(),
             animals: Buckets::default(),
             plant_mass: vec![0.0; cells],
+            edible_mass: vec![0.0; cells],
             prey_mass: vec![0.0; cells],
             threat_mass: vec![0.0; cells],
             animal_count: vec![0.0; cells],
@@ -148,76 +222,55 @@ impl Grid {
 
     #[inline(always)]
     pub fn cells(&self) -> usize {
-        (self.dim as usize) * (self.dim as usize)
+        self.geom.cells()
     }
 
-    /// Grid column/row for a world coordinate. Positions are expected to be
-    /// already wrapped; the mask makes an out-of-range value harmless rather
-    /// than an out-of-bounds index.
     #[inline(always)]
-    pub fn coord(&self, v: f32) -> u32 {
-        (v * self.inv_cell_size) as i32 as u32 & self.mask
+    pub fn dim(&self) -> u32 {
+        self.geom.dim
+    }
+
+    #[inline(always)]
+    pub fn world_size(&self) -> f32 {
+        self.geom.world_size
     }
 
     #[inline(always)]
     pub fn cell_of(&self, x: f32, y: f32) -> u32 {
-        (self.coord(y) << self.dim.trailing_zeros()) | self.coord(x)
+        self.geom.cell_of(x, y)
     }
 
     #[inline(always)]
     pub fn cell_xy(&self, cell: u32) -> (u32, u32) {
-        (cell & self.mask, cell >> self.dim.trailing_zeros())
+        self.geom.cell_xy(cell)
     }
 
     #[inline(always)]
     pub fn cell_at(&self, cx: i32, cy: i32) -> usize {
-        let x = (cx as u32) & self.mask;
-        let y = (cy as u32) & self.mask;
-        ((y << self.dim.trailing_zeros()) | x) as usize
+        self.geom.cell_at(cx, cy)
+    }
+
+    #[inline(always)]
+    pub fn sample(&self, field: &[f32], cx: i32, cy: i32) -> (f32, f32, f32) {
+        self.geom.sample(field, cx, cy)
     }
 
     pub fn rebuild_plants(&mut self, xs: &[f32], ys: &[f32], count: usize) {
-        let dim_shift = self.dim.trailing_zeros();
-        let mask = self.mask;
-        let inv = self.inv_cell_size;
-        let cells = self.cells();
-        self.plants.rebuild(cells, count, |i| {
-            let cx = (xs[i] * inv) as i32 as u32 & mask;
-            let cy = (ys[i] * inv) as i32 as u32 & mask;
-            (cy << dim_shift) | cx
-        });
+        let geom = self.geom;
+        self.plants.rebuild(geom.cells(), count, |i| geom.cell_of(xs[i], ys[i]));
     }
 
     pub fn rebuild_animals(&mut self, xs: &[f32], ys: &[f32], count: usize) {
-        let dim_shift = self.dim.trailing_zeros();
-        let mask = self.mask;
-        let inv = self.inv_cell_size;
-        let cells = self.cells();
-        self.animals.rebuild(cells, count, |i| {
-            let cx = (xs[i] * inv) as i32 as u32 & mask;
-            let cy = (ys[i] * inv) as i32 as u32 & mask;
-            (cy << dim_shift) | cx
-        });
+        let geom = self.geom;
+        self.animals.rebuild(geom.cells(), count, |i| geom.cell_of(xs[i], ys[i]));
     }
 
     pub fn clear_fields(&mut self) {
         self.plant_mass.fill(0.0);
+        self.edible_mass.fill(0.0);
         self.prey_mass.fill(0.0);
         self.threat_mass.fill(0.0);
         self.animal_count.fill(0.0);
-    }
-
-    /// Sample a field at a cell, plus its central-difference gradient over the
-    /// wrapped neighbourhood. This triple is the whole of an animal's distance
-    /// perception.
-    #[inline(always)]
-    pub fn sample(&self, field: &[f32], cx: i32, cy: i32) -> (f32, f32, f32) {
-        let here = field[self.cell_at(cx, cy)];
-        let east = field[self.cell_at(cx + 1, cy)];
-        let west = field[self.cell_at(cx - 1, cy)];
-        let north = field[self.cell_at(cx, cy + 1)];
-        let south = field[self.cell_at(cx, cy - 1)];
-        (here, (east - west) * 0.5, (north - south) * 0.5)
     }
 
     /// Spread surplus nutrient to the four neighbours.
@@ -228,17 +281,18 @@ impl Grid {
         if rate <= 0.0 {
             return;
         }
-        let dim = self.dim as i32;
+        let geom = self.geom;
+        let dim = geom.dim as i32;
         self.soil_scratch.copy_from_slice(&self.soil);
         let src = &self.soil_scratch;
         for cy in 0..dim {
             for cx in 0..dim {
-                let c = self.cell_at(cx, cy);
+                let c = geom.cell_at(cx, cy);
                 let here = src[c];
-                let sum = src[self.cell_at(cx + 1, cy)]
-                    + src[self.cell_at(cx - 1, cy)]
-                    + src[self.cell_at(cx, cy + 1)]
-                    + src[self.cell_at(cx, cy - 1)];
+                let sum = src[geom.cell_at(cx + 1, cy)]
+                    + src[geom.cell_at(cx - 1, cy)]
+                    + src[geom.cell_at(cx, cy + 1)]
+                    + src[geom.cell_at(cx, cy - 1)];
                 self.soil[c] = here + rate * (sum * 0.25 - here);
             }
         }
