@@ -218,6 +218,9 @@ pub fn save(world: &World) -> Vec<u8> {
     w.u64(world.seed);
     w.u64(world.tick);
     w.u32(world.next_id());
+    let (rng_state, rng_inc) = world.rng_bits();
+    w.u64(rng_state);
+    w.u64(rng_inc);
 
     w.u32(PARAMS.len() as u32);
     for i in 0..PARAMS.len() {
@@ -282,6 +285,8 @@ pub fn load(bytes: &[u8]) -> Result<World, SnapshotError> {
     let seed = r.u64()?;
     let tick = r.u64()?;
     let next_id = r.u32()?;
+    let rng_state = r.u64()?;
+    let rng_inc = r.u64()?;
 
     let param_count = r.u32()? as usize;
     if param_count != PARAMS.len() {
@@ -348,7 +353,7 @@ pub fn load(bytes: &[u8]) -> Result<World, SnapshotError> {
     world.plant_species = read_registry(&mut r)?;
     world.animal_species = read_registry(&mut r)?;
 
-    world.restore(tick, next_id);
+    world.restore(tick, next_id, rng_state, rng_inc);
     Ok(world)
 }
 

@@ -1,213 +1,215 @@
-//! The gate that says the simulation is actually alive.
+//! What must hold, and what merely happens.
 //!
-//! Unit tests can only show that the pipeline does what it was told. They pass
-//! happily on a world where everything starves by tick 500, which is exactly
-//! what the first working build did. These tests assert the properties that
-//! make the thing worth running at all: populations that persist, diversity
-//! that appears, and traits that move under selection.
+//! An earlier version of this file asserted that populations persist across
+//! seeds. That was a tuning target dressed as a test: it passed only because
+//! the model had been fitted until it did, and the props that made it pass
+//! (a floor under reproduction, founders forbidden a diet they might act on)
+//! were overriding selection to produce an outcome I had decided on in advance.
 //!
-//! They are slow by unit-test standards, and deliberately run several seeds:
-//! a single seed passing proves nothing about an ecology this nonlinear.
+//! Ecosystems collapse. Colonisation by a handful of random genotypes usually
+//! fails, and a model in which it never does is telling you about its author
+//! rather than about ecology. So the assertions here are confined to things
+//! that must be true *whatever* the outcome -- conservation laws, absence of
+//! numerical nonsense, selection actually operating -- and the outcomes
+//! themselves are measured and reported, not required.
 
 use borscht_core::genome::ag;
 use borscht_core::{Config, World};
 
-/// Small enough to run in seconds, large enough to have real ecology. Density
-/// is held constant by `for_population`, so behaviour matches the full scale.
 fn world(seed: u64) -> World {
     World::new(Config::for_population(30_000), seed)
 }
 
-struct Trace {
-    plant_min: usize,
-    plant_max: usize,
-    animal_min: usize,
-    animal_max: usize,
-    peak_animal_species: usize,
-    peak_plant_species: usize,
-    ever_carnivorous: f32,
-    matter_drift: f64,
-    biomass_min: f32,
-    biomass_max: f32,
-}
-
-fn run(seed: u64, ticks: u32) -> (World, Trace) {
-    let mut w = world(seed);
-    let initial_matter = w.total_matter();
-    let mut t = Trace {
-        plant_min: usize::MAX,
-        plant_max: 0,
-        animal_min: usize::MAX,
-        animal_max: 0,
-        peak_animal_species: 0,
-        peak_plant_species: 0,
-        ever_carnivorous: 0.0,
-        matter_drift: 0.0,
-        biomass_min: f32::MAX,
-        biomass_max: 0.0,
-    };
-    // Measure over the back half only: the founding transient is not the
-    // ecosystem, and judging stability through it would pass anything.
-    let settle = ticks / 2;
-    for tick in 0..ticks {
-        w.tick();
-        let drift = (w.total_matter() - initial_matter).abs() / initial_matter;
-        if drift > t.matter_drift {
-            t.matter_drift = drift;
-        }
-        if tick >= settle {
-            t.plant_min = t.plant_min.min(w.plants.len());
-            t.plant_max = t.plant_max.max(w.plants.len());
-            t.animal_min = t.animal_min.min(w.animals.len());
-            t.animal_max = t.animal_max.max(w.animals.len());
-            t.peak_animal_species = t.peak_animal_species.max(w.stats.animal_species as usize);
-            t.peak_plant_species = t.peak_plant_species.max(w.stats.plant_species as usize);
-            t.ever_carnivorous = t.ever_carnivorous.max(w.stats.carnivore_fraction);
-            t.biomass_min = t.biomass_min.min(w.stats.plant_biomass);
-            t.biomass_max = t.biomass_max.max(w.stats.plant_biomass);
-        }
-    }
-    (w, t)
-}
-
 const TICKS: u32 = 6_000;
 
-/// Neither kingdom may die out, and neither may run away.
-#[test]
-fn worlds_persist_across_seeds() {
-    for seed in [1u64, 2, 3] {
-        let (w, t) = run(seed, TICKS);
-        assert!(
-            t.plant_min > 500,
-            "seed {seed}: plants fell to {} -- the food web starved from the bottom",
-            t.plant_min
-        );
-        assert!(
-            t.animal_min > 50,
-            "seed {seed}: animals fell to {} -- no persistent population",
-            t.animal_min
-        );
-        // Plants filling their count cap is intended -- the world is meant to be
-        // carpeted in them, and the nutrient budget limits their biomass rather
-        // than their number. What would be wrong is a *static* stand, so the
-        // dynamics are checked on biomass, which grazing pressure moves.
-        assert!(
-            t.biomass_max > t.biomass_min * 1.02,
-            "seed {seed}: plant biomass never moved ({:.0}), so nothing is grazing",
-            t.biomass_min
-        );
-        assert!(
-            w.animals.len() < w.animals.capacity(),
-            "seed {seed}: animals pinned at the cap, so the cap is the ecology"
-        );
-        assert!(
-            t.animal_max > t.animal_min,
-            "seed {seed}: the animal population never changed at all"
-        );
-    }
+struct Outcome {
+    plants: usize,
+    animals: usize,
+    peak_animal_species: usize,
+    animals_extinct_at: Option<u32>,
+    max_matter_drift: f64,
+    plants_ever_capped: bool,
+    animals_ever_capped: bool,
 }
 
-/// Matter is conserved by construction, so any drift over a long run is a bug
-/// in a transfer path rather than an ecological outcome.
-#[test]
-fn matter_is_conserved_over_a_long_run() {
-    let (_, t) = run(4, TICKS);
-    assert!(
-        t.matter_drift < 1e-4,
-        "matter drifted by {:.3e} over {TICKS} ticks",
-        t.matter_drift
-    );
-}
-
-/// A single lineage filling the world is not evolution. The temperature
-/// gradient and predation between them should keep several species going.
-#[test]
-fn diversity_appears_and_persists() {
-    let mut best_animals = 0;
-    let mut best_plants = 0;
-    for seed in [1u64, 2, 3] {
-        let (_, t) = run(seed, TICKS);
-        best_animals = best_animals.max(t.peak_animal_species);
-        best_plants = best_plants.max(t.peak_plant_species);
-    }
-    assert!(
-        best_animals >= 3,
-        "only {best_animals} animal species ever coexisted"
-    );
-    assert!(
-        best_plants >= 3,
-        "only {best_plants} plant species ever coexisted"
-    );
-}
-
-/// Traits must move away from the founders, and in a direction selection can
-/// explain rather than pure drift.
-#[test]
-fn traits_evolve_away_from_the_founders() {
-    let mut w = world(7);
-    let founders = w.stats;
-    let founder_temp: Vec<f32> = (0..w.animals.len().min(500))
-        .map(|i| w.animals.gene(i, ag::TEMP_OPT) as f32)
-        .collect();
-    w.tick_many(TICKS);
-    assert!(w.animals.len() > 50, "nothing survived to measure");
-
-    let moved = (w.stats.mean_size - founders.mean_size).abs() / founders.mean_size.max(1e-3);
-    let speed = (w.stats.mean_max_speed - founders.mean_max_speed).abs();
-    let mutation = (w.stats.mean_mutation_rate - founders.mean_mutation_rate).abs();
-    assert!(
-        moved > 0.05 || speed > 0.05 || mutation > 0.005,
-        "no trait moved: size {} -> {}, speed {} -> {}, mutation {} -> {}",
-        founders.mean_size,
-        w.stats.mean_size,
-        founders.mean_max_speed,
-        w.stats.mean_max_speed,
-        founders.mean_mutation_rate,
-        w.stats.mean_mutation_rate
-    );
-
-    // The founding genomes are uniform random; a selected population should be
-    // narrower than that.
-    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
-    let spread = |v: &[f32]| {
-        let m = mean(v);
-        (v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / v.len().max(1) as f32).sqrt()
+fn run(seed: u64, ticks: u32) -> (World, Outcome) {
+    let mut w = world(seed);
+    let initial = w.total_matter();
+    let mut out = Outcome {
+        plants: 0,
+        animals: 0,
+        peak_animal_species: 0,
+        animals_extinct_at: None,
+        max_matter_drift: 0.0,
+        plants_ever_capped: false,
+        animals_ever_capped: false,
     };
-    let evolved: Vec<f32> = (0..w.animals.len().min(500))
-        .map(|i| w.animals.gene(i, ag::TEMP_OPT) as f32)
-        .collect();
-    assert!(
-        spread(&evolved) < spread(&founder_temp),
-        "temperature preference did not narrow under selection: {} -> {}",
-        spread(&founder_temp),
-        spread(&evolved)
-    );
+    for tick in 0..ticks {
+        w.tick();
+        let drift = (w.total_matter() - initial).abs() / initial;
+        out.max_matter_drift = out.max_matter_drift.max(drift);
+        out.peak_animal_species = out.peak_animal_species.max(w.stats.animal_species as usize);
+        if w.animals.is_empty() && out.animals_extinct_at.is_none() {
+            out.animals_extinct_at = Some(tick);
+        }
+        out.plants_ever_capped |= w.plants.len() >= w.plants.capacity();
+        out.animals_ever_capped |= w.animals.len() >= w.animals.capacity();
+    }
+    out.plants = w.plants.len();
+    out.animals = w.animals.len();
+    (w, out)
 }
 
-/// Predators have to be reachable by evolution from a herbivore start.
-///
-/// Ignored by default because it needs a long run to be fair -- carnivory only
-/// pays once there is a dense prey population, which takes thousands of ticks
-/// to build. Run with `cargo test --release -- --ignored`.
+/// Conservation is a law of the model, not an outcome of it. It has to hold in
+/// a thriving world and in a dead one alike.
 #[test]
-#[ignore = "slow: needs a long run for predators to establish"]
-fn carnivores_evolve_from_herbivore_founders() {
-    let mut with_predators = 0;
-    let seeds = [1u64, 2, 3, 4];
-    for seed in seeds {
-        let mut w = World::new(Config::for_population(60_000), seed);
-        assert_eq!(
-            w.stats.carnivore_fraction, 0.0,
-            "founders are supposed to be strict herbivores"
+fn matter_is_conserved_whatever_happens() {
+    for seed in [1u64, 2, 3] {
+        let (_, out) = run(seed, TICKS);
+        assert!(
+            out.max_matter_drift < 1e-4,
+            "seed {seed}: matter drifted by {:.3e}",
+            out.max_matter_drift
         );
-        w.tick_many(40_000);
-        if w.stats.carnivore_fraction > 0.005 {
-            with_predators += 1;
+    }
+}
+
+/// Whatever the populations do, the state must stay physically meaningful.
+#[test]
+fn state_stays_well_formed() {
+    for seed in [4u64, 5] {
+        let (w, _) = run(seed, TICKS);
+        for i in 0..w.animals.len() {
+            assert!(w.animals.x[i].is_finite() && w.animals.y[i].is_finite());
+            assert!((0.0..w.cfg.world_size).contains(&w.animals.x[i]));
+            assert!(w.animals.energy[i].is_finite() && w.animals.energy[i] > 0.0);
+            assert!(w.animals.reserve[i] >= 0.0 && w.animals.reserve[i].is_finite());
+        }
+        for i in 0..w.plants.len() {
+            assert!(w.plants.biomass[i] > 0.0 && w.plants.biomass[i].is_finite());
+        }
+        for &s in &w.grid.soil {
+            assert!(s >= -1e-3 && s.is_finite(), "soil went negative: {s}");
+        }
+        for value in w.stats.as_slice() {
+            assert!(value.is_finite(), "a statistic went non-finite");
         }
     }
+}
+
+/// A world whose animals die out must carry on being a world: the plants are
+/// still there, and the model must not divide by a population of zero.
+#[test]
+fn extinction_is_a_valid_state_not_a_crash() {
+    // Guarantee the collapse rather than waiting for a seed that produces one:
+    // an upkeep this punishing cannot be paid by anything.
+    let mut cfg = Config::for_population(20_000);
+    cfg.metabolism = 1.0;
+    cfg.temp_stress = 4.0;
+    let mut w = World::new(cfg, 1);
+    let initial = w.total_matter();
+
+    w.tick_many(3_000);
+    assert!(w.animals.is_empty(), "expected the animals to starve out");
+    assert!(!w.plants.is_empty(), "plants should outlive the animals");
+
+    // And it must keep running cleanly with nobody left.
+    w.tick_many(500);
+    assert_eq!(w.stats.animals, 0.0);
+    assert_eq!(w.stats.carnivore_fraction, 0.0);
     assert!(
-        with_predators >= seeds.len() / 2,
-        "predators evolved in only {with_predators} of {} worlds",
+        w.stats.mean_size.is_finite(),
+        "a mean over an empty pool went bad"
+    );
+    assert!((w.total_matter() - initial).abs() < initial * 1e-4);
+}
+
+/// Selection has to be doing something. This is about the *mechanism* working,
+/// not about the population surviving: a world whose animals die out is
+/// skipped rather than counted as a failure.
+#[test]
+fn selection_narrows_the_founding_variation() {
+    let spread = |v: &[f32]| {
+        let mean = v.iter().sum::<f32>() / v.len().max(1) as f32;
+        (v.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / v.len().max(1) as f32).sqrt()
+    };
+    let sample = |w: &World, gene: usize| -> Vec<f32> {
+        (0..w.animals.len().min(400))
+            .map(|i| w.animals.gene(i, gene) as f32)
+            .collect()
+    };
+
+    let mut tested = 0;
+    for seed in [1u64, 3, 4, 5] {
+        let mut w = world(seed);
+        let founding = sample(&w, ag::TEMP_OPT);
+        w.tick_many(TICKS);
+        if w.animals.len() < 100 {
+            continue; // nothing left to measure; not a failure of the model
+        }
+        tested += 1;
+        let evolved = sample(&w, ag::TEMP_OPT);
+        assert!(
+            spread(&evolved) < spread(&founding),
+            "seed {seed}: founding genotypes are uniform random, so a population \
+             under selection must be narrower than they were: {} -> {}",
+            spread(&founding),
+            spread(&evolved)
+        );
+    }
+    assert!(
+        tested > 0,
+        "every world died; cannot say whether selection works"
+    );
+}
+
+/// The population caps exist to bound memory. If they are what a run is
+/// actually pressing against, the cap is the ecology and the numbers mean
+/// nothing.
+#[test]
+fn animal_populations_are_limited_by_ecology_not_by_the_cap() {
+    for seed in [1u64, 3, 4] {
+        let (_, out) = run(seed, TICKS);
+        assert!(
+            !out.animals_ever_capped,
+            "seed {seed}: animals hit the hard cap, so the cap is setting the population"
+        );
+    }
+}
+
+/// Not an assertion, a measurement. Run with `--nocapture` to see what a set of
+/// worlds actually did, including the ones that failed.
+#[test]
+fn census_across_seeds() {
+    println!(
+        "\n{:>5}  {:>8}  {:>8}  {:>6}  {:>10}  {:>7}",
+        "seed", "plants", "animals", "spp", "extinct at", "capped"
+    );
+    let mut survived = 0;
+    let seeds = [1u64, 2, 3, 4, 5, 6];
+    for seed in seeds {
+        let (_, out) = run(seed, TICKS);
+        if out.animals > 0 {
+            survived += 1;
+        }
+        println!(
+            "{:>5}  {:>8}  {:>8}  {:>6}  {:>10}  {:>7}",
+            seed,
+            out.plants,
+            out.animals,
+            out.peak_animal_species,
+            out.animals_extinct_at
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".into()),
+            if out.plants_ever_capped {
+                "plants"
+            } else {
+                "-"
+            },
+        );
+    }
+    println!(
+        "\n{survived} of {} worlds still had animals after {TICKS} ticks.",
         seeds.len()
     );
 }

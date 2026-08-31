@@ -39,7 +39,8 @@ pub mod ag {
     /// Per-gene mutation probability. Evolvable, so mutation rate is itself
     /// under selection.
     pub const MUTATION_RATE: usize = 8;
-    /// Maximum age. Longer lives cost more upkeep.
+    /// Senescence timescale: the age over which the mortality hazard rises by
+    /// a factor of e. Slower ageing costs more upkeep.
     pub const LIFESPAN: usize = 9;
     /// Preferred temperature.
     pub const TEMP_OPT: usize = 10;
@@ -103,7 +104,7 @@ pub const ANIMAL_GENES: [GeneSpec; ANIMAL_GENE_COUNT] = [
     g("maturity", 20.0, 600.0, 0.4),
     g("offspring_invest", 0.15, 0.60, 0.5),
     g("mutation_rate", 0.0005, 0.1500, 0.2),
-    g("lifespan", 200.0, 4000.0, 0.4),
+    g("senescence", 120.0, 2600.0, 0.4),
     g("temp_opt", -1.0, 1.0, 1.2),
     g("temp_tolerance", 0.15, 1.50, 0.5),
     g("hue", 0.0, 1.0, 0.0),

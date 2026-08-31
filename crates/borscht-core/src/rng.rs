@@ -28,6 +28,25 @@ impl Rng {
         r
     }
 
+    /// The generator's full internal state, for snapshots.
+    ///
+    /// A saved world that omitted this would carry on down a different sequence
+    /// after loading, which makes a snapshot a lossy copy rather than a state
+    /// save.
+    pub fn to_bits(&self) -> (u64, u64) {
+        (self.state, self.inc)
+    }
+
+    pub fn from_bits(state: u64, inc: u64) -> Self {
+        // The increment must stay odd for the sequence to have full period; a
+        // corrupt or zeroed snapshot would otherwise degrade the generator
+        // silently.
+        Rng {
+            state,
+            inc: inc | 1,
+        }
+    }
+
     #[inline(always)]
     pub fn next_u32(&mut self) -> u32 {
         let old = self.state;
@@ -98,9 +117,8 @@ impl Rng {
     }
 }
 
-/// SplitMix64 finalizer. Used to derive well-separated stream ids from
-/// structured inputs like `(organism_id, tick)`, which would otherwise be
-/// highly correlated.
+/// SplitMix64 finalizer, for turning structured inputs into well-separated
+/// values.
 #[inline(always)]
 pub fn mix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -109,14 +127,22 @@ pub fn mix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// The RNG an organism uses on a given tick. Depends only on identity, time and
-/// the world seed, never on iteration order.
-#[inline(always)]
-pub fn stream_for(seed: u64, salt: u64, id: u64, tick: u64) -> Rng {
-    Rng::new(
-        seed,
-        mix64(id ^ mix64(tick.wrapping_mul(0x0100_0000_01B3) ^ salt)),
-    )
+/// Seed drawn from the operating system, for runs that are not meant to be
+/// repeatable.
+///
+/// Hashes the clock with the address of a fresh allocation, which picks up
+/// ASLR. Good enough to make two runs differ, which is all that is wanted.
+pub fn entropy_seed() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let probe = Box::new(0u8);
+    let address = Box::into_raw(probe) as u64;
+    // Reclaim the allocation made solely for its address.
+    unsafe { drop(Box::from_raw(address as *mut u8)) };
+    mix64(nanos ^ mix64(address))
 }
 
 #[cfg(test)]
@@ -199,11 +225,30 @@ mod tests {
     }
 
     #[test]
-    fn stream_for_decorrelates_neighbouring_ids() {
-        let a = stream_for(1, 0, 1000, 50).clone().next_u32();
-        let b = stream_for(1, 0, 1001, 50).clone().next_u32();
-        let c = stream_for(1, 0, 1000, 51).clone().next_u32();
-        assert_ne!(a, b);
-        assert_ne!(a, c);
+    fn state_round_trips_through_bits() {
+        let mut a = Rng::new(99, 3);
+        for _ in 0..37 {
+            a.next_u32();
+        }
+        let (state, inc) = a.to_bits();
+        let mut b = Rng::from_bits(state, inc);
+        let from_a: Vec<u32> = (0..16).map(|_| a.next_u32()).collect();
+        let from_b: Vec<u32> = (0..16).map(|_| b.next_u32()).collect();
+        assert_eq!(from_a, from_b);
+        // An even increment would halve the period; it must be repaired.
+        assert_eq!(Rng::from_bits(1, 0).to_bits().1 & 1, 1);
+    }
+
+    #[test]
+    fn entropy_seeds_differ_between_calls() {
+        let seeds: Vec<u64> = (0..8).map(|_| entropy_seed()).collect();
+        let mut unique = seeds.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            seeds.len(),
+            "entropy seeds repeated: {seeds:?}"
+        );
     }
 }

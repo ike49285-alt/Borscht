@@ -14,7 +14,7 @@ use crate::rng::Rng;
 
 pub const N_IN: usize = 14;
 pub const N_HID: usize = 10;
-pub const N_OUT: usize = 4;
+pub const N_OUT: usize = 3;
 
 const W1: usize = N_IN * N_HID;
 const W2: usize = N_HID * N_OUT;
@@ -56,9 +56,15 @@ pub mod output {
     pub const THRUST: usize = 1;
     /// Willingness to eat or attack whatever is in reach.
     pub const CONSUME: usize = 2;
-    /// Willingness to spend energy on a child.
-    pub const REPRODUCE: usize = 3;
 }
+
+// There is deliberately no reproduction output. Making breeding contingent on
+// a neural vote is not how organisms work -- reproduction is physiological,
+// triggered by condition, with life-history *genes* (maturity age, investment,
+// threshold) setting the strategy that selection acts on. A neural veto also
+// produces a pathology with no counterpart in biology: a lineage that is
+// perfectly fit in every other respect but never breeds, and so never produces
+// the offspring selection would need in order to remove it.
 
 /// Evaluate one brain.
 ///
@@ -137,8 +143,8 @@ mod tests {
 
     #[test]
     fn layout_is_the_documented_size() {
-        assert_eq!(BRAIN_LEN, 194);
-        assert_eq!(W1 + W2, 180);
+        assert_eq!(BRAIN_LEN, 3 * N_HID + N_IN * N_HID + N_HID + N_OUT);
+        assert_eq!(BRAIN_LEN, 183);
     }
 
     #[test]

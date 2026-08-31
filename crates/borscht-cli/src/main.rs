@@ -26,7 +26,8 @@ OPTIONS:
     --population N   total organisms; the world is scaled to hold them at
                      constant density (default 200000)
     --ticks N        ticks to simulate (default 2000)
-    --seed N         world seed (default 1)
+    --seed N         world seed (default: drawn from system entropy, so runs
+                     differ; pass one to repeat a particular run)
     --out DIR        write stats.csv and frames here (default: no output)
     --frames N       number of PNG frames to write, spread over the run
     --image-size N   frame edge in pixels (default: matched to the population,
@@ -42,6 +43,7 @@ OPTIONS:
 
 struct Args {
     command: String,
+    seed_given: bool,
     populations: Vec<u32>,
     ticks: u32,
     seed: u64,
@@ -59,6 +61,7 @@ fn parse_args() -> Args {
     let command = argv.next().unwrap_or_else(|| usage());
     let mut args = Args {
         command,
+        seed_given: false,
         populations: Vec::new(),
         ticks: 2000,
         seed: 1,
@@ -90,7 +93,10 @@ fn parse_args() -> Args {
                 }));
             }
             "--ticks" => args.ticks = value().parse().unwrap_or(2000),
-            "--seed" => args.seed = value().parse().unwrap_or(1),
+            "--seed" => {
+                args.seed = value().parse().unwrap_or(1);
+                args.seed_given = true;
+            }
             "--out" => args.out = Some(value()),
             "--frames" => args.frames = value().parse().unwrap_or(0),
             "--image-size" => args.image_size = value().parse().unwrap_or(1024),
@@ -152,7 +158,10 @@ fn build_config(population: u32, overrides: &[(String, f32)]) -> Config {
 }
 
 fn main() {
-    let args = parse_args();
+    let mut args = parse_args();
+    if !args.seed_given {
+        args.seed = borscht_core::rng::entropy_seed();
+    }
     match args.command.as_str() {
         "bench" => bench(&args),
         "run" => run(&args),
@@ -317,6 +326,9 @@ fn run(args: &Args) {
     let population = *args.populations.first().unwrap_or(&200_000);
     let cfg = build_config(population, &args.overrides);
     let mut world = World::new(cfg, args.seed);
+    if !args.quiet {
+        println!("seed {}", args.seed);
+    }
 
     let out = args.out.as_deref();
     if let Some(dir) = out {

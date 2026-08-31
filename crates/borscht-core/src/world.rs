@@ -23,20 +23,14 @@ use crate::brain::{self, input, output, BRAIN_LEN, N_IN};
 use crate::color;
 use crate::config::Config;
 use crate::env::Env;
-use crate::fastmath::{clamp, floor, gaussian, sin, sin_cos, TAU};
+use crate::fastmath::{self, clamp, floor, gaussian, sin, sin_cos, TAU};
 use crate::genome::{self, ag, pg, AnimalGenome, PlantGenome, ANIMAL_GENE_COUNT, PLANT_GENE_COUNT};
 use crate::grid::{wrap, Grid};
 use crate::pools::{AnimalPool, OrganismId, PlantPool};
-use crate::rng::{stream_for, Rng};
+use crate::rng::Rng;
 use crate::species::Registry;
 use crate::stats::Stats;
 
-// Independent RNG stream families. Without distinct salts, an organism's
-// movement draw and its reproduction draw would come from the same sequence and
-// correlate.
-const SALT_ANIMAL: u64 = 0xA417_0002;
-const SALT_PLANT_BIRTH: u64 = 0x5EED_B123;
-const SALT_ANIMAL_BIRTH: u64 = 0xA417_B123;
 const SALT_INIT: u64 = 0x1417_0F00;
 
 /// Mass *density* at which a sensory channel reads half full. Senses must
@@ -130,6 +124,16 @@ pub struct World {
     pub animal_species: Registry<ANIMAL_GENE_COUNT>,
     pub stats: Stats,
 
+    /// One stream for the whole world.
+    ///
+    /// Deliberately not a per-organism stream keyed on identity and tick. That
+    /// arrangement made the outcome independent of the order organisms were
+    /// updated in, which is a property real ecosystems do not have: whether you
+    /// or your neighbour reaches the last plant first is exactly the kind of
+    /// contingency that decides which lineage persists. Draws are taken in
+    /// update order, so ordering is a real source of variation rather than
+    /// something engineered away.
+    rng: Rng,
     next_id: OrganismId,
     plant_births: Vec<u32>,
     animal_births: Vec<u32>,
@@ -164,6 +168,7 @@ impl World {
             cfg,
             seed,
             tick: 0,
+            rng: Rng::new(seed, 0x9E37_79B9),
             next_id: 1,
             plant_births: Vec::new(),
             animal_births: Vec::new(),
@@ -183,6 +188,7 @@ impl World {
     pub fn reset(&mut self, seed: u64) {
         self.seed = seed;
         self.tick = 0;
+        self.rng = Rng::new(seed, 0x9E37_79B9);
         self.next_id = 1;
         self.plants.clear();
         self.animals.clear();
@@ -240,14 +246,6 @@ impl World {
             for slot in g.iter_mut() {
                 *slot = rng.below(256) as u8;
             }
-            // Founders are strict herbivores. The meat curve is concave, so even
-            // a nominally "mostly herbivorous" founder digests flesh well enough
-            // to make hunting worthwhile -- and with no established plant
-            // population to graze, the founding cohort simply eats itself. Runs
-            // seeded with any carnivory at all lost three quarters of their
-            // animals to cannibalism before the first birth. Predators evolve on
-            // their own once there is prey worth hunting.
-            g[ag::DIET] = 0;
             let mut b = vec![0i8; BRAIN_LEN];
             brain::randomize(&mut b, &mut rng);
             let hue = (l as f32 / lineages as f32 + 0.5) % 1.0;
@@ -344,6 +342,7 @@ impl World {
     fn update_plants(&mut self) {
         let World {
             cfg,
+            rng,
             grid,
             env,
             plants,
@@ -423,7 +422,8 @@ impl World {
                 plants.biomass[i] = biomass;
                 plants.age[i] = plants.age[i].saturating_add(1);
 
-                if biomass < cfg.plant_min_biomass || plants.age[i] as f32 >= cfg.plant_lifespan {
+                let senescent = fastmath::exp(plants.age[i] as f32 / cfg.plant_senescence);
+                if biomass < cfg.plant_min_biomass || rng.chance(cfg.plant_mortality * senescent) {
                     soil[cell] += biomass.max(0.0);
                     plants.biomass[i] = 0.0;
                     plants.alive[i] = false;
@@ -439,8 +439,8 @@ impl World {
     fn update_animals(&mut self) {
         let World {
             cfg,
-            seed,
             tick,
+            rng,
             grid,
             env,
             plants,
@@ -450,7 +450,6 @@ impl World {
             ..
         } = self;
         let cfg = *cfg;
-        let seed = *seed;
         let tick = *tick;
         let Grid {
             geom,
@@ -530,7 +529,6 @@ impl World {
                             * (1.0 + cfg.temp_stress * (1.0 - fit));
 
                         let id = animals.id[i];
-                        let mut rng = stream_for(seed, SALT_ANIMAL, id as u64, tick);
 
                         // Brains run on a stagger: each animal thinks on its own offset
                         // so the cost spreads evenly across ticks instead of spiking.
@@ -611,7 +609,6 @@ impl World {
                         let turn = animals.action_of(i, output::TURN);
                         let thrust = animals.action_of(i, output::THRUST);
                         let consume = animals.action_of(i, output::CONSUME);
-                        let reproduce = animals.action_of(i, output::REPRODUCE);
 
                         // Steering and movement, every tick regardless of thinking.
                         let mut heading = animals.heading[i] + turn * cfg.turn_rate;
@@ -760,24 +757,27 @@ impl World {
                         let age = animals.age[i].saturating_add(1);
                         animals.age[i] = age;
 
-                        // The brain votes on timing, it does not hold a veto: see
-                        // `repro_floor`.
-                        let drive = clamp(0.5 + 0.5 * reproduce, cfg.repro_floor, 1.0);
+                        // Reproduction is physiological, not a decision: an
+                        // animal that is mature, well fed and carrying enough
+                        // matter breeds. What evolves is the strategy -- when to
+                        // mature, how full to be first, how much to give a child
+                        // -- and those genes are under selection like any other.
                         if age as f32
                             >= tables.animal[ag::MATURITY][animals.gene(i, ag::MATURITY) as usize]
                             && energy
                                 >= capacity
                                     * tables.animal[ag::REPRO_THRESHOLD]
                                         [animals.gene(i, ag::REPRO_THRESHOLD) as usize]
-                            && rng.chance(drive)
                         {
                             animal_births.push(ai);
                         }
 
-                        if energy <= 0.0
-                            || age as f32 >= lifespan
-                            || rng.chance(cfg.background_mortality)
-                        {
+                        // Gompertz-Makeham: a constant hazard plus one that
+                        // rises exponentially with age. Nothing is immortal and
+                        // nothing dies precisely on a birthday.
+                        let hazard = cfg.mortality_makeham
+                            + cfg.mortality_gompertz * fastmath::exp(age as f32 / lifespan);
+                        if energy <= 0.0 || rng.chance(hazard) {
                             animals.alive[i] = false;
                             soil[cell] += mass + animals.reserve[i].max(0.0);
                             animals.reserve[i] = 0.0;
@@ -793,8 +793,8 @@ impl World {
     fn settle_plant_births(&mut self) {
         let World {
             cfg,
-            seed,
             tick,
+            rng,
             grid,
             plants,
             plant_births,
@@ -804,7 +804,7 @@ impl World {
             ..
         } = self;
         let cfg = *cfg;
-        let (seed, tick) = (*seed, *tick);
+        let tick = *tick;
         let tables = genome::tables();
         let world_size = grid.geom.world_size;
 
@@ -827,15 +827,14 @@ impl World {
             }
 
             let parent_genome: PlantGenome = plants.genome_of(i).try_into().unwrap();
-            let mut rng = stream_for(seed, SALT_PLANT_BIRTH, plants.id[i] as u64, tick);
-            let child = genome::mutate_plant(&parent_genome, cfg.plant_mutation_rate, &mut rng);
+            let child = genome::mutate_plant(&parent_genome, cfg.plant_mutation_rate, rng);
             let species = plant_species.classify(
                 plants.species[i],
                 &child,
                 cfg.species_threshold,
                 genome::plant_distance,
                 tick,
-                &mut rng,
+                rng,
             );
 
             let range = tables.plant[pg::SEED_RANGE][plants.gene(i, pg::SEED_RANGE) as usize];
@@ -861,8 +860,8 @@ impl World {
     fn settle_animal_births(&mut self) {
         let World {
             cfg,
-            seed,
             tick,
+            rng,
             grid,
             animals,
             animal_births,
@@ -873,7 +872,7 @@ impl World {
             ..
         } = self;
         let cfg = *cfg;
-        let (seed, tick) = (*seed, *tick);
+        let tick = *tick;
         let tables = genome::tables();
         let world_size = grid.geom.world_size;
 
@@ -889,8 +888,7 @@ impl World {
 
             let parent_genome: AnimalGenome = animals.genome_of(i).try_into().unwrap();
             let rate = tables.animal[ag::MUTATION_RATE][parent_genome[ag::MUTATION_RATE] as usize];
-            let mut rng = stream_for(seed, SALT_ANIMAL_BIRTH, animals.id[i] as u64, tick);
-            let child = genome::mutate_animal(&parent_genome, rate, &mut rng);
+            let child = genome::mutate_animal(&parent_genome, rate, rng);
 
             // A body is built out of matter, drawn from the soil where the
             // parent stands. This is a second, entirely local brake on runaway
@@ -914,7 +912,7 @@ impl World {
                 animals.brain_of(i),
                 scratch_brain,
                 clamp(rate * cfg.brain_mutation_scale, 0.0, 1.0),
-                &mut rng,
+                rng,
             );
             let species = animal_species.classify(
                 animals.species[i],
@@ -922,7 +920,7 @@ impl World {
                 cfg.species_threshold,
                 genome::animal_distance,
                 tick,
-                &mut rng,
+                rng,
             );
 
             let (sa, ca) = sin_cos(rng.range(0.0, TAU));
@@ -1067,15 +1065,22 @@ impl World {
         self.next_id
     }
 
+    /// The random generator's state, so a snapshot is a complete state save
+    /// rather than a lossy copy.
+    pub fn rng_bits(&self) -> (u64, u64) {
+        self.rng.to_bits()
+    }
+
     /// Finish a snapshot load: adopt the restored clock and id counter, then
     /// rebuild everything derived from the populations.
     ///
     /// The spatial index, the sensory fields and the statistics are all caches
     /// of the pools, so they are recomputed rather than stored -- a snapshot
     /// that carried a stale index would tick once into nonsense.
-    pub fn restore(&mut self, tick: u64, next_id: OrganismId) {
+    pub fn restore(&mut self, tick: u64, next_id: OrganismId, rng_state: u64, rng_inc: u64) {
         self.tick = tick;
         self.next_id = next_id;
+        self.rng = Rng::from_bits(rng_state, rng_inc);
         self.counters = TickCounters::default();
         self.env.update(&self.cfg, tick);
         self.rebuild_index();
@@ -1141,7 +1146,7 @@ impl World {
                 }
                 ColorMode::Age => {
                     let t = clamp(
-                        self.plants.age[i] as f32 / self.cfg.plant_lifespan,
+                        self.plants.age[i] as f32 / (self.cfg.plant_senescence * 2.0),
                         0.0,
                         1.0,
                     );

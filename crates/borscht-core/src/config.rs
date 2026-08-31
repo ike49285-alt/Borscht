@@ -142,8 +142,8 @@ config_params! {
     plant_maintenance: f32 = 0.0008, "plants", 0.0, 0.05;
     /// Biomass below which a plant dies.
     plant_min_biomass: f32 = 0.02, "plants", 0.0001, 1.0;
-    /// Maximum plant age in ticks.
-    plant_lifespan: f32 = 4_000.0, "plants", 50.0, 100_000.0;
+    /// Age at which a plant's mortality hazard has risen by a factor of e.
+    plant_senescence: f32 = 1_600.0, "plants", 50.0, 100_000.0;
     /// Growth cost paid for full chemical defence.
     toxicity_growth_cost: f32 = 0.45, "plants", 0.0, 1.0;
     /// Per-gene mutation probability for plants.
@@ -230,19 +230,21 @@ config_params! {
     /// Floor under attack and defence, so an animal with neither gene is still
     /// not literally powerless.
     combat_base: f32 = 0.30, "animals", 0.0, 2.0;
-    /// Smallest chance per eligible tick that an animal breeds, however hard
-    /// its brain votes against it.
+    /// Age-independent hazard: the Makeham term. Accidents, disease, bad luck.
     ///
-    /// Without a floor, reproduction is a hard veto held by an evolved output,
-    /// and a lineage whose net always votes no becomes sterile *and* immortal:
-    /// it cannot die out, and it produces no offspring for selection to work on,
-    /// so nothing can ever fix it. Such lineages quietly occupied several runs
-    /// at a few dozen individuals for thousands of ticks. A floor makes the
-    /// brain a modulator of timing rather than a veto on existing.
-    repro_floor: f32 = 0.15, "animals", 0.0, 1.0;
-    /// Chance per tick that an animal dies for reasons the model does not
-    /// represent. Stops immortal grazers from freezing the ecosystem.
-    background_mortality: f32 = 0.00004, "animals", 0.0, 0.01;
+    /// Together with senescence below this replaces a hard maximum age. A cutoff
+    /// makes every animal immortal right up to a birthday, which is not how
+    /// anything dies and which let lineages that never reproduced persist
+    /// indefinitely -- there was no way for selection to remove them, because
+    /// they produced no offspring to select on. A rising hazard means nothing is
+    /// immortal and a lineage that does not breed is gone within a few
+    /// lifetimes, which is what removes them honestly.
+    mortality_makeham: f32 = 0.00025, "animals", 0.0, 0.05;
+    /// Hazard at age zero for the age-dependent (Gompertz) term.
+    mortality_gompertz: f32 = 0.00008, "animals", 0.0, 0.05;
+    /// Chance per tick that a plant dies for reasons the model does not
+    /// represent: herbivores it never met, pathogens, trampling.
+    plant_mortality: f32 = 0.00020, "animals", 0.0, 0.05;
 
     // ---- speciation ----
     /// Genetic distance from a species' founding genome at which a lineage is

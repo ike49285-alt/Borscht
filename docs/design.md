@@ -75,18 +75,41 @@ Removal is swap-remove. Stable compaction copies every survivor after the first
 hole, which at a million organisms is a ~240 MB memcpy triggered by a single
 death near index zero.
 
-## Determinism
+## Contingency
 
-`borscht-core` has no dependencies. The RNG is a hand-rolled PCG32 whose bit
-stream is pinned by test, and each organism draws from a stream derived from its
-own id and the tick, so update order cannot affect the outcome.
+There is one RNG for the whole world, and draws are taken in update order.
 
-The float maths is hand-rolled for the same reason. `exp`, `ln`, `sin`, `cos`
-and `tanh` are built from `+ - * /`, comparisons and bit casts only — all
-exactly specified by IEEE 754 and implemented identically by x86 SSE and the
-wasm32 float instructions. Calling `f32::sin` would hand the result to a platform
-libm and quietly break the guarantee that a browser run and a CLI run are
-bit-identical. That guarantee is what makes snapshots portable between them.
+An earlier version gave every organism its own stream keyed on its identity and
+the tick, specifically so that the outcome did not depend on the order organisms
+were updated in. That is a tidy property and a wrong one. Whether you or your
+neighbour reaches the last plant first is not noise to be engineered away; it is
+the contingency that decides which lineage persists, and removing it removes
+something real. Seeds are an initial condition, not a replay, and runs default to
+a seed drawn from system entropy.
+
+Snapshots still carry the generator's state, because a save that omitted it
+would be a lossy copy rather than a state save.
+
+The float maths is still hand-rolled — `exp`, `ln`, `sin`, `cos` and `tanh` from
+`+ - * /`, comparisons and bit casts only — but for speed and to avoid libm's
+per-platform variation, not to promise reproducibility.
+
+## Death
+
+Mortality is Gompertz–Makeham: a constant age-independent hazard plus one that
+rises exponentially with age. There is no maximum age.
+
+A hard cutoff makes every animal immortal right up to a birthday, which is not
+how anything dies, and it had a specific pathology. Reproduction used to be
+gated on a neural output, so a lineage whose network always voted against
+breeding was sterile *and* immortal at once: it could not die out, and it
+produced no offspring for selection to act on, so nothing could remove it. Such
+lineages sat at a few dozen individuals for thousands of ticks.
+
+The fix for that is not a floor under reproduction — that is overriding
+selection to get an outcome. It is that reproduction is physiological, driven by
+condition with life-history genes setting the strategy, and that nothing is
+immortal.
 
 ## Ecology
 

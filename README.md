@@ -40,8 +40,18 @@ hard to move, whether to feed, and whether to breed. Gradients are rotated into
 the animal's own frame of reference, so a brain learns "food is ahead" rather
 than having to rediscover steering separately for every compass direction.
 
-Founding animals are strict herbivores. Predators are not seeded — they evolve,
-and they usually take several thousand ticks to appear.
+Founders are drawn at random and get no help. Their diets are whatever they are,
+which means a founding cohort can and does eat itself; they begin with no store
+of matter and have to eat before they can build anything. Reproduction is
+physiological rather than a decision — an animal that is mature, fed and
+carrying enough matter breeds — because a neural veto on breeding is not how
+organisms work, and it produces a lineage that is fit in every other respect but
+never reproduces, and so never produces the offspring selection would need to
+remove it.
+
+Nothing dies on a birthday either. Mortality is Gompertz–Makeham: a constant
+hazard plus one rising exponentially with age. Nothing is immortal, so a lineage
+that fails is gone within a few lifetimes.
 
 ## Matter is conserved, energy is not
 
@@ -70,12 +80,18 @@ web/                    the viewer: worker, WebGL2 renderer, UI
 tools/                  build script, benchmarks, browser check
 ```
 
-`borscht-core` has no dependencies at all. Determinism matters more here than
-convenience, so the RNG is a hand-rolled PCG32 with its bit stream pinned by
-test, and `exp`, `ln`, `sin`, `cos` and `tanh` are built from IEEE-exact
-primitives rather than handed to a platform libm. A run in the browser and a run
-from the CLI produce bit-identical results, which is what makes snapshots
-portable between them.
+`borscht-core` has no dependencies at all. The RNG is a hand-rolled PCG32 and
+`exp`, `ln`, `sin`, `cos` and `tanh` are built from IEEE-exact primitives rather
+than handed to a platform libm — they are faster than libm here and avoid its
+per-platform variation, but reproducibility is not promised.
+
+There is one RNG for the whole world and draws are taken in update order, so
+**who reaches the last plant first depends on iteration order**. That is
+deliberate. An earlier version gave each organism its own stream keyed on its id
+and the tick, which made outcomes independent of update order — a property no
+real ecosystem has, and one that quietly removes exactly the contingency that
+decides which lineage persists. Seeds are an initial condition, not a replay:
+runs default to a seed drawn from system entropy.
 
 The browser build uses no wasm-bindgen and no wasm-pack. Everything crossing the
 boundary is a number or a pointer into linear memory, so the whole binding is
@@ -129,19 +145,24 @@ integrates every tick.
 ## Tests
 
 ```
-cargo test                                        # 138 tests
-cargo test --release --test ecology               # the ecology gate
-cargo test --release --test ecology -- --ignored  # predator emergence (slow)
-node tools/bench-wasm.mjs                         # wasm throughput
-node tools/check-web.mjs                          # drives the real page
+cargo test                                        # unit tests
+cargo test --release --test ecology -- --nocapture # invariants, and a census
+node tools/bench-wasm.mjs                          # wasm throughput
+node tools/check-web.mjs                           # drives the real page
 ```
 
-The unit tests check the machinery. The ecology gate checks the thing that
-actually matters: across several seeds, both kingdoms persist, several species
-coexist, plant biomass moves under grazing, matter is conserved, and traits
-drift away from the founders in directions selection explains. A build can pass
-every unit test and still produce a world where everything starves by tick 500 —
-the first working one did.
+The unit tests check the machinery. The ecology gate checks what must be true
+*whatever happens*: matter is conserved in a thriving world and a dead one
+alike, state stays physically meaningful, selection narrows the founding
+variation, and populations are limited by ecology rather than by the memory cap.
+
+It deliberately does **not** assert that populations survive. An earlier version
+did, and that assertion was a tuning target dressed as a test — it passed only
+because the model had been fitted until it did. Ecosystems collapse;
+colonisation by a handful of random genotypes usually fails, and a model in
+which it never does is describing its author rather than ecology. Outcomes are
+measured and printed by `census_across_seeds`, not required. As of writing, five
+of six worlds still have animals after 6,000 ticks and one does not.
 
 `tools/check-web.mjs` drives the real page in headless Chromium and decodes the
 screenshot to confirm organisms were actually drawn.

@@ -480,7 +480,7 @@ mod tests {
         let mut a = AnimalPool::new(2);
         let brain = vec![0i8; BRAIN_LEN];
         a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0, 0.0);
-        let actions = [1.0f32, -1.0, 0.5, -0.25];
+        let actions = [1.0f32, -1.0, 0.5];
         a.set_actions(0, &actions);
         for (i, want) in actions.iter().enumerate() {
             assert!((a.action_of(0, i) - want).abs() < 0.01, "action {i}");
@@ -492,7 +492,7 @@ mod tests {
         let mut a = AnimalPool::new(1);
         let brain = vec![0i8; BRAIN_LEN];
         a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0, 0.0);
-        a.set_actions(0, &[100.0, -100.0, 0.0, 0.0]);
+        a.set_actions(0, &[100.0, -100.0, 0.0]);
         assert!((a.action_of(0, 0) - 1.0).abs() < 0.01);
         assert!((a.action_of(0, 1) + 1.0).abs() < 0.01);
     }
@@ -502,7 +502,7 @@ mod tests {
         let mut a = AnimalPool::new(2);
         let brain = vec![0i8; BRAIN_LEN];
         a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0, 0.0);
-        a.set_actions(0, &[1.0, 1.0, 1.0, 1.0]);
+        a.set_actions(0, &[1.0; ACTION_COUNT]);
         a.alive[0] = false;
         a.compact();
         // The slot is reused by the next push; stale actions must not leak.
