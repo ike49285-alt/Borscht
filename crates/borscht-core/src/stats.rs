@@ -61,10 +61,14 @@ stats_fields! {
     total_matter,
     /// Total metabolic energy held by animals.
     animal_energy,
-    /// Births this tick, both kingdoms.
-    births,
-    /// Deaths this tick, both kingdoms.
-    deaths,
+    /// Seeds set this tick.
+    plant_births,
+    /// Plants lost this tick.
+    plant_deaths,
+    /// Animals born this tick.
+    animal_births,
+    /// Animals lost this tick, predation included.
+    animal_deaths,
     /// Successful predation events this tick.
     kills,
     /// Seeds and offspring that failed for want of space or matter.

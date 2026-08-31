@@ -175,6 +175,16 @@ impl<const N: usize> Registry<N> {
         }
     }
 
+    /// Replace the free list, for snapshot loading.
+    ///
+    /// The list is derived from the records rather than stored, so a snapshot
+    /// can never contain one that disagrees with them and hands out a slot that
+    /// living organisms still point at.
+    pub fn set_free_list(&mut self, free: Vec<u16>) {
+        debug_assert!(free.iter().all(|&id| !self.records[id as usize].alive));
+        self.free = free;
+    }
+
     pub fn live_count(&self) -> usize {
         self.records.iter().filter(|r| r.alive).count()
     }

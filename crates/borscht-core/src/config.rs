@@ -157,8 +157,14 @@ config_params! {
     think_interval: u32 = 4, "animals", 1.0, 32.0;
     /// Energy stored per unit of body size at full reserves.
     energy_per_size: f32 = 22.0, "animals", 1.0, 200.0;
-    /// Body matter drawn from the soil per unit of body size.
+    /// Body matter per unit of body size.
     mass_per_size: f32 = 0.30, "animals", 0.01, 5.0;
+    /// Fraction of ingested matter an animal keeps for building offspring. The
+    /// rest is excreted straight back to the soil.
+    matter_retention: f32 = 0.55, "animals", 0.0, 1.0;
+    /// How much matter an animal can hold, as a multiple of its own body mass.
+    /// Bounded so a long-lived grazer cannot hoard the world's nutrient budget.
+    reserve_capacity: f32 = 4.0, "animals", 0.1, 50.0;
     /// Baseline upkeep, multiplied by `size^0.75`.
     metabolism: f32 = 0.040, "animals", 0.0, 1.0;
     /// Upkeep surcharge for a fully developed sensory system.
@@ -200,7 +206,7 @@ config_params! {
     /// plants an effective refuge and damps the oscillation.
     graze_half: f32 = 0.35, "animals", 0.001, 20.0;
     /// Energy released per unit of biomass digested.
-    energy_per_biomass: f32 = 5.5, "animals", 0.1, 50.0;
+    energy_per_biomass: f32 = 7.0, "animals", 0.1, 50.0;
     /// How much of a plant's toxicity blocks energy extraction.
     toxicity_defence: f32 = 0.85, "animals", 0.0, 1.0;
     /// How much better a dietary specialist digests its own food than an
@@ -208,9 +214,9 @@ config_params! {
     /// carnivory and can make predators unreachable by evolution.
     diet_specialism: f32 = 0.20, "animals", 0.0, 1.0;
     /// Fraction of a killed animal's energy the predator absorbs.
-    predation_efficiency: f32 = 0.62, "animals", 0.0, 1.0;
+    predation_efficiency: f32 = 0.85, "animals", 0.0, 1.0;
     /// Energy spent on a failed attack, per unit of size.
-    attack_cost: f32 = 0.35, "animals", 0.0, 5.0;
+    attack_cost: f32 = 0.22, "animals", 0.0, 5.0;
     /// Turn applied per tick at full rudder, in radians.
     turn_rate: f32 = 0.42, "animals", 0.0, 3.2;
     /// Fraction of velocity retained each tick.
@@ -224,6 +230,16 @@ config_params! {
     /// Floor under attack and defence, so an animal with neither gene is still
     /// not literally powerless.
     combat_base: f32 = 0.30, "animals", 0.0, 2.0;
+    /// Smallest chance per eligible tick that an animal breeds, however hard
+    /// its brain votes against it.
+    ///
+    /// Without a floor, reproduction is a hard veto held by an evolved output,
+    /// and a lineage whose net always votes no becomes sterile *and* immortal:
+    /// it cannot die out, and it produces no offspring for selection to work on,
+    /// so nothing can ever fix it. Such lineages quietly occupied several runs
+    /// at a few dozen individuals for thousands of ticks. A floor makes the
+    /// brain a modulator of timing rather than a veto on existing.
+    repro_floor: f32 = 0.15, "animals", 0.0, 1.0;
     /// Chance per tick that an animal dies for reasons the model does not
     /// represent. Stops immortal grazers from freezing the ecosystem.
     background_mortality: f32 = 0.00004, "animals", 0.0, 0.01;

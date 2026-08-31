@@ -146,6 +146,15 @@ impl PlantPool {
     pub fn clear(&mut self) {
         self.len = 0;
     }
+
+    /// Declare `n` occupied slots without initialising them.
+    ///
+    /// For snapshot loading, which fills every parallel array itself. The
+    /// caller is responsible for writing all of them, `alive` included.
+    pub fn set_len(&mut self, n: usize) {
+        assert!(n <= self.capacity, "length exceeds capacity");
+        self.len = n;
+    }
 }
 
 pub struct AnimalPool {
@@ -157,6 +166,16 @@ pub struct AnimalPool {
     pub heading: Vec<f32>,
     pub speed: Vec<f32>,
     pub energy: Vec<f32>,
+    /// Ingested matter held for building offspring.
+    ///
+    /// An animal builds its young out of what it has eaten, not out of the soil
+    /// it happens to be standing on. Drawing from the soil sounds equivalent
+    /// under a closed budget but is not: plants sit at their nutrient-limited
+    /// equilibrium and hold nearly all the matter, so soil stays pinned near
+    /// zero and births fail no matter how well fed the animal is. That is an
+    /// Allee trap -- fewer animals liberate less matter, which permits still
+    /// fewer animals -- and it collapsed a third of all runs.
+    pub reserve: Vec<f32>,
     pub age: Vec<u16>,
     pub species: Vec<u16>,
     pub id: Vec<OrganismId>,
@@ -178,6 +197,7 @@ impl AnimalPool {
             heading: vec![0.0; capacity],
             speed: vec![0.0; capacity],
             energy: vec![0.0; capacity],
+            reserve: vec![0.0; capacity],
             age: vec![0; capacity],
             species: vec![0; capacity],
             id: vec![0; capacity],
@@ -248,6 +268,7 @@ impl AnimalPool {
         brain: &[i8],
         species: u16,
         id: OrganismId,
+        reserve: f32,
     ) -> bool {
         if self.len >= self.capacity {
             return false;
@@ -259,6 +280,7 @@ impl AnimalPool {
         self.heading[i] = heading;
         self.speed[i] = 0.0;
         self.energy[i] = energy;
+        self.reserve[i] = reserve;
         self.age[i] = 0;
         self.species[i] = species;
         self.id[i] = id;
@@ -278,6 +300,7 @@ impl AnimalPool {
         self.heading[to] = self.heading[from];
         self.speed[to] = self.speed[from];
         self.energy[to] = self.energy[from];
+        self.reserve[to] = self.reserve[from];
         self.age[to] = self.age[from];
         self.species[to] = self.species[from];
         self.id[to] = self.id[from];
@@ -313,6 +336,15 @@ impl AnimalPool {
 
     pub fn clear(&mut self) {
         self.len = 0;
+    }
+
+    /// Declare `n` occupied slots without initialising them.
+    ///
+    /// For snapshot loading, which fills every parallel array itself. The
+    /// caller is responsible for writing all of them, `alive` included.
+    pub fn set_len(&mut self, n: usize) {
+        assert!(n <= self.capacity, "length exceeds capacity");
+        self.len = n;
     }
 }
 
@@ -417,7 +449,7 @@ mod tests {
         for i in 0..20u32 {
             let mut b = vec![0i8; BRAIN_LEN];
             crate::brain::randomize(&mut b, &mut rng);
-            a.push(0.0, 0.0, 0.0, 10.0, &animal_genome(i as u8), &b, 0, i);
+            a.push(0.0, 0.0, 0.0, 10.0, &animal_genome(i as u8), &b, 0, i, 0.0);
             brains.push(b);
         }
         for i in (0..20).step_by(2) {
@@ -436,7 +468,7 @@ mod tests {
     fn actions_round_trip_through_quantisation() {
         let mut a = AnimalPool::new(2);
         let brain = vec![0i8; BRAIN_LEN];
-        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0);
+        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0, 0.0);
         let actions = [1.0f32, -1.0, 0.5, -0.25];
         a.set_actions(0, &actions);
         for (i, want) in actions.iter().enumerate() {
@@ -448,7 +480,7 @@ mod tests {
     fn actions_clamp_rather_than_wrap() {
         let mut a = AnimalPool::new(1);
         let brain = vec![0i8; BRAIN_LEN];
-        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0);
+        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0, 0.0);
         a.set_actions(0, &[100.0, -100.0, 0.0, 0.0]);
         assert!((a.action_of(0, 0) - 1.0).abs() < 0.01);
         assert!((a.action_of(0, 1) + 1.0).abs() < 0.01);
@@ -458,12 +490,12 @@ mod tests {
     fn new_animals_start_with_no_cached_action() {
         let mut a = AnimalPool::new(2);
         let brain = vec![0i8; BRAIN_LEN];
-        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0);
+        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0, 0.0);
         a.set_actions(0, &[1.0, 1.0, 1.0, 1.0]);
         a.alive[0] = false;
         a.compact();
         // The slot is reused by the next push; stale actions must not leak.
-        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(1), &brain, 0, 1);
+        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(1), &brain, 0, 1, 0.0);
         for i in 0..ACTION_COUNT {
             assert_eq!(a.action_of(0, i), 0.0, "stale action leaked into a newborn");
         }
@@ -473,7 +505,7 @@ mod tests {
     fn clear_resets_length_only() {
         let mut a = AnimalPool::new(4);
         let brain = vec![0i8; BRAIN_LEN];
-        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0);
+        a.push(0.0, 0.0, 0.0, 1.0, &animal_genome(0), &brain, 0, 0, 0.0);
         a.clear();
         assert!(a.is_empty());
         assert_eq!(a.capacity(), 4);

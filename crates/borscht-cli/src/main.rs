@@ -302,7 +302,7 @@ fn run(args: &Args) {
     if !args.quiet {
         println!(
             "{:>8}  {:>9}  {:>8}  {:>7}  {:>7}  {:>7}  {:>6}  {:>6}  {:>7}",
-            "tick", "plants", "animals", "spp", "biomass", "soil", "diet", "size", "carn%"
+            "tick", "plants", "animals", "spp", "a.born", "a.died", "soil", "diet", "carn%"
         );
     }
 
@@ -331,15 +331,15 @@ fn run(args: &Args) {
 
         if !args.quiet && (tick % report_every == 0 || tick == args.ticks - 1) {
             println!(
-                "{:>8}  {:>9.0}  {:>8.0}  {:>7.0}  {:>7.0}  {:>7.0}  {:>6.2}  {:>6.2}  {:>6.1}%",
+                "{:>8}  {:>9.0}  {:>8.0}  {:>7.0}  {:>7.0}  {:>7.0}  {:>7.0}  {:>6.2}  {:>6.1}%",
                 s.tick,
                 s.plants,
                 s.animals,
                 s.animal_species,
-                s.plant_biomass,
+                s.animal_births,
+                s.animal_deaths,
                 s.soil,
                 s.mean_diet,
-                s.mean_size,
                 s.carnivore_fraction * 100.0
             );
         }

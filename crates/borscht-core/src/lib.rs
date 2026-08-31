@@ -7,6 +7,7 @@ pub mod genome;
 pub mod grid;
 pub mod pools;
 pub mod rng;
+pub mod snapshot;
 pub mod species;
 pub mod stats;
 pub mod world;

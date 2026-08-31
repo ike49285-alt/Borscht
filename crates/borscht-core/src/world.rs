@@ -105,10 +105,17 @@ struct Accum {
     plant_growth: f64,
 }
 
+/// Per-tick event counts, split by kingdom.
+///
+/// Kept separate rather than summed: a shared total hides which population is
+/// actually turning over, and a plant boom can mask an animal collapse
+/// completely.
 #[derive(Default, Clone, Copy)]
 struct TickCounters {
-    births: u32,
-    deaths: u32,
+    plant_births: u32,
+    plant_deaths: u32,
+    animal_births: u32,
+    animal_deaths: u32,
     kills: u32,
     failed_births: u32,
 }
@@ -225,11 +232,14 @@ impl World {
             for slot in g.iter_mut() {
                 *slot = rng.below(256) as u8;
             }
-            // Founders start mostly herbivorous. Seeding a world with carnivores
-            // before there is anything to eat just kills the run in the first
-            // few hundred ticks; predators evolve on their own once there is
-            // prey worth hunting.
-            g[ag::DIET] = rng.below(70) as u8;
+            // Founders are strict herbivores. The meat curve is concave, so even
+            // a nominally "mostly herbivorous" founder digests flesh well enough
+            // to make hunting worthwhile -- and with no established plant
+            // population to graze, the founding cohort simply eats itself. Runs
+            // seeded with any carnivory at all lost three quarters of their
+            // animals to cannibalism before the first birth. Predators evolve on
+            // their own once there is prey worth hunting.
+            g[ag::DIET] = 0;
             let mut b = vec![0i8; BRAIN_LEN];
             brain::randomize(&mut b, &mut rng);
             let hue = (l as f32 / lineages as f32 + 0.5) % 1.0;
@@ -246,9 +256,16 @@ impl World {
             let energy = cfg.energy_per_size * size * store * cfg.founder_energy;
             let id = self.alloc_id();
             let (g, b, sp) = (*g, b.clone(), *sp);
-            if !self.animals.push(x, y, heading, energy, &g, &b, sp, id) {
+            let reserve = cfg.mass_per_size * size * cfg.reserve_capacity;
+            if !self.animals.push(x, y, heading, energy, &g, &b, sp, id, reserve) {
                 break;
             }
+            // Spread founders across their lifespans. A cohort born all at once
+            // cannot reproduce at all until the maturity age passes -- several
+            // hundred ticks during which the population can only shrink.
+            let slot = self.animals.len() - 1;
+            let maturity = genome::animal_trait(&g, ag::MATURITY);
+            self.animals.age[slot] = rng.range(0.0, maturity * 1.5) as u16;
         }
 
         self.env.update(&self.cfg, 0);
@@ -393,7 +410,7 @@ impl World {
                     soil[cell] += biomass.max(0.0);
                     plants.biomass[i] = 0.0;
                     plants.alive[i] = false;
-                    counters.deaths += 1;
+                    counters.plant_deaths += 1;
                 } else if biomass >= max_size * 0.9 {
                     plant_births.push(pi);
                 }
@@ -473,6 +490,7 @@ impl World {
                 let size = tables.animal[ag::SIZE][b_size];
                 let mass = cfg.mass_per_size * size;
                 let capacity = cfg.energy_per_size * size * tables.animal[ag::ENERGY_STORE][b_store];
+                let reserve_cap = mass * cfg.reserve_capacity;
                 let lifespan = tables.animal[ag::LIFESPAN][b_life];
                 let diet = tables.animal[ag::DIET][animals.gene(i, ag::DIET) as usize];
                 let temp_opt = tables.animal[ag::TEMP_OPT][animals.gene(i, ag::TEMP_OPT) as usize];
@@ -624,8 +642,13 @@ impl World {
                                     + prey_mass_v * cfg.energy_per_biomass;
                                 energy += payload * digest_meat * cfg.predation_efficiency;
                                 animals.alive[pick] = false;
-                                soil[abuckets.cell_of[pick] as usize] += prey_mass_v;
-                                counters.deaths += 1;
+                                let carcass = prey_mass_v + animals.reserve[pick].max(0.0);
+                                animals.reserve[pick] = 0.0;
+                                let room = (reserve_cap - animals.reserve[i]).max(0.0);
+                                let kept = (carcass * cfg.matter_retention).min(room);
+                                animals.reserve[i] += kept;
+                                soil[abuckets.cell_of[pick] as usize] += carcass - kept;
+                                counters.animal_deaths += 1;
                                 counters.kills += 1;
                             } else {
                                 energy -= cfg.attack_cost * size;
@@ -663,11 +686,14 @@ impl World {
                                     (cfg.graze_rate * size * consume * response).min(edible);
                                 if take > 0.0 {
                                     plants.biomass[pick] -= take;
-                                    // The matter is excreted, not stored: the
-                                    // animal keeps the energy, the soil keeps
-                                    // the mass. It returns to the plant's cell,
-                                    // which is inside this block either way.
-                                    soil[forage_cell] += take;
+                                    // Matter splits: some is built into the body
+                                    // and its future offspring, the rest is
+                                    // excreted to the plant's cell, which is
+                                    // inside this block either way.
+                                    let room = (reserve_cap - animals.reserve[i]).max(0.0);
+                                    let kept = (take * cfg.matter_retention).min(room);
+                                    animals.reserve[i] += kept;
+                                    soil[forage_cell] += take - kept;
                                     let tox = tables.plant[pg::TOXICITY]
                                         [plants.gene(pick, pg::TOXICITY) as usize];
                                     energy += take
@@ -678,7 +704,7 @@ impl World {
                                         soil[forage_cell] += plants.biomass[pick].max(0.0);
                                         plants.biomass[pick] = 0.0;
                                         plants.alive[pick] = false;
-                                        counters.deaths += 1;
+                                        counters.plant_deaths += 1;
                                     }
                                 }
                             }
@@ -693,13 +719,16 @@ impl World {
                 let age = animals.age[i].saturating_add(1);
                 animals.age[i] = age;
 
-                if reproduce > 0.0
-                    && age as f32
-                        >= tables.animal[ag::MATURITY][animals.gene(i, ag::MATURITY) as usize]
+                // The brain votes on timing, it does not hold a veto: see
+                // `repro_floor`.
+                let drive = clamp(0.5 + 0.5 * reproduce, cfg.repro_floor, 1.0);
+                if age as f32
+                    >= tables.animal[ag::MATURITY][animals.gene(i, ag::MATURITY) as usize]
                     && energy
                         >= capacity
                             * tables.animal[ag::REPRO_THRESHOLD]
                                 [animals.gene(i, ag::REPRO_THRESHOLD) as usize]
+                    && rng.chance(drive)
                 {
                     animal_births.push(ai);
                 }
@@ -709,8 +738,9 @@ impl World {
                     || rng.chance(cfg.background_mortality)
                 {
                     animals.alive[i] = false;
-                    soil[cell] += mass;
-                    counters.deaths += 1;
+                    soil[cell] += mass + animals.reserve[i].max(0.0);
+                    animals.reserve[i] = 0.0;
+                    counters.animal_deaths += 1;
                 }
             }
         }
@@ -779,7 +809,7 @@ impl World {
             *next_id = next_id.wrapping_add(1);
             if plants.push(x, y, seed_mass, &child, species, id) {
                 plants.biomass[i] = biomass - seed_mass;
-                counters.births += 1;
+                counters.plant_births += 1;
             } else {
                 counters.failed_births += 1;
             }
@@ -805,8 +835,6 @@ impl World {
         let (seed, tick) = (*seed, *tick);
         let tables = genome::tables();
         let world_size = grid.geom.world_size;
-        let soil = &mut grid.soil;
-        let cell_of = &grid.animals.cell_of;
 
         for idx in 0..animal_births.len() {
             let i = animal_births[idx] as usize;
@@ -828,8 +856,7 @@ impl World {
             // population: a stripped patch cannot support births at all.
             let child_size = tables.animal[ag::SIZE][child[ag::SIZE] as usize];
             let child_mass = cfg.mass_per_size * child_size;
-            let cell = cell_of[i] as usize;
-            if soil[cell] < child_mass {
+            if animals.reserve[i] < child_mass {
                 counters.failed_births += 1;
                 continue;
             }
@@ -864,10 +891,10 @@ impl World {
             let id = *next_id;
             *next_id = next_id.wrapping_add(1);
 
-            if animals.push(x, y, rng.range(0.0, TAU), dowry, &child, scratch_brain, species, id) {
-                soil[cell] -= child_mass;
+            if animals.push(x, y, rng.range(0.0, TAU), dowry, &child, scratch_brain, species, id, 0.0) {
+                animals.reserve[i] -= child_mass;
                 animals.energy[i] -= dowry;
-                counters.births += 1;
+                counters.animal_births += 1;
             } else {
                 counters.failed_births += 1;
             }
@@ -896,7 +923,7 @@ impl World {
             let size = tables.animal[ag::SIZE][self.animals.gene(i, ag::SIZE) as usize];
             let diet = tables.animal[ag::DIET][self.animals.gene(i, ag::DIET) as usize];
             accum.size += size as f64;
-            accum.animal_mass += (self.cfg.mass_per_size * size) as f64;
+            accum.animal_mass += (self.cfg.mass_per_size * size + self.animals.reserve[i]) as f64;
             accum.animal_energy += self.animals.energy[i] as f64;
             accum.diet += diet as f64;
             if diet > 0.5 {
@@ -942,8 +969,10 @@ impl World {
             soil: soil as f32,
             total_matter: (soil + a.plant_biomass + a.animal_mass) as f32,
             animal_energy: a.animal_energy as f32,
-            births: self.counters.births as f32,
-            deaths: self.counters.deaths as f32,
+            plant_births: self.counters.plant_births as f32,
+            plant_deaths: self.counters.plant_deaths as f32,
+            animal_births: self.counters.animal_births as f32,
+            animal_deaths: self.counters.animal_deaths as f32,
             kills: self.counters.kills as f32,
             failed_births: self.counters.failed_births as f32,
             mean_size: (a.size / adiv) as f32,
@@ -975,9 +1004,30 @@ impl World {
         }
         for i in 0..self.animals.len() {
             let size = tables.animal[ag::SIZE][self.animals.gene(i, ag::SIZE) as usize];
-            total += (self.cfg.mass_per_size * size) as f64;
+            total += (self.cfg.mass_per_size * size + self.animals.reserve[i]) as f64;
         }
         total
+    }
+
+    /// The id the next organism will receive.
+    pub fn next_id(&self) -> OrganismId {
+        self.next_id
+    }
+
+    /// Finish a snapshot load: adopt the restored clock and id counter, then
+    /// rebuild everything derived from the populations.
+    ///
+    /// The spatial index, the sensory fields and the statistics are all caches
+    /// of the pools, so they are recomputed rather than stored -- a snapshot
+    /// that carried a stale index would tick once into nonsense.
+    pub fn restore(&mut self, tick: u64, next_id: OrganismId) {
+        self.tick = tick;
+        self.next_id = next_id;
+        self.counters = TickCounters::default();
+        self.env.update(&self.cfg, tick);
+        self.rebuild_index();
+        self.census();
+        self.collect_stats();
     }
 
     pub fn population(&self) -> usize {
@@ -1285,8 +1335,8 @@ mod tests {
         let mut deaths = 0.0;
         for _ in 0..400 {
             w.tick();
-            births += w.stats.births;
-            deaths += w.stats.deaths;
+            births += w.stats.animal_births + w.stats.plant_births;
+            deaths += w.stats.animal_deaths + w.stats.plant_deaths;
         }
         assert!(births > 0.0, "nothing ever reproduced");
         assert!(deaths > 0.0, "nothing ever died");
