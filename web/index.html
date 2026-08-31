@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Borscht — evolution simulator</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🌿</text></svg>">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #06080e;
+    --panel: #10141d;
+    --panel-2: #161b26;
+    --line: #232a38;
+    --ink: #e6ebf5;
+    --muted: #8b97ad;
+    --accent: #5fd3a0;
+    --warn: #ff8b6b;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: grid; grid-template-columns: 1fr 320px; overflow: hidden;
+  }
+  #stage { position: relative; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+
+  #hud {
+    position: absolute; top: 12px; left: 12px;
+    background: rgba(8,11,18,.82); backdrop-filter: blur(8px);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    font-family: var(--mono); font-size: 12px; pointer-events: none;
+    min-width: 210px;
+  }
+  #hud b { color: var(--accent); font-weight: 600; }
+  #hud .row { display: flex; justify-content: space-between; gap: 14px; }
+  #hud .muted { color: var(--muted); }
+
+  #banner {
+    position: absolute; inset: 12px 12px auto 12px; padding: 10px 12px;
+    background: #40161a; border: 1px solid var(--warn); border-radius: 10px;
+    color: #ffd9cf; display: none; font-family: var(--mono); font-size: 12px;
+  }
+
+  #panel {
+    background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 15px; margin: 0; letter-spacing: .2px; }
+  h1 span { color: var(--muted); font-weight: 400; font-size: 12px; display: block; }
+  h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--muted); margin: 0 0 6px; font-weight: 600;
+  }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; }
+  button, select {
+    background: #1d2432; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  button:hover, select:hover { background: #26304180; border-color: #35405a; }
+  button.primary { background: var(--accent); color: #05130d; border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  label input[type=range] { flex: 1; accent-color: var(--accent); }
+  label .val { font-family: var(--mono); color: var(--ink); min-width: 62px; text-align: right; }
+  input[type=number] {
+    background: #1d2432; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 6px; width: 86px; font: inherit; font-family: var(--mono);
+  }
+  canvas.chart { width: 100%; height: 76px; display: block; }
+  .legend { display: flex; flex-direction: column; gap: 3px; font-family: var(--mono); font-size: 11px; }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  .legend .bar { flex: 1; height: 8px; background: #222a38; border-radius: 2px; overflow: hidden; }
+  .legend .bar i { display: block; height: 100%; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
+  td { padding: 1px 0; }
+  td:last-child { text-align: right; color: var(--accent); }
+  td.k { color: var(--muted); }
+  details summary { cursor: pointer; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .09em; }
+  .param { margin-top: 8px; }
+  .param .doc { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  #inspector { display: none; }
+  .hint { color: var(--muted); font-size: 11px; }
+  @media (max-width: 820px) {
+    body { grid-template-columns: 1fr; grid-template-rows: 55% 45%; }
+    #panel { border-left: none; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <div id="hud">
+      <div class="row"><span class="muted">tick</span><b id="h-tick">0</b></div>
+      <div class="row"><span class="muted">plants</span><b id="h-plants">0</b></div>
+      <div class="row"><span class="muted">animals</span><b id="h-animals">0</b></div>
+      <div class="row"><span class="muted">species</span><b id="h-species">0</b></div>
+      <div class="row"><span class="muted">carnivores</span><b id="h-carn">0%</b></div>
+      <div class="row"><span class="muted">ms/tick</span><b id="h-ms">–</b></div>
+      <div class="row"><span class="muted">fps</span><b id="h-fps">–</b></div>
+    </div>
+    <div id="banner"></div>
+  </div>
+
+  <div id="panel">
+    <h1>Borscht <span>plants and animals, evolving</span></h1>
+
+    <div class="card">
+      <div class="controls">
+        <button id="play" class="primary">Play</button>
+        <button id="step">Step</button>
+        <button id="reset">Reset</button>
+      </div>
+      <div style="margin-top:9px; display:flex; flex-direction:column; gap:7px">
+        <label>speed <input id="speed" type="range" min="1" max="64" value="1"><span class="val" id="speed-val">1×</span></label>
+        <label>colour
+          <select id="color" style="flex:1">
+            <option value="0">species</option>
+            <option value="1">diet</option>
+            <option value="2">energy</option>
+            <option value="3">age</option>
+            <option value="4">size</option>
+          </select>
+        </label>
+        <label>scale
+          <select id="scale" style="flex:1">
+            <option value="50000">50k organisms</option>
+            <option value="200000" selected>200k organisms</option>
+            <option value="500000">500k organisms</option>
+            <option value="1000000">1M organisms</option>
+          </select>
+        </label>
+        <label>seed <input id="seed" type="number" value="1" min="0" step="1"></label>
+      </div>
+      <div class="hint" style="margin-top:8px">Drag to pan, scroll to zoom, click an organism to inspect it.</div>
+    </div>
+
+    <div class="card">
+      <h2>Populations</h2>
+      <canvas id="chart-pop" class="chart"></canvas>
+      <div class="legend">
+        <div class="item"><i class="swatch" style="background:#4ade80"></i>plants<span style="flex:1"></span><span id="c-plants">0</span></div>
+        <div class="item"><i class="swatch" style="background:#60a5fa"></i>animals<span style="flex:1"></span><span id="c-animals">0</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Matter</h2>
+      <canvas id="chart-matter" class="chart"></canvas>
+      <div class="legend">
+        <div class="item"><i class="swatch" style="background:#4ade80"></i>biomass<span style="flex:1"></span><span id="c-biomass">0</span></div>
+        <div class="item"><i class="swatch" style="background:#a78bfa"></i>soil<span style="flex:1"></span><span id="c-soil">0</span></div>
+        <div class="item"><i class="swatch" style="background:#fbbf24"></i>bodies<span style="flex:1"></span><span id="c-bodies">0</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Animal species</h2>
+      <div class="legend" id="species-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>Evolved traits</h2>
+      <table id="traits"></table>
+    </div>
+
+    <div class="card" id="inspector">
+      <h2>Inspector</h2>
+      <table id="inspect-table"></table>
+    </div>
+
+    <div class="card">
+      <h2>Snapshot</h2>
+      <div class="controls">
+        <button id="save">Save</button>
+        <button id="load">Load</button>
+        <input id="file" type="file" accept=".borscht,application/octet-stream" hidden>
+      </div>
+      <div class="hint" style="margin-top:6px">Runs are reproducible: the same seed and parameters give the same world.</div>
+    </div>
+
+    <details class="card">
+      <summary>Parameters</summary>
+      <div id="params"></div>
+    </details>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

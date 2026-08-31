@@ -141,6 +141,14 @@ pub struct World {
     scratch_brain: Vec<i8>,
     render_buf: Vec<u8>,
     render_count: usize,
+    /// Per-species colour, rebuilt once per frame.
+    ///
+    /// Species colouring is the default view, and converting HSV per organism
+    /// costs more than everything else in the frame put together at a million
+    /// points. There are at most `MAX_SPECIES` distinct colours, so they are
+    /// computed once and indexed.
+    animal_palette: Vec<[u8; 3]>,
+    plant_palette: Vec<[u8; 3]>,
 }
 
 impl World {
@@ -166,6 +174,8 @@ impl World {
             scratch_brain: vec![0; BRAIN_LEN],
             render_buf: Vec::new(),
             render_count: 0,
+            animal_palette: vec![[0; 3]; crate::species::MAX_SPECIES],
+            plant_palette: vec![[0; 3]; crate::species::MAX_SPECIES],
         };
         world.seed_world();
         world
@@ -1049,16 +1059,37 @@ impl World {
         let tables = genome::tables();
         let scale = 65535.0 / self.cfg.world_size;
 
+        if mode == ColorMode::Species {
+            for id in 0..crate::species::MAX_SPECIES {
+                let hue = self.animal_species.records[id].hue;
+                self.animal_palette[id] = {
+                    let (r, g, b) = color::hsv_to_rgb(hue, 0.85, 1.0);
+                    [r, g, b]
+                };
+                // Plants are pulled toward green so the two kingdoms stay
+                // distinguishable at a glance even in species colouring.
+                let hue = 0.25 + (self.plant_species.records[id].hue - 0.5) * 0.28;
+                self.plant_palette[id] = {
+                    let (r, g, b) = color::hsv_to_rgb(hue, 0.75, 1.0);
+                    [r, g, b]
+                };
+            }
+        }
+
         let mut off = 0usize;
         for i in 0..self.plants.len() {
             let (r, g, b) = match mode {
                 ColorMode::Species => {
-                    let hue = self.plant_species.hue(self.plants.species[i]);
-                    // Plants are pulled toward green so the two kingdoms stay
-                    // distinguishable at a glance even in species colouring.
-                    let hue = 0.25 + (hue - 0.5) * 0.28;
+                    let base = self.plant_palette
+                        [(self.plants.species[i] as usize).min(crate::species::MAX_SPECIES - 1)];
+                    // Vigour dims the palette entry rather than changing its hue,
+                    // so it stays one multiply instead of a colour conversion.
                     let vigour = clamp(self.plants.biomass[i] * 0.25, 0.25, 1.0);
-                    color::hsv_to_rgb(hue, 0.75, vigour)
+                    (
+                        (base[0] as f32 * vigour) as u8,
+                        (base[1] as f32 * vigour) as u8,
+                        (base[2] as f32 * vigour) as u8,
+                    )
                 }
                 ColorMode::Diet => (60, 170, 70),
                 ColorMode::Energy => {
@@ -1097,8 +1128,9 @@ impl World {
             let diet = tables.animal[ag::DIET][self.animals.gene(i, ag::DIET) as usize];
             let (r, g, b) = match mode {
                 ColorMode::Species => {
-                    let hue = self.animal_species.hue(self.animals.species[i]);
-                    color::hsv_to_rgb(hue, 0.85, 1.0)
+                    let c = self.animal_palette
+                        [(self.animals.species[i] as usize).min(crate::species::MAX_SPECIES - 1)];
+                    (c[0], c[1], c[2])
                 }
                 ColorMode::Diet => color::lerp_rgb((90, 200, 255), (255, 70, 60), diet),
                 ColorMode::Energy => {
