@@ -11,7 +11,6 @@ const LOG2_E: f32 = 1.442_695_0;
 const LN_2: f32 = 0.693_147_18;
 pub const PI: f32 = 3.141_592_7;
 pub const TAU: f32 = 6.283_185_3;
-const INV_TAU: f32 = 0.159_154_94;
 
 /// `floor`, valid for `|v| < 2^31`. Truncation toward zero, corrected downward
 /// for negatives.
