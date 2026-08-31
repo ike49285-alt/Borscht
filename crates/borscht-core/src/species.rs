@@ -292,7 +292,10 @@ mod tests {
             }
             current = next;
         }
-        assert!(splits >= 3, "steady drift should keep producing species: {splits}");
+        assert!(
+            splits >= 3,
+            "steady drift should keep producing species: {splits}"
+        );
         assert!(dist(&r.records[root as usize].founder, &genome) > 0.5);
     }
 
@@ -303,7 +306,10 @@ mod tests {
         let parent = r.found([0; N], 0.5, 0);
         let child = r.classify(parent, &[255; N], 0.1, dist, 1, &mut rng);
         let (ph, ch) = (r.hue(parent), r.hue(child));
-        assert!((ph - ch).abs() < 0.15, "child hue drifted too far: {ph} -> {ch}");
+        assert!(
+            (ph - ch).abs() < 0.15,
+            "child hue drifted too far: {ph} -> {ch}"
+        );
         assert!((0.0..1.0).contains(&ch), "hue must stay normalised: {ch}");
     }
 
@@ -365,14 +371,19 @@ mod tests {
             }
         }
         assert_eq!(created, MAX_SPECIES, "should fill exactly the pool");
-        assert!(r.blocked_splits > 0, "saturation should be visible in stats");
+        assert!(
+            r.blocked_splits > 0,
+            "saturation should be visible in stats"
+        );
         assert_eq!(r.live_count(), MAX_SPECIES);
     }
 
     #[test]
     fn ranking_is_deterministic_and_ordered() {
         let mut r = reg();
-        let ids: Vec<u16> = (0..5).map(|i| r.found([i as u8; N], 0.1 * i as f32, 0)).collect();
+        let ids: Vec<u16> = (0..5)
+            .map(|i| r.found([i as u8; N], 0.1 * i as f32, 0))
+            .collect();
         r.begin_census();
         for (n, &id) in ids.iter().enumerate() {
             for _ in 0..(10 - n) {
@@ -392,7 +403,10 @@ mod tests {
     fn classifying_against_a_dead_or_missing_parent_is_safe() {
         let mut r = reg();
         let mut rng = Rng::new(6, 1);
-        assert_eq!(r.classify(NO_SPECIES, &[1; N], 0.1, dist, 0, &mut rng), NO_SPECIES);
+        assert_eq!(
+            r.classify(NO_SPECIES, &[1; N], 0.1, dist, 0, &mut rng),
+            NO_SPECIES
+        );
         let a = r.found([0; N], 0.0, 0);
         r.begin_census();
         r.end_census(1);

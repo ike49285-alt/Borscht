@@ -113,7 +113,10 @@ pub fn mix64(mut z: u64) -> u64 {
 /// the world seed, never on iteration order.
 #[inline(always)]
 pub fn stream_for(seed: u64, salt: u64, id: u64, tick: u64) -> Rng {
-    Rng::new(seed, mix64(id ^ mix64(tick.wrapping_mul(0x1000_0000_1B3) ^ salt)))
+    Rng::new(
+        seed,
+        mix64(id ^ mix64(tick.wrapping_mul(0x0100_0000_01B3) ^ salt)),
+    )
 }
 
 #[cfg(test)]
@@ -122,8 +125,12 @@ mod tests {
 
     #[test]
     fn is_reproducible() {
-        let a: Vec<u32> = (0..64).scan(Rng::new(42, 7), |r, _| Some(r.next_u32())).collect();
-        let b: Vec<u32> = (0..64).scan(Rng::new(42, 7), |r, _| Some(r.next_u32())).collect();
+        let a: Vec<u32> = (0..64)
+            .scan(Rng::new(42, 7), |r, _| Some(r.next_u32()))
+            .collect();
+        let b: Vec<u32> = (0..64)
+            .scan(Rng::new(42, 7), |r, _| Some(r.next_u32()))
+            .collect();
         assert_eq!(a, b);
     }
 
@@ -134,7 +141,10 @@ mod tests {
     fn bit_stream_is_frozen() {
         let mut r = Rng::new(12345, 1);
         let got: Vec<u32> = (0..4).map(|_| r.next_u32()).collect();
-        assert_eq!(got, vec![2_280_515_124, 875_822_104, 2_165_132_003, 3_444_695_176]);
+        assert_eq!(
+            got,
+            vec![2_280_515_124, 875_822_104, 2_165_132_003, 3_444_695_176]
+        );
     }
 
     #[test]
@@ -163,7 +173,10 @@ mod tests {
             assert!(v < 7);
             seen[v as usize] += 1;
         }
-        assert!(seen.iter().all(|&c| c > 2_000), "distribution skewed: {seen:?}");
+        assert!(
+            seen.iter().all(|&c| c > 2_000),
+            "distribution skewed: {seen:?}"
+        );
         assert_eq!(r.below(0), 0);
     }
 

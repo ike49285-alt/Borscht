@@ -195,7 +195,10 @@ pub struct Grid {
 
 impl Grid {
     pub fn new(dim: u32, world_size: f32) -> Self {
-        assert!(dim.is_power_of_two(), "grid dimension must be a power of two");
+        assert!(
+            dim.is_power_of_two(),
+            "grid dimension must be a power of two"
+        );
         assert!(dim >= 4, "grid must be at least 4 cells on a side");
         let cells = (dim as usize) * (dim as usize);
         let cell_size = world_size / dim as f32;
@@ -257,12 +260,14 @@ impl Grid {
 
     pub fn rebuild_plants(&mut self, xs: &[f32], ys: &[f32], count: usize) {
         let geom = self.geom;
-        self.plants.rebuild(geom.cells(), count, |i| geom.cell_of(xs[i], ys[i]));
+        self.plants
+            .rebuild(geom.cells(), count, |i| geom.cell_of(xs[i], ys[i]));
     }
 
     pub fn rebuild_animals(&mut self, xs: &[f32], ys: &[f32], count: usize) {
         let geom = self.geom;
-        self.animals.rebuild(geom.cells(), count, |i| geom.cell_of(xs[i], ys[i]));
+        self.animals
+            .rebuild(geom.cells(), count, |i| geom.cell_of(xs[i], ys[i]));
     }
 
     pub fn clear_fields(&mut self) {
@@ -352,10 +357,10 @@ mod tests {
             expected[grid.cell_of(xs[i], ys[i]) as usize].push(i as u32);
         }
         let mut total = 0;
-        for c in 0..grid.cells() {
+        for (c, want) in expected.iter().enumerate() {
             let mut got = grid.plants.cell(c).to_vec();
             got.sort_unstable();
-            let mut want = expected[c].clone();
+            let mut want = want.clone();
             want.sort_unstable();
             assert_eq!(got, want, "cell {c}");
             total += got.len();
@@ -437,7 +442,10 @@ mod tests {
         }
         let mean = (grid.total_soil() / grid.cells() as f64) as f32;
         for &s in &grid.soil {
-            assert!((s - mean).abs() < mean * 0.5, "still spiky: {s} vs mean {mean}");
+            assert!(
+                (s - mean).abs() < mean * 0.5,
+                "still spiky: {s} vs mean {mean}"
+            );
         }
     }
 

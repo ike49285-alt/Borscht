@@ -24,9 +24,7 @@ use crate::color;
 use crate::config::Config;
 use crate::env::Env;
 use crate::fastmath::{clamp, floor, gaussian, sin, sin_cos, TAU};
-use crate::genome::{
-    self, ag, pg, AnimalGenome, PlantGenome, ANIMAL_GENE_COUNT, PLANT_GENE_COUNT,
-};
+use crate::genome::{self, ag, pg, AnimalGenome, PlantGenome, ANIMAL_GENE_COUNT, PLANT_GENE_COUNT};
 use crate::grid::{wrap, Grid};
 use crate::pools::{AnimalPool, OrganismId, PlantPool};
 use crate::rng::{stream_for, Rng};
@@ -267,7 +265,10 @@ impl World {
             let id = self.alloc_id();
             let (g, b, sp) = (*g, b.clone(), *sp);
             let reserve = cfg.mass_per_size * size * cfg.reserve_capacity;
-            if !self.animals.push(x, y, heading, energy, &g, &b, sp, id, reserve) {
+            if !self
+                .animals
+                .push(x, y, heading, energy, &g, &b, sp, id, reserve)
+            {
                 break;
             }
             // Spread founders across their lifespans. A cohort born all at once
@@ -312,8 +313,10 @@ impl World {
     fn rebuild_index(&mut self) {
         let plant_count = self.plants.len();
         let animal_count = self.animals.len();
-        self.grid.rebuild_plants(&self.plants.x, &self.plants.y, plant_count);
-        self.grid.rebuild_animals(&self.animals.x, &self.animals.y, animal_count);
+        self.grid
+            .rebuild_plants(&self.plants.x, &self.plants.y, plant_count);
+        self.grid
+            .rebuild_animals(&self.animals.x, &self.animals.y, animal_count);
         self.grid.clear_fields();
 
         let tables = genome::tables();
@@ -322,7 +325,8 @@ impl World {
             let c = self.grid.plants.cell_of[i] as usize;
             let biomass = self.plants.biomass[i];
             self.grid.plant_mass[c] += biomass;
-            let floor = refuge * tables.plant[pg::MAX_SIZE][self.plants.gene(i, pg::MAX_SIZE) as usize];
+            let floor =
+                refuge * tables.plant[pg::MAX_SIZE][self.plants.gene(i, pg::MAX_SIZE) as usize];
             self.grid.edible_mass[c] += (biomass - floor).max(0.0);
         }
         for i in 0..animal_count {
@@ -386,7 +390,10 @@ impl World {
 
                 let max_size = tables.plant[pg::MAX_SIZE][b_max];
                 let fit = tables.plant_temp_peak[b_tol]
-                    * gaussian(temp - tables.plant[pg::TEMP_OPT][b_topt], tables.plant[pg::TEMP_TOLERANCE][b_tol]);
+                    * gaussian(
+                        temp - tables.plant[pg::TEMP_OPT][b_topt],
+                        tables.plant[pg::TEMP_TOLERANCE][b_tol],
+                    );
 
                 let available = soil[cell];
                 let density = available * inv_cell_area;
@@ -472,288 +479,312 @@ impl World {
         // races and leaves the phase parallelisable over blocks.
         for by in 0..blocks {
             for bx in 0..blocks {
-        for sub in 0..(block * block) {
-            let cx = bx * block + (sub % block);
-            let cy = by * block + (sub / block);
-            let cell = geom.cell_at(cx, cy);
-            let members = abuckets.cell(cell);
-            if members.is_empty() {
-                continue;
-            }
-            let temp = env.row_temp[geom.row_of(cell as u32) as usize];
-            let crowd = animal_count[cell];
-
-            for &ai in members {
-                let i = ai as usize;
-                if !animals.alive[i] {
-                    continue;
-                }
-
-                let b_size = animals.gene(i, ag::SIZE) as usize;
-                let b_vision = animals.gene(i, ag::VISION) as usize;
-                let b_attack = animals.gene(i, ag::ATTACK) as usize;
-                let b_defense = animals.gene(i, ag::DEFENSE) as usize;
-                let b_life = animals.gene(i, ag::LIFESPAN) as usize;
-                let b_store = animals.gene(i, ag::ENERGY_STORE) as usize;
-                let b_tol = animals.gene(i, ag::TEMP_TOLERANCE) as usize;
-
-                let size = tables.animal[ag::SIZE][b_size];
-                let mass = cfg.mass_per_size * size;
-                let capacity = cfg.energy_per_size * size * tables.animal[ag::ENERGY_STORE][b_store];
-                let reserve_cap = mass * cfg.reserve_capacity;
-                let lifespan = tables.animal[ag::LIFESPAN][b_life];
-                let diet = tables.animal[ag::DIET][animals.gene(i, ag::DIET) as usize];
-                let temp_opt = tables.animal[ag::TEMP_OPT][animals.gene(i, ag::TEMP_OPT) as usize];
-
-                let fit = tables.animal_temp_peak[b_tol]
-                    * gaussian(temp - temp_opt, tables.animal[ag::TEMP_TOLERANCE][b_tol]);
-
-                // Upkeep. Every expensive trait is paid for here, which is what
-                // stops selection from simply maximising all of them.
-                let vision_n = b_vision as f32 * (1.0 / 255.0);
-                let combat_n = (b_attack + b_defense) as f32 * (1.0 / 510.0);
-                let longevity_n = (b_life + b_store) as f32 * (1.0 / 510.0);
-                let upkeep = tables.kleiber[b_size]
-                    * (cfg.metabolism
-                        + cfg.vision_upkeep * vision_n
-                        + cfg.combat_upkeep * combat_n
-                        + cfg.longevity_upkeep * longevity_n)
-                    * (1.0 + cfg.temp_stress * (1.0 - fit));
-
-                let id = animals.id[i];
-                let mut rng = stream_for(seed, SALT_ANIMAL, id as u64, tick);
-
-                // Brains run on a stagger: each animal thinks on its own offset
-                // so the cost spreads evenly across ticks instead of spiking.
-                if (tick.wrapping_add(id as u64)) % think_interval == 0 {
-                    let heading = animals.heading[i];
-                    let (sh, ch) = sin_cos(heading);
-                    let vision = tables.animal[ag::VISION][b_vision];
-
-                    // Fields are sampled as densities so a brain reads the same
-                    // world whatever the grid resolution. Food is the *edible*
-                    // field: an animal should not be drawn to biomass it cannot
-                    // reach.
-                    let (plant_here, pgx, pgy) = geom.sample(edible_mass, cx, cy);
-                    let (prey_here, rgx, rgy) = geom.sample(prey_mass, cx, cy);
-                    let (threat_here, tgx, tgy) = geom.sample(threat_mass, cx, cy);
-                    let (plant_here, pgx, pgy) = (plant_here * inv_cell_area, pgx * inv_cell_area, pgy * inv_cell_area);
-                    let (prey_here, rgx, rgy) = (prey_here * inv_cell_area, rgx * inv_cell_area, rgy * inv_cell_area);
-                    let (threat_here, tgx, tgy) = (threat_here * inv_cell_area, tgx * inv_cell_area, tgy * inv_cell_area);
-
-                    let mut inputs = [0.0f32; N_IN];
-                    inputs[input::ENERGY] = clamp(animals.energy[i] / capacity, 0.0, 1.0) * 2.0 - 1.0;
-                    inputs[input::AGE] = clamp(animals.age[i] as f32 / lifespan, 0.0, 1.0) * 2.0 - 1.0;
-
-                    inputs[input::PLANT_DENSITY] = plant_here / (plant_here + DENSITY_HALF);
-                    inputs[input::PREY_DENSITY] = prey_here / (prey_here + DENSITY_HALF);
-                    inputs[input::THREAT_DENSITY] = threat_here / (threat_here + DENSITY_HALF);
-
-                    // Gradients are rotated into the animal's own frame, so a
-                    // brain learns "food is ahead" rather than "food is east".
-                    // Without this every lineage has to rediscover steering for
-                    // each compass direction separately.
-                    let body_frame = |gx: f32, gy: f32, here: f32| {
-                        let scale = vision / (here + DENSITY_HALF);
-                        let forward = (gx * ch + gy * sh) * scale;
-                        let left = (-gx * sh + gy * ch) * scale;
-                        (clamp(forward, -1.0, 1.0), clamp(left, -1.0, 1.0))
-                    };
-                    let (pf, pl) = body_frame(pgx, pgy, plant_here);
-                    inputs[input::PLANT_GRAD_X] = pf;
-                    inputs[input::PLANT_GRAD_Y] = pl;
-                    let (rf, rl) = body_frame(rgx, rgy, prey_here);
-                    inputs[input::PREY_GRAD_X] = rf;
-                    inputs[input::PREY_GRAD_Y] = rl;
-                    let (tf, tl) = body_frame(tgx, tgy, threat_here);
-                    inputs[input::THREAT_GRAD_X] = tf;
-                    inputs[input::THREAT_GRAD_Y] = tl;
-
-                    let crowd_density = crowd * inv_cell_area;
-                    inputs[input::CROWDING] = crowd_density / (crowd_density + CROWDING_HALF);
-                    inputs[input::TEMP_MISMATCH] = clamp((temp - temp_opt) * 0.5, -1.0, 1.0);
-                    // Phase reduced in integer space so a long run cannot drift.
-                    inputs[input::OSCILLATOR] =
-                        sin(TAU * ((tick % 64) as f32 * (1.0 / 64.0) + (id % 8) as f32 * 0.125));
-
-                    let out = brain::eval(animals.brain_of(i), &inputs);
-                    animals.set_actions(i, &out);
-                }
-
-                let turn = animals.action_of(i, output::TURN);
-                let thrust = animals.action_of(i, output::THRUST);
-                let consume = animals.action_of(i, output::CONSUME);
-                let reproduce = animals.action_of(i, output::REPRODUCE);
-
-                // Steering and movement, every tick regardless of thinking.
-                let mut heading = animals.heading[i] + turn * cfg.turn_rate;
-                heading -= TAU * floor(heading / TAU);
-                animals.heading[i] = heading;
-
-                let target = clamp(thrust, 0.0, 1.0) * tables.animal[ag::MAX_SPEED]
-                    [animals.gene(i, ag::MAX_SPEED) as usize];
-                let speed = animals.speed[i] * cfg.drag + target * (1.0 - cfg.drag);
-                animals.speed[i] = speed;
-                let (s, c) = sin_cos(heading);
-                animals.x[i] = wrap(animals.x[i] + c * speed, world_size);
-                animals.y[i] = wrap(animals.y[i] + s * speed, world_size);
-
-                let mut energy =
-                    animals.energy[i] - upkeep - cfg.move_cost * size * speed * speed;
-
-                // Feeding. One attempt per tick: whether it hunts or grazes is
-                // decided by diet and temperament together, so a herbivore with
-                // a violent streak still mostly eats plants.
-                if consume > 0.0 {
-                    let (digest_plant, digest_meat) = genome::digestion(diet, cfg.diet_specialism);
-                    let aggression =
-                        tables.animal[ag::AGGRESSION][animals.gene(i, ag::AGGRESSION) as usize];
-                    let hunt = digest_meat > 0.01
-                        && rng.chance(clamp(diet * 0.6 + aggression * 0.4, 0.0, 1.0));
-
-                    // Whether the hunt actually happened. A hunt that finds
-                    // nothing must fall through to grazing rather than costing
-                    // the animal its whole feeding action: charging a mostly
-                    // herbivorous animal a full turn for an aborted hunt is an
-                    // artificial tax on every intermediate diet, and it is
-                    // enough on its own to pin diet at zero and keep predators
-                    // from ever evolving.
-                    let mut hunted = false;
-
-                    if hunt {
-                        // Sample a few cells in the block rather than one. At
-                        // equilibrium density most cells are empty, and a single
-                        // draw fails so often that predation never pays for
-                        // itself.
-                        let mut pick = usize::MAX;
-                        for _ in 0..PREY_SEARCH_TRIES {
-                            let ground = abuckets.cell(geom.cell_at(
-                                bx * block + rng.below(block as u32) as i32,
-                                by * block + rng.below(block as u32) as i32,
-                            ));
-                            if !ground.is_empty() {
-                                pick = ground[rng.below(ground.len() as u32) as usize] as usize;
-                                break;
-                            }
-                        }
-                        if pick != usize::MAX && pick != i && animals.alive[pick] {
-                            hunted = true;
-                            let pb_size = animals.gene(pick, ag::SIZE) as usize;
-                            let prey_size = tables.animal[ag::SIZE][pb_size];
-                            let power = size
-                                * (cfg.combat_base + tables.animal[ag::ATTACK][b_attack]);
-                            let resist = prey_size
-                                * (cfg.combat_base
-                                    + tables.animal[ag::DEFENSE]
-                                        [animals.gene(pick, ag::DEFENSE) as usize]);
-                            if rng.chance(power / (power + resist)) {
-                                let prey_mass_v = cfg.mass_per_size * prey_size;
-                                let payload = animals.energy[pick].max(0.0)
-                                    + prey_mass_v * cfg.energy_per_biomass;
-                                energy += payload * digest_meat * cfg.predation_efficiency;
-                                animals.alive[pick] = false;
-                                let carcass = prey_mass_v + animals.reserve[pick].max(0.0);
-                                animals.reserve[pick] = 0.0;
-                                let room = (reserve_cap - animals.reserve[i]).max(0.0);
-                                let kept = (carcass * cfg.matter_retention).min(room);
-                                animals.reserve[i] += kept;
-                                soil[abuckets.cell_of[pick] as usize] += carcass - kept;
-                                counters.animal_deaths += 1;
-                                counters.kills += 1;
-                            } else {
-                                energy -= cfg.attack_cost * size;
-                            }
-                        }
+                for sub in 0..(block * block) {
+                    let cx = bx * block + (sub % block);
+                    let cy = by * block + (sub / block);
+                    let cell = geom.cell_at(cx, cy);
+                    let members = abuckets.cell(cell);
+                    if members.is_empty() {
+                        continue;
                     }
+                    let temp = env.row_temp[geom.row_of(cell as u32) as usize];
+                    let crowd = animal_count[cell];
 
-                    if !hunted && digest_plant > 0.01 {
-                        // Prefer the cell the animal is standing in, which is
-                        // also the one it sensed; fall back to somewhere else in
-                        // the block so a momentarily bare cell is not starvation.
-                        let mut forage_cell = cell;
-                        if pbuckets.cell(forage_cell).is_empty() {
-                            forage_cell = geom.cell_at(
-                                bx * block + rng.below(block as u32) as i32,
-                                by * block + rng.below(block as u32) as i32,
-                            );
+                    for &ai in members {
+                        let i = ai as usize;
+                        if !animals.alive[i] {
+                            continue;
                         }
-                        let forage = pbuckets.cell(forage_cell);
-                        if !forage.is_empty() {
-                            let food = edible_mass[forage_cell] * inv_cell_area;
-                            // Beddington-DeAngelis: saturating in food, and
-                            // diluted by everyone else trying to eat it.
-                            let response = food
-                                / ((food + cfg.graze_half)
-                                    * (1.0 + cfg.graze_interference * crowd * inv_cell_area));
-                            let pick =
-                                forage[rng.below(forage.len() as u32) as usize] as usize;
-                            if plants.alive[pick] {
-                                let refuge = cfg.graze_refuge
-                                    * tables.plant[pg::MAX_SIZE]
-                                        [plants.gene(pick, pg::MAX_SIZE) as usize];
-                                let edible = plants.biomass[pick] - refuge;
-                                let take =
-                                    (cfg.graze_rate * size * consume * response).min(edible);
-                                if take > 0.0 {
-                                    plants.biomass[pick] -= take;
-                                    // Matter splits: some is built into the body
-                                    // and its future offspring, the rest is
-                                    // excreted to the plant's cell, which is
-                                    // inside this block either way.
-                                    let room = (reserve_cap - animals.reserve[i]).max(0.0);
-                                    let kept = (take * cfg.matter_retention).min(room);
-                                    animals.reserve[i] += kept;
-                                    soil[forage_cell] += take - kept;
-                                    let tox = tables.plant[pg::TOXICITY]
-                                        [plants.gene(pick, pg::TOXICITY) as usize];
-                                    energy += take
-                                        * digest_plant
-                                        * cfg.energy_per_biomass
-                                        * (1.0 - cfg.toxicity_defence * tox);
-                                    if plants.biomass[pick] < cfg.plant_min_biomass {
-                                        soil[forage_cell] += plants.biomass[pick].max(0.0);
-                                        plants.biomass[pick] = 0.0;
-                                        plants.alive[pick] = false;
-                                        counters.plant_deaths += 1;
+
+                        let b_size = animals.gene(i, ag::SIZE) as usize;
+                        let b_vision = animals.gene(i, ag::VISION) as usize;
+                        let b_attack = animals.gene(i, ag::ATTACK) as usize;
+                        let b_defense = animals.gene(i, ag::DEFENSE) as usize;
+                        let b_life = animals.gene(i, ag::LIFESPAN) as usize;
+                        let b_store = animals.gene(i, ag::ENERGY_STORE) as usize;
+                        let b_tol = animals.gene(i, ag::TEMP_TOLERANCE) as usize;
+
+                        let size = tables.animal[ag::SIZE][b_size];
+                        let mass = cfg.mass_per_size * size;
+                        let capacity =
+                            cfg.energy_per_size * size * tables.animal[ag::ENERGY_STORE][b_store];
+                        let reserve_cap = mass * cfg.reserve_capacity;
+                        let lifespan = tables.animal[ag::LIFESPAN][b_life];
+                        let diet = tables.animal[ag::DIET][animals.gene(i, ag::DIET) as usize];
+                        let temp_opt =
+                            tables.animal[ag::TEMP_OPT][animals.gene(i, ag::TEMP_OPT) as usize];
+
+                        let fit = tables.animal_temp_peak[b_tol]
+                            * gaussian(temp - temp_opt, tables.animal[ag::TEMP_TOLERANCE][b_tol]);
+
+                        // Upkeep. Every expensive trait is paid for here, which is what
+                        // stops selection from simply maximising all of them.
+                        let vision_n = b_vision as f32 * (1.0 / 255.0);
+                        let combat_n = (b_attack + b_defense) as f32 * (1.0 / 510.0);
+                        let longevity_n = (b_life + b_store) as f32 * (1.0 / 510.0);
+                        let upkeep = tables.kleiber[b_size]
+                            * (cfg.metabolism
+                                + cfg.vision_upkeep * vision_n
+                                + cfg.combat_upkeep * combat_n
+                                + cfg.longevity_upkeep * longevity_n)
+                            * (1.0 + cfg.temp_stress * (1.0 - fit));
+
+                        let id = animals.id[i];
+                        let mut rng = stream_for(seed, SALT_ANIMAL, id as u64, tick);
+
+                        // Brains run on a stagger: each animal thinks on its own offset
+                        // so the cost spreads evenly across ticks instead of spiking.
+                        if (tick.wrapping_add(id as u64)) % think_interval == 0 {
+                            let heading = animals.heading[i];
+                            let (sh, ch) = sin_cos(heading);
+                            let vision = tables.animal[ag::VISION][b_vision];
+
+                            // Fields are sampled as densities so a brain reads the same
+                            // world whatever the grid resolution. Food is the *edible*
+                            // field: an animal should not be drawn to biomass it cannot
+                            // reach.
+                            let (plant_here, pgx, pgy) = geom.sample(edible_mass, cx, cy);
+                            let (prey_here, rgx, rgy) = geom.sample(prey_mass, cx, cy);
+                            let (threat_here, tgx, tgy) = geom.sample(threat_mass, cx, cy);
+                            let (plant_here, pgx, pgy) = (
+                                plant_here * inv_cell_area,
+                                pgx * inv_cell_area,
+                                pgy * inv_cell_area,
+                            );
+                            let (prey_here, rgx, rgy) = (
+                                prey_here * inv_cell_area,
+                                rgx * inv_cell_area,
+                                rgy * inv_cell_area,
+                            );
+                            let (threat_here, tgx, tgy) = (
+                                threat_here * inv_cell_area,
+                                tgx * inv_cell_area,
+                                tgy * inv_cell_area,
+                            );
+
+                            let mut inputs = [0.0f32; N_IN];
+                            inputs[input::ENERGY] =
+                                clamp(animals.energy[i] / capacity, 0.0, 1.0) * 2.0 - 1.0;
+                            inputs[input::AGE] =
+                                clamp(animals.age[i] as f32 / lifespan, 0.0, 1.0) * 2.0 - 1.0;
+
+                            inputs[input::PLANT_DENSITY] = plant_here / (plant_here + DENSITY_HALF);
+                            inputs[input::PREY_DENSITY] = prey_here / (prey_here + DENSITY_HALF);
+                            inputs[input::THREAT_DENSITY] =
+                                threat_here / (threat_here + DENSITY_HALF);
+
+                            // Gradients are rotated into the animal's own frame, so a
+                            // brain learns "food is ahead" rather than "food is east".
+                            // Without this every lineage has to rediscover steering for
+                            // each compass direction separately.
+                            let body_frame = |gx: f32, gy: f32, here: f32| {
+                                let scale = vision / (here + DENSITY_HALF);
+                                let forward = (gx * ch + gy * sh) * scale;
+                                let left = (-gx * sh + gy * ch) * scale;
+                                (clamp(forward, -1.0, 1.0), clamp(left, -1.0, 1.0))
+                            };
+                            let (pf, pl) = body_frame(pgx, pgy, plant_here);
+                            inputs[input::PLANT_GRAD_X] = pf;
+                            inputs[input::PLANT_GRAD_Y] = pl;
+                            let (rf, rl) = body_frame(rgx, rgy, prey_here);
+                            inputs[input::PREY_GRAD_X] = rf;
+                            inputs[input::PREY_GRAD_Y] = rl;
+                            let (tf, tl) = body_frame(tgx, tgy, threat_here);
+                            inputs[input::THREAT_GRAD_X] = tf;
+                            inputs[input::THREAT_GRAD_Y] = tl;
+
+                            let crowd_density = crowd * inv_cell_area;
+                            inputs[input::CROWDING] =
+                                crowd_density / (crowd_density + CROWDING_HALF);
+                            inputs[input::TEMP_MISMATCH] =
+                                clamp((temp - temp_opt) * 0.5, -1.0, 1.0);
+                            // Phase reduced in integer space so a long run cannot drift.
+                            inputs[input::OSCILLATOR] =
+                                sin(TAU
+                                    * ((tick % 64) as f32 * (1.0 / 64.0)
+                                        + (id % 8) as f32 * 0.125));
+
+                            let out = brain::eval(animals.brain_of(i), &inputs);
+                            animals.set_actions(i, &out);
+                        }
+
+                        let turn = animals.action_of(i, output::TURN);
+                        let thrust = animals.action_of(i, output::THRUST);
+                        let consume = animals.action_of(i, output::CONSUME);
+                        let reproduce = animals.action_of(i, output::REPRODUCE);
+
+                        // Steering and movement, every tick regardless of thinking.
+                        let mut heading = animals.heading[i] + turn * cfg.turn_rate;
+                        heading -= TAU * floor(heading / TAU);
+                        animals.heading[i] = heading;
+
+                        let target = clamp(thrust, 0.0, 1.0)
+                            * tables.animal[ag::MAX_SPEED][animals.gene(i, ag::MAX_SPEED) as usize];
+                        let speed = animals.speed[i] * cfg.drag + target * (1.0 - cfg.drag);
+                        animals.speed[i] = speed;
+                        let (s, c) = sin_cos(heading);
+                        animals.x[i] = wrap(animals.x[i] + c * speed, world_size);
+                        animals.y[i] = wrap(animals.y[i] + s * speed, world_size);
+
+                        let mut energy =
+                            animals.energy[i] - upkeep - cfg.move_cost * size * speed * speed;
+
+                        // Feeding. One attempt per tick: whether it hunts or grazes is
+                        // decided by diet and temperament together, so a herbivore with
+                        // a violent streak still mostly eats plants.
+                        if consume > 0.0 {
+                            let (digest_plant, digest_meat) =
+                                genome::digestion(diet, cfg.diet_specialism);
+                            let aggression = tables.animal[ag::AGGRESSION]
+                                [animals.gene(i, ag::AGGRESSION) as usize];
+                            let hunt = digest_meat > 0.01
+                                && rng.chance(clamp(diet * 0.6 + aggression * 0.4, 0.0, 1.0));
+
+                            // Whether the hunt actually happened. A hunt that finds
+                            // nothing must fall through to grazing rather than costing
+                            // the animal its whole feeding action: charging a mostly
+                            // herbivorous animal a full turn for an aborted hunt is an
+                            // artificial tax on every intermediate diet, and it is
+                            // enough on its own to pin diet at zero and keep predators
+                            // from ever evolving.
+                            let mut hunted = false;
+
+                            if hunt {
+                                // Sample a few cells in the block rather than one. At
+                                // equilibrium density most cells are empty, and a single
+                                // draw fails so often that predation never pays for
+                                // itself.
+                                let mut pick = usize::MAX;
+                                for _ in 0..PREY_SEARCH_TRIES {
+                                    let ground = abuckets.cell(geom.cell_at(
+                                        bx * block + rng.below(block as u32) as i32,
+                                        by * block + rng.below(block as u32) as i32,
+                                    ));
+                                    if !ground.is_empty() {
+                                        pick = ground[rng.below(ground.len() as u32) as usize]
+                                            as usize;
+                                        break;
+                                    }
+                                }
+                                if pick != usize::MAX && pick != i && animals.alive[pick] {
+                                    hunted = true;
+                                    let pb_size = animals.gene(pick, ag::SIZE) as usize;
+                                    let prey_size = tables.animal[ag::SIZE][pb_size];
+                                    let power = size
+                                        * (cfg.combat_base + tables.animal[ag::ATTACK][b_attack]);
+                                    let resist = prey_size
+                                        * (cfg.combat_base
+                                            + tables.animal[ag::DEFENSE]
+                                                [animals.gene(pick, ag::DEFENSE) as usize]);
+                                    if rng.chance(power / (power + resist)) {
+                                        let prey_mass_v = cfg.mass_per_size * prey_size;
+                                        let payload = animals.energy[pick].max(0.0)
+                                            + prey_mass_v * cfg.energy_per_biomass;
+                                        energy += payload * digest_meat * cfg.predation_efficiency;
+                                        animals.alive[pick] = false;
+                                        let carcass = prey_mass_v + animals.reserve[pick].max(0.0);
+                                        animals.reserve[pick] = 0.0;
+                                        let room = (reserve_cap - animals.reserve[i]).max(0.0);
+                                        let kept = (carcass * cfg.matter_retention).min(room);
+                                        animals.reserve[i] += kept;
+                                        soil[abuckets.cell_of[pick] as usize] += carcass - kept;
+                                        counters.animal_deaths += 1;
+                                        counters.kills += 1;
+                                    } else {
+                                        energy -= cfg.attack_cost * size;
+                                    }
+                                }
+                            }
+
+                            if !hunted && digest_plant > 0.01 {
+                                // Prefer the cell the animal is standing in, which is
+                                // also the one it sensed; fall back to somewhere else in
+                                // the block so a momentarily bare cell is not starvation.
+                                let mut forage_cell = cell;
+                                if pbuckets.cell(forage_cell).is_empty() {
+                                    forage_cell = geom.cell_at(
+                                        bx * block + rng.below(block as u32) as i32,
+                                        by * block + rng.below(block as u32) as i32,
+                                    );
+                                }
+                                let forage = pbuckets.cell(forage_cell);
+                                if !forage.is_empty() {
+                                    let food = edible_mass[forage_cell] * inv_cell_area;
+                                    // Beddington-DeAngelis: saturating in food, and
+                                    // diluted by everyone else trying to eat it.
+                                    let response = food
+                                        / ((food + cfg.graze_half)
+                                            * (1.0
+                                                + cfg.graze_interference * crowd * inv_cell_area));
+                                    let pick =
+                                        forage[rng.below(forage.len() as u32) as usize] as usize;
+                                    if plants.alive[pick] {
+                                        let refuge = cfg.graze_refuge
+                                            * tables.plant[pg::MAX_SIZE]
+                                                [plants.gene(pick, pg::MAX_SIZE) as usize];
+                                        let edible = plants.biomass[pick] - refuge;
+                                        let take = (cfg.graze_rate * size * consume * response)
+                                            .min(edible);
+                                        if take > 0.0 {
+                                            plants.biomass[pick] -= take;
+                                            // Matter splits: some is built into the body
+                                            // and its future offspring, the rest is
+                                            // excreted to the plant's cell, which is
+                                            // inside this block either way.
+                                            let room = (reserve_cap - animals.reserve[i]).max(0.0);
+                                            let kept = (take * cfg.matter_retention).min(room);
+                                            animals.reserve[i] += kept;
+                                            soil[forage_cell] += take - kept;
+                                            let tox = tables.plant[pg::TOXICITY]
+                                                [plants.gene(pick, pg::TOXICITY) as usize];
+                                            energy += take
+                                                * digest_plant
+                                                * cfg.energy_per_biomass
+                                                * (1.0 - cfg.toxicity_defence * tox);
+                                            if plants.biomass[pick] < cfg.plant_min_biomass {
+                                                soil[forage_cell] += plants.biomass[pick].max(0.0);
+                                                plants.biomass[pick] = 0.0;
+                                                plants.alive[pick] = false;
+                                                counters.plant_deaths += 1;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+
+                        if energy > capacity {
+                            energy = capacity;
+                        }
+                        animals.energy[i] = energy;
+                        let age = animals.age[i].saturating_add(1);
+                        animals.age[i] = age;
+
+                        // The brain votes on timing, it does not hold a veto: see
+                        // `repro_floor`.
+                        let drive = clamp(0.5 + 0.5 * reproduce, cfg.repro_floor, 1.0);
+                        if age as f32
+                            >= tables.animal[ag::MATURITY][animals.gene(i, ag::MATURITY) as usize]
+                            && energy
+                                >= capacity
+                                    * tables.animal[ag::REPRO_THRESHOLD]
+                                        [animals.gene(i, ag::REPRO_THRESHOLD) as usize]
+                            && rng.chance(drive)
+                        {
+                            animal_births.push(ai);
+                        }
+
+                        if energy <= 0.0
+                            || age as f32 >= lifespan
+                            || rng.chance(cfg.background_mortality)
+                        {
+                            animals.alive[i] = false;
+                            soil[cell] += mass + animals.reserve[i].max(0.0);
+                            animals.reserve[i] = 0.0;
+                            counters.animal_deaths += 1;
+                        }
                     }
                 }
-
-                if energy > capacity {
-                    energy = capacity;
-                }
-                animals.energy[i] = energy;
-                let age = animals.age[i].saturating_add(1);
-                animals.age[i] = age;
-
-                // The brain votes on timing, it does not hold a veto: see
-                // `repro_floor`.
-                let drive = clamp(0.5 + 0.5 * reproduce, cfg.repro_floor, 1.0);
-                if age as f32
-                    >= tables.animal[ag::MATURITY][animals.gene(i, ag::MATURITY) as usize]
-                    && energy
-                        >= capacity
-                            * tables.animal[ag::REPRO_THRESHOLD]
-                                [animals.gene(i, ag::REPRO_THRESHOLD) as usize]
-                    && rng.chance(drive)
-                {
-                    animal_births.push(ai);
-                }
-
-                if energy <= 0.0
-                    || age as f32 >= lifespan
-                    || rng.chance(cfg.background_mortality)
-                {
-                    animals.alive[i] = false;
-                    soil[cell] += mass + animals.reserve[i].max(0.0);
-                    animals.reserve[i] = 0.0;
-                    counters.animal_deaths += 1;
-                }
-            }
-        }
             }
         }
     }
@@ -777,8 +808,8 @@ impl World {
         let tables = genome::tables();
         let world_size = grid.geom.world_size;
 
-        for idx in 0..plant_births.len() {
-            let i = plant_births[idx] as usize;
+        for &parent in plant_births.iter() {
+            let i = parent as usize;
             if !plants.alive[i] {
                 continue;
             }
@@ -846,8 +877,8 @@ impl World {
         let tables = genome::tables();
         let world_size = grid.geom.world_size;
 
-        for idx in 0..animal_births.len() {
-            let i = animal_births[idx] as usize;
+        for &parent in animal_births.iter() {
+            let i = parent as usize;
             if !animals.alive[i] {
                 continue;
             }
@@ -901,7 +932,17 @@ impl World {
             let id = *next_id;
             *next_id = next_id.wrapping_add(1);
 
-            if animals.push(x, y, rng.range(0.0, TAU), dowry, &child, scratch_brain, species, id, 0.0) {
+            if animals.push(
+                x,
+                y,
+                rng.range(0.0, TAU),
+                dowry,
+                &child,
+                scratch_brain,
+                species,
+                id,
+                0.0,
+            ) {
                 animals.reserve[i] -= child_mass;
                 animals.energy[i] -= dowry;
                 counters.animal_births += 1;
@@ -970,10 +1011,12 @@ impl World {
             animals: animals as f32,
             plant_species: self
                 .plant_species
-                .significant_count(self.cfg.species_min_population) as f32,
+                .significant_count(self.cfg.species_min_population)
+                as f32,
             animal_species: self
                 .animal_species
-                .significant_count(self.cfg.species_min_population) as f32,
+                .significant_count(self.cfg.species_min_population)
+                as f32,
             plant_biomass: a.plant_biomass as f32,
             animal_mass: a.animal_mass as f32,
             soil: soil as f32,
@@ -996,8 +1039,8 @@ impl World {
             mean_plant_toxicity: (a.plant_toxicity / pdiv) as f32,
             mean_plant_growth: (a.plant_growth / pdiv) as f32,
             season_phase: self.env.season_phase,
-            blocked_splits: (self.plant_species.blocked_splits
-                + self.animal_species.blocked_splits) as f32,
+            blocked_splits: (self.plant_species.blocked_splits + self.animal_species.blocked_splits)
+                as f32,
         };
     }
 
@@ -1097,7 +1140,11 @@ impl World {
                     color::hsv_to_rgb(0.28, 0.8, v)
                 }
                 ColorMode::Age => {
-                    let t = clamp(self.plants.age[i] as f32 / self.cfg.plant_lifespan, 0.0, 1.0);
+                    let t = clamp(
+                        self.plants.age[i] as f32 / self.cfg.plant_lifespan,
+                        0.0,
+                        1.0,
+                    );
                     color::lerp_rgb((120, 220, 120), (90, 80, 40), t)
                 }
                 ColorMode::Size => {
@@ -1142,8 +1189,8 @@ impl World {
                     color::lerp_rgb((80, 40, 90), (255, 240, 120), t)
                 }
                 ColorMode::Age => {
-                    let life = tables.animal[ag::LIFESPAN]
-                        [self.animals.gene(i, ag::LIFESPAN) as usize];
+                    let life =
+                        tables.animal[ag::LIFESPAN][self.animals.gene(i, ag::LIFESPAN) as usize];
                     let t = clamp(self.animals.age[i] as f32 / life.max(1.0), 0.0, 1.0);
                     color::lerp_rgb((120, 255, 200), (200, 60, 130), t)
                 }
@@ -1223,7 +1270,11 @@ mod tests {
     fn a_new_world_is_populated_and_indexed() {
         let w = World::new(small(), 1);
         assert!(w.plants.len() > 100, "no plants seeded: {}", w.plants.len());
-        assert!(w.animals.len() > 10, "no animals seeded: {}", w.animals.len());
+        assert!(
+            w.animals.len() > 10,
+            "no animals seeded: {}",
+            w.animals.len()
+        );
         assert_eq!(w.stats.plants, w.plants.len() as f32);
         assert!(w.plant_species.live_count() > 1);
         assert!(w.animal_species.live_count() > 1);
@@ -1287,9 +1338,16 @@ mod tests {
         for _ in 0..2500 {
             w.tick();
         }
-        assert!(w.animals.len() < 50, "expected a collapse without light, got {}", w.animals.len());
+        assert!(
+            w.animals.len() < 50,
+            "expected a collapse without light, got {}",
+            w.animals.len()
+        );
         let drift = (w.total_matter() - initial).abs() / initial;
-        assert!(drift < 1e-4, "matter drifted by {drift:.3e} across a die-off");
+        assert!(
+            drift < 1e-4,
+            "matter drifted by {drift:.3e} across a die-off"
+        );
     }
 
     /// Same seed, same run. This is what makes a shared seed meaningful and what
@@ -1355,8 +1413,16 @@ mod tests {
         let mut w = World::new(c, 2);
         for _ in 0..400 {
             w.tick();
-            assert!(w.plants.len() <= 800, "plant cap breached: {}", w.plants.len());
-            assert!(w.animals.len() <= 200, "animal cap breached: {}", w.animals.len());
+            assert!(
+                w.plants.len() <= 800,
+                "plant cap breached: {}",
+                w.plants.len()
+            );
+            assert!(
+                w.animals.len() <= 200,
+                "animal cap breached: {}",
+                w.animals.len()
+            );
         }
     }
 
@@ -1436,7 +1502,10 @@ mod tests {
                 let o = p * RENDER_STRIDE;
                 let qx = u16::from_le_bytes([buf[o], buf[o + 1]]) as f32;
                 let x = qx / 65535.0 * w.cfg.world_size;
-                assert!(x >= 0.0 && x <= w.cfg.world_size, "point {p} outside the world");
+                assert!(
+                    x >= 0.0 && x <= w.cfg.world_size,
+                    "point {p} outside the world"
+                );
                 assert!(buf[o + 7] > 0, "point {p} is fully transparent");
             }
         }
@@ -1476,7 +1545,10 @@ mod tests {
         }
         assert_eq!(w.population(), 0);
         assert_eq!(w.stats.animals, 0.0);
-        assert!(w.stats.mean_size.is_finite(), "mean over an empty pool must not be NaN");
+        assert!(
+            w.stats.mean_size.is_finite(),
+            "mean over an empty pool must not be NaN"
+        );
         assert!(w.prepare_render(ColorMode::Species) == 0);
     }
 

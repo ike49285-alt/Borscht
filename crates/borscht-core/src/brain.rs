@@ -230,6 +230,9 @@ mod tests {
                 }
             }
         }
-        assert!(saturated * 4 < total, "{saturated}/{total} outputs saturated");
+        assert!(
+            saturated * 4 < total,
+            "{saturated}/{total} outputs saturated"
+        );
     }
 }

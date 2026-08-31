@@ -29,7 +29,8 @@ OPTIONS:
     --seed N         world seed (default 1)
     --out DIR        write stats.csv and frames here (default: no output)
     --frames N       number of PNG frames to write, spread over the run
-    --image-size N   frame edge in pixels (default 1024)
+    --image-size N   frame edge in pixels (default: matched to the population,
+                     so organisms are dense enough to read)
     --color MODE     species | diet | energy | age | size (default species)
     --set key=value  override any simulation parameter; repeatable
                      (`borscht params` lists them)
@@ -63,7 +64,7 @@ fn parse_args() -> Args {
         seed: 1,
         out: None,
         frames: 0,
-        image_size: 1024,
+        image_size: 0,
         color: ColorMode::Species,
         overrides: Vec::new(),
         quiet: false,
@@ -306,8 +307,8 @@ impl Tail {
 fn estimate_memory_mb(world: &World) -> f64 {
     let animals = world.animals.capacity() as f64
         * (borscht_core::brain::BRAIN_LEN + borscht_core::genome::ANIMAL_GENE_COUNT + 32) as f64;
-    let plants = world.plants.capacity() as f64
-        * (borscht_core::genome::PLANT_GENE_COUNT + 24) as f64;
+    let plants =
+        world.plants.capacity() as f64 * (borscht_core::genome::PLANT_GENE_COUNT + 24) as f64;
     let grid = world.grid.cells() as f64 * 6.0 * 4.0;
     (animals + plants + grid) / (1024.0 * 1024.0)
 }
@@ -329,7 +330,15 @@ fn run(args: &Args) {
     csv.push_str(&STAT_NAMES.join(","));
     csv.push('\n');
 
-    let mut canvas = args.frames.gt(&0).then(|| render::Canvas::new(args.image_size));
+    // A point cloud drawn one organism per pixel reads as noise when the image
+    // is much larger than the population. Size the frame so a good fraction of
+    // pixels are occupied unless the caller says otherwise.
+    let image_size = if args.image_size > 0 {
+        args.image_size
+    } else {
+        ((world.population() as f64 / 1.5).sqrt() as u32).clamp(256, 2048)
+    };
+    let mut canvas = args.frames.gt(&0).then(|| render::Canvas::new(image_size));
     let frame_every = if args.frames > 0 {
         (args.ticks / args.frames).max(1)
     } else {
@@ -426,11 +435,14 @@ plant_swing={:.2} animal_swing={:.2} peak_spp={:.0} kills_per_tick={:.1} energy=
     if let Some(dir) = out {
         let path = format!("{dir}/stats.csv");
         match std::fs::write(&path, csv) {
-            Ok(()) => println!("wrote {path}{}", if frame_index > 0 {
-                format!(" and {frame_index} frames")
-            } else {
-                String::new()
-            }),
+            Ok(()) => println!(
+                "wrote {path}{}",
+                if frame_index > 0 {
+                    format!(" and {frame_index} frames")
+                } else {
+                    String::new()
+                }
+            ),
             Err(e) => eprintln!("warning: could not write {path}: {e}"),
         }
     }

@@ -7,10 +7,10 @@
 //! `f32::sin` instead would hand the result to a platform libm and quietly break
 //! that guarantee.
 
-const LOG2_E: f32 = 1.442_695_0;
-const LN_2: f32 = 0.693_147_18;
-pub const PI: f32 = 3.141_592_7;
-pub const TAU: f32 = 6.283_185_3;
+// Taken from std rather than written out: these are exact f32 constants, so
+// using them costs nothing and avoids a hand-typed digit being subtly wrong.
+use std::f32::consts::{FRAC_2_PI, LN_2, LOG2_E};
+pub use std::f32::consts::{PI, TAU};
 
 /// `floor`, valid for `|v| < 2^31`. Truncation toward zero, corrected downward
 /// for negatives.
@@ -63,8 +63,8 @@ pub fn exp(x: f32) -> f32 {
     // +128.5 keeps the argument positive so the `as i32` truncation is a floor.
     let k = ((x * LOG2_E) + 128.5) as i32 - 128;
     let r = x - (k as f32) * LN_2;
-    let p = 1.0
-        + r * (1.0 + r * (0.5 + r * (0.166_666_67 + r * (0.041_666_67 + r * 0.008_333_333))));
+    let p =
+        1.0 + r * (1.0 + r * (0.5 + r * (0.166_666_67 + r * (0.041_666_67 + r * 0.008_333_333))));
     p * exp2i(k)
 }
 
@@ -108,9 +108,8 @@ pub fn sigmoid_fast(x: f32) -> f32 {
 // argument reduction accurate for large |x|, where a single-constant subtract
 // would cancel away most of the significant bits.
 const PIO2_1: f32 = 1.570_312_5;
-const PIO2_2: f32 = 4.837_512_97e-4;
-const PIO2_3: f32 = 7.549_790_13e-8;
-const TWO_OVER_PI: f32 = 0.636_619_77;
+const PIO2_2: f32 = 4.837_513e-4;
+const PIO2_3: f32 = 7.549_79e-8;
 
 /// Reduce `x` to `r` in `[-pi/4, pi/4]` plus the octant index `j & 3`.
 ///
@@ -118,7 +117,7 @@ const TWO_OVER_PI: f32 = 0.636_619_77;
 /// `[-pi/4, pi/4]`; feeding them a wider range is wrong by ~1e-4.
 #[inline(always)]
 fn reduce_octant(x: f32) -> (f32, i32) {
-    let j = floor(x * TWO_OVER_PI + 0.5);
+    let j = floor(x * FRAC_2_PI + 0.5);
     let r = ((x - j * PIO2_1) - j * PIO2_2) - j * PIO2_3;
     (r, (j as i32) & 3)
 }
@@ -126,13 +125,13 @@ fn reduce_octant(x: f32) -> (f32, i32) {
 #[inline(always)]
 fn poly_sin(r: f32) -> f32 {
     let s = r * r;
-    r * (1.0 + s * (-0.166_666_55 + s * (0.008_332_161 + s * -0.000_195_152_96)))
+    r * (1.0 + s * (-0.166_666_55 + s * (0.008_332_161 + s * -0.000_195_153)))
 }
 
 #[inline(always)]
 fn poly_cos(r: f32) -> f32 {
     let s = r * r;
-    1.0 + s * (-0.5 + s * (0.041_666_646 + s * (-0.001_388_731_6 + s * 0.000_024_433_158)))
+    1.0 + s * (-0.5 + s * (0.041_666_646 + s * (-0.001_388_731_6 + s * 0.000_024_433_16)))
 }
 
 /// `sin`, accurate to ~6e-8 for `|x| <= 200`.
@@ -201,7 +200,11 @@ pub fn ln(x: f32) -> f32 {
     let e = ((bits >> 23) as i32) - 127;
     // Mantissa in [1, 2), then shifted to [2/3, 4/3) for a well-conditioned series.
     let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f80_0000);
-    let (m, e) = if m > 1.333_333_3 { (m * 0.5, e + 1) } else { (m, e) };
+    let (m, e) = if m > 1.333_333_3 {
+        (m * 0.5, e + 1)
+    } else {
+        (m, e)
+    };
     let t = (m - 1.0) / (m + 1.0);
     let t2 = t * t;
     let series = 2.0 * t * (1.0 + t2 * (0.333_333_34 + t2 * (0.2 + t2 * 0.142_857_15)));
@@ -240,8 +243,20 @@ mod tests {
         assert!((cos(PI) + 1.0).abs() < 2e-6, "cos(pi) = {}", cos(PI));
         let mut x = -200.0f32;
         while x <= 200.0 {
-            assert!((sin(x) - x.sin()).abs() < 2e-6, "sin({x}): got {} want {} err {:e}", sin(x), x.sin(), (sin(x)-x.sin()).abs());
-            assert!((cos(x) - x.cos()).abs() < 2e-6, "cos({x}): got {} want {} err {:e}", cos(x), x.cos(), (cos(x)-x.cos()).abs());
+            assert!(
+                (sin(x) - x.sin()).abs() < 2e-6,
+                "sin({x}): got {} want {} err {:e}",
+                sin(x),
+                x.sin(),
+                (sin(x) - x.sin()).abs()
+            );
+            assert!(
+                (cos(x) - x.cos()).abs() < 2e-6,
+                "cos({x}): got {} want {} err {:e}",
+                cos(x),
+                x.cos(),
+                (cos(x) - x.cos()).abs()
+            );
             let (s, c) = sin_cos(x);
             assert_eq!((s, c), (sin(x), cos(x)));
             x += 0.017;

@@ -114,6 +114,7 @@ mod tests {
     /// The browser reads this record positionally, so field order and the name
     /// table must not be able to drift apart.
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn fields_are_readable_by_name_at_the_right_offset() {
         let mut s = Stats::default();
         s.tick = 7.0;

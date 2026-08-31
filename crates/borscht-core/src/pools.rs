@@ -118,8 +118,10 @@ impl PlantPool {
         self.species[to] = self.species[from];
         self.id[to] = self.id[from];
         self.alive[to] = self.alive[from];
-        self.genome
-            .copy_within(from * PLANT_GENE_COUNT..(from + 1) * PLANT_GENE_COUNT, to * PLANT_GENE_COUNT);
+        self.genome.copy_within(
+            from * PLANT_GENE_COUNT..(from + 1) * PLANT_GENE_COUNT,
+            to * PLANT_GENE_COUNT,
+        );
     }
 
     /// Drop everything marked dead. Cost is proportional to the number of
@@ -252,8 +254,9 @@ impl AnimalPool {
 
     #[inline(always)]
     pub fn set_actions(&mut self, i: usize, actions: &[f32; ACTION_COUNT]) {
-        for a in 0..ACTION_COUNT {
-            self.action[i * ACTION_COUNT + a] = (actions[a] * 127.0).clamp(-127.0, 127.0) as i8;
+        let slots = &mut self.action[i * ACTION_COUNT..(i + 1) * ACTION_COUNT];
+        for (slot, value) in slots.iter_mut().zip(actions) {
+            *slot = (value * 127.0).clamp(-127.0, 127.0) as i8;
         }
     }
 
@@ -286,9 +289,7 @@ impl AnimalPool {
         self.id[i] = id;
         self.genome[i * ANIMAL_GENE_COUNT..(i + 1) * ANIMAL_GENE_COUNT].copy_from_slice(genome);
         self.brain[i * BRAIN_LEN..(i + 1) * BRAIN_LEN].copy_from_slice(brain);
-        for a in 0..ACTION_COUNT {
-            self.action[i * ACTION_COUNT + a] = 0;
-        }
+        self.action[i * ACTION_COUNT..(i + 1) * ACTION_COUNT].fill(0);
         self.alive[i] = true;
         self.len += 1;
         true
@@ -311,8 +312,10 @@ impl AnimalPool {
         );
         self.brain
             .copy_within(from * BRAIN_LEN..(from + 1) * BRAIN_LEN, to * BRAIN_LEN);
-        self.action
-            .copy_within(from * ACTION_COUNT..(from + 1) * ACTION_COUNT, to * ACTION_COUNT);
+        self.action.copy_within(
+            from * ACTION_COUNT..(from + 1) * ACTION_COUNT,
+            to * ACTION_COUNT,
+        );
     }
 
     pub fn compact(&mut self) -> usize {
@@ -412,7 +415,11 @@ mod tests {
         assert_eq!(got, expected);
         // Every survivor must still carry its own genome, not a neighbour's.
         for i in 0..p.len() {
-            assert_eq!(p.gene(i, 0), p.id[i] as u8, "genome/id mismatch after compaction");
+            assert_eq!(
+                p.gene(i, 0),
+                p.id[i] as u8,
+                "genome/id mismatch after compaction"
+            );
             assert_eq!(p.x[i], p.id[i] as f32);
             assert!(p.alive[i]);
         }
@@ -459,7 +466,11 @@ mod tests {
         assert_eq!(a.len(), 10);
         for i in 0..a.len() {
             let owner = a.id[i] as usize;
-            assert_eq!(a.brain_of(i), brains[owner].as_slice(), "brain follows the wrong animal");
+            assert_eq!(
+                a.brain_of(i),
+                brains[owner].as_slice(),
+                "brain follows the wrong animal"
+            );
             assert_eq!(a.gene(i, 0), owner as u8);
         }
     }

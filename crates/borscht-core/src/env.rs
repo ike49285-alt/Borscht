@@ -47,8 +47,7 @@ impl Env {
             // cos over a full turn: one warm band and one cold band, continuous
             // across the toroidal seam.
             let latitude = crate::fastmath::cos(TAU * f);
-            self.row_temp[row] =
-                cfg.latitude_amplitude * latitude + cfg.season_amplitude * season;
+            self.row_temp[row] = cfg.latitude_amplitude * latitude + cfg.season_amplitude * season;
             // Weighted so the world-average daylight is 0.7 rather than 0.55.
             // The poles still get materially less light than the equator, but
             // not so little that half the map cannot support plants.
@@ -76,6 +75,7 @@ impl Env {
 mod tests {
     use super::*;
 
+    #[allow(clippy::field_reassign_with_default)]
     fn cfg(dim: u32) -> Config {
         let mut c = Config::default();
         c.grid_dim = dim;
@@ -101,7 +101,10 @@ mod tests {
         env.update(&c, 0);
         let seam = (env.row_temp[0] - env.row_temp[63]).abs();
         let typical = (env.row_temp[10] - env.row_temp[11]).abs();
-        assert!(seam < typical * 3.0 + 1e-3, "discontinuity at the seam: {seam}");
+        assert!(
+            seam < typical * 3.0 + 1e-3,
+            "discontinuity at the seam: {seam}"
+        );
     }
 
     #[test]

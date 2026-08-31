@@ -381,7 +381,11 @@ mod tests {
         for info in PARAMS {
             let d = info.description();
             assert!(!d.is_empty(), "{} has no doc comment", info.name);
-            assert!(!d.contains("doc ="), "{}: doc not unwrapped: {d}", info.name);
+            assert!(
+                !d.contains("doc ="),
+                "{}: doc not unwrapped: {d}",
+                info.name
+            );
             assert!(!d.contains('"'), "{}: stray quotes: {d}", info.name);
             assert!(!info.group.is_empty(), "{} has no group", info.name);
         }
@@ -412,6 +416,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn interaction_blocks_tile_the_grid() {
         let mut c = Config::default();
         c.grid_dim = 256;
@@ -435,6 +440,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn sanitize_repairs_hostile_values() {
         let mut c = Config::default();
         c.grid_dim = 500; // not a power of two

@@ -435,7 +435,9 @@ mod tests {
     static SERIAL: Mutex<()> = Mutex::new(());
 
     fn lock() -> MutexGuard<'static, ()> {
-        SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn fresh() {
@@ -480,7 +482,10 @@ mod tests {
         assert_eq!(set_param(id, 0.077), 1);
         assert!((get_param(id) - 0.077).abs() < 1e-6);
         world_create(1, 0);
-        assert!((get_param(id) - 0.077).abs() < 1e-6, "staged value must survive creation");
+        assert!(
+            (get_param(id) - 0.077).abs() < 1e-6,
+            "staged value must survive creation"
+        );
     }
 
     #[test]
@@ -502,9 +507,7 @@ mod tests {
         assert_eq!(render_stride(), 8);
         assert_eq!(render_plant_count(), plant_count());
         assert!(!render_ptr().is_null());
-        let bytes = unsafe {
-            std::slice::from_raw_parts(render_ptr(), n as usize * RENDER_STRIDE)
-        };
+        let bytes = unsafe { std::slice::from_raw_parts(render_ptr(), n as usize * RENDER_STRIDE) };
         assert_eq!(bytes.len(), n as usize * 8);
     }
 
@@ -550,9 +553,7 @@ mod tests {
         let kind = inspect(x, y, 8.0);
         assert_eq!(kind, 2, "should find the animal it was aimed at");
         assert!(inspect_len() as usize > INSPECT_HEADER);
-        let data = unsafe {
-            std::slice::from_raw_parts(inspect_ptr(), inspect_len() as usize)
-        };
+        let data = unsafe { std::slice::from_raw_parts(inspect_ptr(), inspect_len() as usize) };
         assert_eq!(data[0], 2.0);
         assert!(data.iter().all(|v| v.is_finite()));
         // A zero radius can match nothing.
@@ -584,7 +585,10 @@ mod tests {
         let _guard = lock();
         fresh();
         let junk = b"definitely not a snapshot".to_vec();
-        assert_eq!(unsafe { snapshot_load(junk.as_ptr(), junk.len() as u32) }, 1);
+        assert_eq!(
+            unsafe { snapshot_load(junk.as_ptr(), junk.len() as u32) },
+            1
+        );
         assert_eq!(unsafe { snapshot_load(std::ptr::null(), 10) }, 4);
         assert_eq!(unsafe { snapshot_load(junk.as_ptr(), 2) }, 4);
         // The old world must survive a failed load.

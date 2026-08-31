@@ -85,7 +85,12 @@ pub struct GeneSpec {
 }
 
 const fn g(name: &'static str, lo: f32, hi: f32, species_weight: f32) -> GeneSpec {
-    GeneSpec { name, lo, hi, species_weight }
+    GeneSpec {
+        name,
+        lo,
+        hi,
+        species_weight,
+    }
 }
 
 pub const ANIMAL_GENES: [GeneSpec; ANIMAL_GENE_COUNT] = [
@@ -155,31 +160,29 @@ impl GeneTables {
     fn build() -> Self {
         let mut animal = [[0.0f32; 256]; ANIMAL_GENE_COUNT];
         for (gi, spec) in ANIMAL_GENES.iter().enumerate() {
-            for b in 0..256 {
-                animal[gi][b] = spec.lo + (spec.hi - spec.lo) * (b as f32 / 255.0);
+            for (b, slot) in animal[gi].iter_mut().enumerate() {
+                *slot = spec.lo + (spec.hi - spec.lo) * (b as f32 / 255.0);
             }
         }
         let mut plant = [[0.0f32; 256]; PLANT_GENE_COUNT];
         for (gi, spec) in PLANT_GENES.iter().enumerate() {
-            for b in 0..256 {
-                plant[gi][b] = spec.lo + (spec.hi - spec.lo) * (b as f32 / 255.0);
+            for (b, slot) in plant[gi].iter_mut().enumerate() {
+                *slot = spec.lo + (spec.hi - spec.lo) * (b as f32 / 255.0);
             }
         }
         let mut kleiber = [0.0f32; 256];
-        for b in 0..256 {
-            kleiber[b] = fastmath::powf(animal[ag::SIZE][b], 0.75);
+        for (b, slot) in kleiber.iter_mut().enumerate() {
+            *slot = fastmath::powf(animal[ag::SIZE][b], 0.75);
         }
         let mut inv_animal_tolerance = [0.0f32; 256];
         let mut animal_temp_peak = [0.0f32; 256];
-        for b in 0..256 {
-            let t = animal[ag::TEMP_TOLERANCE][b];
+        for (b, &t) in animal[ag::TEMP_TOLERANCE].iter().enumerate() {
             inv_animal_tolerance[b] = 1.0 / t;
             animal_temp_peak[b] = temp_peak(t);
         }
         let mut inv_plant_tolerance = [0.0f32; 256];
         let mut plant_temp_peak = [0.0f32; 256];
-        for b in 0..256 {
-            let t = plant[pg::TEMP_TOLERANCE][b];
+        for (b, &t) in plant[pg::TEMP_TOLERANCE].iter().enumerate() {
             inv_plant_tolerance[b] = 1.0 / t;
             plant_temp_peak[b] = temp_peak(t);
         }
@@ -324,14 +327,30 @@ mod tests {
             let mut hi_genome = [255u8; ANIMAL_GENE_COUNT];
             lo_genome[gi] = 0;
             hi_genome[gi] = 255;
-            assert!((animal_trait(&lo_genome, gi) - spec.lo).abs() < 1e-5, "{}", spec.name);
-            assert!((animal_trait(&hi_genome, gi) - spec.hi).abs() < 1e-5, "{}", spec.name);
+            assert!(
+                (animal_trait(&lo_genome, gi) - spec.lo).abs() < 1e-5,
+                "{}",
+                spec.name
+            );
+            assert!(
+                (animal_trait(&hi_genome, gi) - spec.hi).abs() < 1e-5,
+                "{}",
+                spec.name
+            );
         }
         for (gi, spec) in PLANT_GENES.iter().enumerate() {
             let lo_genome = [0u8; PLANT_GENE_COUNT];
             let hi_genome = [255u8; PLANT_GENE_COUNT];
-            assert!((plant_trait(&lo_genome, gi) - spec.lo).abs() < 1e-5, "{}", spec.name);
-            assert!((plant_trait(&hi_genome, gi) - spec.hi).abs() < 1e-5, "{}", spec.name);
+            assert!(
+                (plant_trait(&lo_genome, gi) - spec.lo).abs() < 1e-5,
+                "{}",
+                spec.name
+            );
+            assert!(
+                (plant_trait(&hi_genome, gi) - spec.hi).abs() < 1e-5,
+                "{}",
+                spec.name
+            );
         }
     }
 
@@ -340,13 +359,26 @@ mod tests {
     #[test]
     fn temperature_breadth_trades_off_sanely() {
         assert!((temp_peak(REFERENCE_TOLERANCE) - 1.0).abs() < 1e-4);
-        assert!(temp_peak(0.15) > temp_peak(1.5), "specialists should peak higher");
-        assert!(temp_peak(1.5) > 0.6, "generalists must still be viable: {}", temp_peak(1.5));
+        assert!(
+            temp_peak(0.15) > temp_peak(1.5),
+            "specialists should peak higher"
+        );
+        assert!(
+            temp_peak(1.5) > 0.6,
+            "generalists must still be viable: {}",
+            temp_peak(1.5)
+        );
         assert!(temp_peak(0.15) < 1.6);
         // On its own optimum a specialist wins; two units away it loses badly.
         let (spec, gen) = (0.2f32, 1.2f32);
-        assert!(temp_peak(spec) * fastmath::gaussian(0.0, spec) > temp_peak(gen) * fastmath::gaussian(0.0, gen));
-        assert!(temp_peak(spec) * fastmath::gaussian(1.0, spec) < temp_peak(gen) * fastmath::gaussian(1.0, gen));
+        assert!(
+            temp_peak(spec) * fastmath::gaussian(0.0, spec)
+                > temp_peak(gen) * fastmath::gaussian(0.0, gen)
+        );
+        assert!(
+            temp_peak(spec) * fastmath::gaussian(1.0, spec)
+                < temp_peak(gen) * fastmath::gaussian(1.0, gen)
+        );
     }
 
     #[test]
@@ -368,7 +400,11 @@ mod tests {
             genome = mutate_animal(&genome, 0.5, &mut rng);
             for (gi, spec) in ANIMAL_GENES.iter().enumerate() {
                 let v = animal_trait(&genome, gi);
-                assert!(v >= spec.lo - 1e-4 && v <= spec.hi + 1e-4, "{} = {v}", spec.name);
+                assert!(
+                    v >= spec.lo - 1e-4 && v <= spec.hi + 1e-4,
+                    "{} = {v}",
+                    spec.name
+                );
             }
         }
     }
@@ -387,7 +423,10 @@ mod tests {
                 at_edge += 1;
             }
         }
-        assert!(at_edge < 400, "mutation piles up at the boundary: {at_edge}/20000");
+        assert!(
+            at_edge < 400,
+            "mutation piles up at the boundary: {at_edge}/20000"
+        );
     }
 
     #[test]
@@ -455,9 +494,15 @@ mod tests {
     fn partial_carnivory_pays_more_than_its_share() {
         let (_, quarter) = digestion(0.25, 0.2);
         let (_, full) = digestion(1.0, 0.2);
-        assert!(quarter > 0.25 * full * 1.5, "quarter carnivore gets only {quarter}");
+        assert!(
+            quarter > 0.25 * full * 1.5,
+            "quarter carnivore gets only {quarter}"
+        );
         // But specialising is still clearly worth it.
-        assert!(full > quarter * 2.0, "full carnivory must stay worth reaching");
+        assert!(
+            full > quarter * 2.0,
+            "full carnivory must stay worth reaching"
+        );
     }
 
     /// The valley between herbivory and carnivory has to stay crossable, or a
@@ -479,7 +524,10 @@ mod tests {
                 "diet {diet}: specialism costs {:.0}% extra plant digestion",
                 (1.0 - plant / linear_plant) * 100.0
             );
-            assert!(meat >= linear_meat * (1.0 - specialism), "diet {diet}: and {meat} of meat");
+            assert!(
+                meat >= linear_meat * (1.0 - specialism),
+                "diet {diet}: and {meat} of meat"
+            );
             assert!(meat > 0.0, "a partial carnivore must gain something real");
         }
         let (half_plant, _) = digestion(0.5, specialism);

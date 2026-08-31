@@ -44,7 +44,10 @@ impl std::fmt::Display for SnapshotError {
                 write!(f, "snapshot format version {v}, this build reads {VERSION}")
             }
             SnapshotError::ParamMismatch => {
-                write!(f, "snapshot was written by a build with different parameters")
+                write!(
+                    f,
+                    "snapshot was written by a build with different parameters"
+                )
             }
             SnapshotError::Truncated => write!(f, "snapshot is truncated or corrupt"),
             SnapshotError::TooLarge => write!(f, "snapshot is larger than this build can hold"),
@@ -251,7 +254,10 @@ pub fn save(world: &World) -> Vec<u8> {
         std::slice::from_raw_parts(world.animals.brain.as_ptr() as *const u8, na * BRAIN_LEN)
     });
     w.bytes(unsafe {
-        std::slice::from_raw_parts(world.animals.action.as_ptr() as *const u8, na * ACTION_COUNT)
+        std::slice::from_raw_parts(
+            world.animals.action.as_ptr() as *const u8,
+            na * ACTION_COUNT,
+        )
     });
 
     write_registry(&mut w, &world.plant_species);
@@ -325,14 +331,16 @@ pub fn load(bytes: &[u8]) -> Result<World, SnapshotError> {
     r.u16s(&mut world.animals.age[..na])?;
     r.u16s(&mut world.animals.species[..na])?;
     r.u32s(&mut world.animals.id[..na])?;
-    world.animals.genome[..na * ANIMAL_GENE_COUNT]
-        .copy_from_slice(r.take(na * ANIMAL_GENE_COUNT)?);
+    world.animals.genome[..na * ANIMAL_GENE_COUNT].copy_from_slice(r.take(na * ANIMAL_GENE_COUNT)?);
     let brains = r.take(na * BRAIN_LEN)?;
     for (slot, byte) in world.animals.brain[..na * BRAIN_LEN].iter_mut().zip(brains) {
         *slot = *byte as i8;
     }
     let actions = r.take(na * ACTION_COUNT)?;
-    for (slot, byte) in world.animals.action[..na * ACTION_COUNT].iter_mut().zip(actions) {
+    for (slot, byte) in world.animals.action[..na * ACTION_COUNT]
+        .iter_mut()
+        .zip(actions)
+    {
         *slot = *byte as i8;
     }
     world.animals.alive[..na].fill(true);
@@ -413,7 +421,10 @@ mod tests {
             w.animal_species.live_count()
         );
         for id in 0..MAX_SPECIES {
-            let (a, b) = (&w.animal_species.records[id], &restored.animal_species.records[id]);
+            let (a, b) = (
+                &w.animal_species.records[id],
+                &restored.animal_species.records[id],
+            );
             assert_eq!(a.alive, b.alive, "species {id} liveness");
             assert_eq!(a.parent, b.parent, "species {id} parent");
             assert_eq!(a.founder, b.founder, "species {id} founder");
@@ -464,18 +475,27 @@ mod tests {
         // `unwrap_err` would require World: Debug, which is not worth deriving
         // on a struct holding hundreds of megabytes of pools.
         assert!(matches!(load(&[]), Err(SnapshotError::Truncated)));
-        assert!(matches!(load(b"not a world at all"), Err(SnapshotError::BadMagic)));
+        assert!(matches!(
+            load(b"not a world at all"),
+            Err(SnapshotError::BadMagic)
+        ));
 
         let w = World::new(small(), 1);
         let good = save(&w);
 
         let mut bad_version = good.clone();
         bad_version[8..12].copy_from_slice(&99u32.to_le_bytes());
-        assert!(matches!(load(&bad_version), Err(SnapshotError::Version(99))));
+        assert!(matches!(
+            load(&bad_version),
+            Err(SnapshotError::Version(99))
+        ));
 
         let mut bad_params = good.clone();
         bad_params[12..20].copy_from_slice(&0u64.to_le_bytes());
-        assert!(matches!(load(&bad_params), Err(SnapshotError::ParamMismatch)));
+        assert!(matches!(
+            load(&bad_params),
+            Err(SnapshotError::ParamMismatch)
+        ));
 
         // Truncation at every length must be an error, never a panic.
         for cut in 0..good.len().min(4096) {
