@@ -213,3 +213,44 @@ fn census_across_seeds() {
         seeds.len()
     );
 }
+
+/// Establishment success should rise with the number of founders.
+///
+/// Propagule pressure is the strongest single predictor of establishment
+/// success in the invasion-biology literature, and it is a good test of whether
+/// a model's founding dynamics are real: nothing here was tuned to produce it.
+///
+/// It caught a genuine fault. Founders were originally small mutations around a
+/// handful of lineage templates, which capped the genetic variation at the
+/// number of templates -- so a larger propagule brought more individuals but no
+/// more genotypes, and establishment was flat across a sixty-fold range of
+/// propagule sizes. Founders are independent draws now.
+///
+/// Ignored by default: it is a statistical claim and needs many runs.
+/// `cargo test --release --test ecology -- --ignored --nocapture`
+#[test]
+#[ignore = "slow: a statistical claim over many runs"]
+fn establishment_rises_with_propagule_size() {
+    let trials = 8;
+    let mut results = Vec::new();
+    for founders in [60u32, 3_840] {
+        let mut established = 0;
+        for seed in 0..trials {
+            let mut cfg = Config::for_population(40_000);
+            cfg.initial_animals = founders;
+            let mut w = World::new(cfg, seed as u64 + 1);
+            w.tick_many(8_000);
+            if w.animals.len() > 100 {
+                established += 1;
+            }
+        }
+        println!("{founders:>6} founders: established {established}/{trials}");
+        results.push(established);
+    }
+    assert!(
+        results[1] > results[0],
+        "establishment did not respond to propagule size: {} then {} of {trials}",
+        results[0],
+        results[1]
+    );
+}

@@ -177,9 +177,15 @@ await page.selectOption('#color', '0');
 await page.mouse.move(700, 450);
 await page.mouse.wheel(0, -900);
 await page.waitForTimeout(400);
-await page.mouse.click(700, 450);
-await page.waitForTimeout(600);
-const inspected = await page.$eval('#inspector', (el) => el.style.display !== 'none');
+// A world can be sparse, so try a few points rather than assuming an organism
+// sits under one particular pixel.
+let inspected = false;
+for (const [x, y] of [[700, 450], [640, 400], [760, 500], [700, 380], [620, 520]]) {
+  await page.mouse.click(x, y);
+  await page.waitForTimeout(400);
+  inspected = await page.$eval('#inspector', (el) => el.style.display !== 'none');
+  if (inspected) break;
+}
 await page.screenshot({ path: `${OUT}/zoomed.png` });
 
 console.log(`ticks:      ${tickAfter}`);

@@ -26,8 +26,9 @@ pub mod ag {
     pub const MAX_SPEED: usize = 1;
     /// Sensory reach and gain. Paid for in upkeep, like a real nervous system.
     pub const VISION: usize = 2;
-    /// 0 = pure herbivore, 1 = pure carnivore. Generalists digest both poorly.
-    pub const DIET: usize = 3;
+    /// Investment in machinery for digesting plants. A gut is tissue: it works
+    /// in proportion to how much you have, and you pay upkeep on all of it.
+    pub const GUT_PLANT: usize = 3;
     /// Weapons. Costs upkeep.
     pub const ATTACK: usize = 4;
     /// Armour. Costs upkeep.
@@ -54,8 +55,17 @@ pub mod ag {
     pub const ENERGY_STORE: usize = 13;
     /// Fraction of capacity at which it will spend energy on a child.
     pub const REPRO_THRESHOLD: usize = 14;
-    /// Behavioural prior on fighting versus fleeing.
-    pub const AGGRESSION: usize = 15;
+    /// Investment in machinery for digesting flesh.
+    ///
+    /// Two independent guts rather than one "diet" dial. A single dial needs a
+    /// hand-picked curve to say how a half-carnivore fares, and whatever curve
+    /// you choose is the answer you wanted rather than one the model produced.
+    /// Mine put the midpoint at a constructed fitness minimum, which is exactly
+    /// where uniform-random founders start. With two genes the trade-off is
+    /// mechanical: carrying both guts means paying upkeep on both, so
+    /// specialisation pays for itself without anyone deciding in advance that it
+    /// should.
+    pub const GUT_MEAT: usize = 15;
 }
 
 /// Plant gene indices.
@@ -98,7 +108,7 @@ pub const ANIMAL_GENES: [GeneSpec; ANIMAL_GENE_COUNT] = [
     g("size", 0.25, 6.0, 1.5),
     g("max_speed", 0.05, 1.60, 1.0),
     g("vision", 1.0, 6.0, 0.6),
-    g("diet", 0.0, 1.0, 2.0),
+    g("gut_plant", 0.0, 1.0, 1.6),
     g("attack", 0.0, 1.0, 0.8),
     g("defense", 0.0, 1.0, 0.8),
     g("maturity", 20.0, 600.0, 0.4),
@@ -110,7 +120,7 @@ pub const ANIMAL_GENES: [GeneSpec; ANIMAL_GENE_COUNT] = [
     g("hue", 0.0, 1.0, 0.0),
     g("energy_store", 0.6, 2.5, 0.4),
     g("repro_threshold", 0.35, 0.95, 0.4),
-    g("aggression", 0.0, 1.0, 0.6),
+    g("gut_meat", 0.0, 1.0, 1.6),
 ];
 
 pub const PLANT_GENES: [GeneSpec; PLANT_GENE_COUNT] = [
@@ -285,36 +295,19 @@ pub fn plant_distance(a: &PlantGenome, b: &PlantGenome) -> f32 {
     fastmath::sqrt(acc / norm)
 }
 
-/// Digestive efficiency for plant and animal food given a diet gene.
+/// How carnivorous an animal is, from its gut composition: 0 is wholly
+/// herbivorous, 1 wholly carnivorous.
 ///
-/// A generalist sits at 0.5 and is mediocre at both; the endpoints are
-/// specialists. Without some penalty, diet has no cost and every lineage drifts
-/// to omnivory, collapsing the food web into one trophic mush.
-///
-/// The penalty must stay *shallow*, though. It carves a fitness valley between
-/// herbivory and carnivory, and a herbivore population can only evolve into
-/// predators by crossing it. At a steep setting the intermediate diets lose far
-/// more plant digestion than the scarce meat repays, selection pushes diet
-/// straight back to zero, and carnivores never appear at all -- the food web
-/// stays one trophic level deep forever.
-/// The two curves are deliberately different shapes.
-///
-/// Plant digestion falls linearly with diet, because living on plants needs
-/// elaborate machinery -- fermentation chambers, cellulose breakdown -- that only
-/// works in proportion to how much of the body is committed to it. Meat
-/// digestion rises as a square root, because flesh is nutritionally easy and
-/// even a modest carnivore adaptation captures a good share of the value.
-///
-/// Making both linear leaves an impassable valley: at low diet, meat digestion
-/// is so small that a hunt returns less than the grazing turn it costs, so every
-/// step toward carnivory is selected against and diet pins to zero forever. The
-/// concave meat curve pays a part-time predator enough to make the first step
-/// worthwhile, while a full carnivore still digests meat more than three times
-/// better than a quarter-carnivore does.
+/// Reported, and used to weight the prey and threat fields. Nothing in the model
+/// reads it as a primary trait -- the two gut genes are the traits.
 #[inline(always)]
-pub fn digestion(diet: f32, specialism: f32) -> (f32, f32) {
-    let penalty = 1.0 - specialism * diet * 4.0 * (1.0 - diet);
-    ((1.0 - diet) * penalty, fastmath::sqrt(diet) * penalty)
+pub fn carnivory(gut_plant: f32, gut_meat: f32) -> f32 {
+    let total = gut_plant + gut_meat;
+    if total < 1e-4 {
+        0.0
+    } else {
+        gut_meat / total
+    }
 }
 
 #[cfg(test)]
@@ -456,87 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn specialists_out_digest_generalists() {
-        let (herb_plant, herb_meat) = digestion(0.0, 0.2);
-        let (gen_plant, gen_meat) = digestion(0.5, 0.2);
-        let (carn_plant, carn_meat) = digestion(1.0, 0.2);
-        assert!((herb_plant - 1.0).abs() < 1e-6 && herb_meat == 0.0);
-        assert!((carn_meat - 1.0).abs() < 1e-6 && carn_plant == 0.0);
-        assert!(gen_plant < herb_plant && gen_meat < carn_meat);
-        assert!(gen_plant + gen_meat < 1.0, "omnivory must cost something");
-    }
-
-    #[test]
-    fn the_endpoints_are_pure_specialists() {
-        for specialism in [0.0f32, 0.2, 0.5] {
-            let (plant, meat) = digestion(0.0, specialism);
-            assert!((plant - 1.0).abs() < 1e-6 && meat == 0.0);
-            let (plant, meat) = digestion(1.0, specialism);
-            assert!(plant == 0.0 && (meat - 1.0).abs() < 1e-6);
-        }
-    }
-
-    #[test]
-    fn digestion_is_monotone_in_diet() {
-        let (mut last_plant, mut last_meat) = (f32::MAX, -1.0f32);
-        for i in 0..=100 {
-            let (plant, meat) = digestion(i as f32 / 100.0, 0.2);
-            assert!(plant <= last_plant + 1e-6, "plant digestion rose with diet");
-            assert!(meat >= last_meat - 1e-6, "meat digestion fell with diet");
-            assert!((0.0..=1.0).contains(&plant) && (0.0..=1.0).contains(&meat));
-            last_plant = plant;
-            last_meat = meat;
-        }
-    }
-
-    /// A part-time predator must get materially more than its diet fraction of
-    /// meat value, or the first step toward carnivory never pays for itself.
-    #[test]
-    fn partial_carnivory_pays_more_than_its_share() {
-        let (_, quarter) = digestion(0.25, 0.2);
-        let (_, full) = digestion(1.0, 0.2);
-        assert!(
-            quarter > 0.25 * full * 1.5,
-            "quarter carnivore gets only {quarter}"
-        );
-        // But specialising is still clearly worth it.
-        assert!(
-            full > quarter * 2.0,
-            "full carnivory must stay worth reaching"
-        );
-    }
-
-    /// The valley between herbivory and carnivory has to stay crossable, or a
-    /// herbivore lineage can never evolve into a predator.
-    #[test]
-    fn the_omnivore_valley_is_shallow_enough_to_cross() {
-        let specialism = 0.2;
-        // Judge the specialism penalty on its own, against the pure linear
-        // tradeoff. Losing (1 - diet) of your plant digestion by being a quarter
-        // carnivore is the intended cost; what must stay small is the *extra*
-        // penalty layered on top for not being a specialist.
-        for step in 1..=3 {
-            let diet = step as f32 * 0.125;
-            let (linear_plant, linear_meat) = digestion(diet, 0.0);
-            let (plant, meat) = digestion(diet, specialism);
-            // The penalty bottoms out at exactly `1 - specialism`, at diet 0.5.
-            assert!(
-                plant >= linear_plant * (1.0 - specialism),
-                "diet {diet}: specialism costs {:.0}% extra plant digestion",
-                (1.0 - plant / linear_plant) * 100.0
-            );
-            assert!(
-                meat >= linear_meat * (1.0 - specialism),
-                "diet {diet}: and {meat} of meat"
-            );
-            assert!(meat > 0.0, "a partial carnivore must gain something real");
-        }
-        let (half_plant, _) = digestion(0.5, specialism);
-        assert!(
-            (half_plant / digestion(0.5, 0.0).0 - (1.0 - specialism)).abs() < 1e-5,
-            "the worst case should be exactly 1 - specialism"
-        );
-        // The bonus still has to be worth something at the extremes.
-        assert!(digestion(1.0, specialism).1 > digestion(0.5, specialism).1 * 1.5);
+    fn carnivory_reads_gut_composition() {
+        assert_eq!(carnivory(1.0, 0.0), 0.0);
+        assert_eq!(carnivory(0.0, 1.0), 1.0);
+        assert!((carnivory(0.5, 0.5) - 0.5).abs() < 1e-6);
+        // Scale-free: it is the ratio that matters, not the total investment.
+        assert!((carnivory(0.2, 0.6) - carnivory(0.1, 0.3)).abs() < 1e-6);
+        // An animal with no gut at all must not produce a NaN.
+        assert_eq!(carnivory(0.0, 0.0), 0.0);
     }
 }

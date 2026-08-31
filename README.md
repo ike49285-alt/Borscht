@@ -18,19 +18,26 @@ python3 -m http.server -d web 8080     # then open http://localhost:8080
 Each organism carries a genome of bytes. Every byte maps onto a trait, mutates
 when it is copied, and — this is the part that matters — **costs something**.
 
-Animals have sixteen genes: body size, top speed, sensory reach, diet, attack,
-defence, maturity age, offspring investment, mutation rate, lifespan,
-temperature preference and tolerance, colour, energy storage, breeding
-threshold, and aggression. Plants have eight: growth rate, maximum size, seed
-dispersal range, seed investment, toxicity, temperature preference and
+Animals have sixteen genes: body size, top speed, sensory reach, two independent
+gut investments, attack, defence, maturity age, offspring investment, mutation
+rate, senescence rate, temperature preference and tolerance, colour, energy
+storage, and breeding threshold. Plants have eight: growth rate, maximum size,
+seed dispersal range, seed investment, toxicity, temperature preference and
 tolerance, and colour.
+
+Diet is not a dial. There are two genes — one for digesting plants, one for
+digesting flesh — and a gut is tissue you pay upkeep on. Specialisation emerges
+because carrying both guts means paying for both. A single "diet" gene needs a
+hand-picked curve to say how a half-carnivore fares, and whatever curve you
+choose is the answer you wanted rather than one the model produced.
 
 A gene with only upside is not an evolutionary pressure — the population pins it
 to the maximum and stops being interesting. So size raises attack and storage
 but also metabolism, following Kleiber's `mass^0.75`. Speed costs energy with
-the square of velocity. Vision, weapons, armour and long life are all charged
-for as metabolic upkeep. A wide temperature tolerance lowers the peak, so a
-generalist never beats a specialist on the specialist's home ground.
+the square of velocity. Vision, weapons, guts and slow ageing are charged as
+*fractions of basal metabolic rate*, which is how organ maintenance is actually
+measured. A wide temperature tolerance lowers the peak, so a generalist never
+beats a specialist on the specialist's home ground.
 
 Animals also carry a small neural network — fourteen senses, ten hidden units,
 four actions — whose weights mutate alongside the genes. It sees local plant,
@@ -52,6 +59,20 @@ remove it.
 Nothing dies on a birthday either. Mortality is Gompertz–Makeham: a constant
 hazard plus one rising exponentially with age. Nothing is immortal, so a lineage
 that fails is gone within a few lifetimes.
+
+## The environment is not a backdrop
+
+Temperature and light vary with latitude and season, and on top of that sit two
+stochastic processes. Both are AR(1), because environmental variance only
+matters if it is **autocorrelated**: white noise averages out within a lifetime
+and barely perturbs a population, while reddened noise produces runs of bad
+years, and runs of bad years are what actually drive populations to extinction.
+
+Productivity varies *regionally* rather than globally, so a drought leaves
+refuges — and refuges are where populations survive bad years. Temperature has a
+global anomaly on top of the seasonal cycle. Disturbance — fire, storm, flood —
+clears patches at random, killing without regard to fitness, which is a
+different selective regime from starvation and predation.
 
 ## Matter is conserved, energy is not
 
@@ -155,6 +176,14 @@ The unit tests check the machinery. The ecology gate checks what must be true
 *whatever happens*: matter is conserved in a thriving world and a dead one
 alike, state stays physically meaningful, selection narrows the founding
 variation, and populations are limited by ecology rather than by the memory cap.
+
+One test is a genuine validation rather than an invariant:
+`establishment_rises_with_propagule_size` checks that more founders means a
+better chance of establishing, which is the strongest single predictor of
+invasion success in the literature and was not tuned for. It caught a real
+fault — founders had been small mutations around a few templates, so a larger
+propagule brought more individuals but no more genotypes, and establishment was
+flat across a sixty-fold range.
 
 It deliberately does **not** assert that populations survive. An earlier version
 did, and that assertion was a tuning target dressed as a test — it passed only

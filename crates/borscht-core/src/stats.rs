@@ -71,8 +71,25 @@ stats_fields! {
     animal_deaths,
     /// Successful predation events this tick.
     kills,
-    /// Seeds and offspring that failed for want of space or matter.
-    failed_births,
+    /// Disturbance events this tick: fire, storm, flood.
+    disturbances,
+    /// Organisms killed by disturbance this tick.
+    disturbance_deaths,
+    /// Mean regional productivity. 1.0 is an average year.
+    productivity,
+    /// Fraction of the world below 70% of normal productivity.
+    drought_fraction,
+    /// Current global temperature anomaly.
+    temp_anomaly,
+    /// Seeds that could not be set, almost always because the plant pool is
+    /// full.
+    plant_births_blocked,
+    /// Animals that met the conditions to breed this tick.
+    animal_repro_ready,
+    /// Births that failed because the parent lacked the matter to build a body.
+    animal_births_blocked_matter,
+    /// Births that failed because the animal pool is full.
+    animal_births_blocked_space,
     /// Population-weighted mean animal body size.
     mean_size,
     /// Mean top speed.

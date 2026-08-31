@@ -122,6 +122,51 @@ Temperature varies with latitude and season. The gradient is the reason
 speciation happens at all — a uniform world has one optimum, so every lineage
 converges on it and the run becomes a beige monoculture.
 
+### Environmental variance
+
+Two AR(1) processes sit on top of the deterministic backbone: a global
+temperature anomaly, and a *regional* productivity field interpolated from a
+coarse grid. Both are reddened deliberately. White environmental noise averages
+out over a lifetime and barely perturbs a population; autocorrelated noise
+produces runs of bad years, and runs of bad years are what drive populations to
+extinction. AR(1) is the standard minimal model for a reddened environment, and
+scaling the innovation by `sqrt(1 - phi^2)` keeps the long-run spread fixed
+instead of growing with the autocorrelation.
+
+Productivity is regional rather than global because a world where every place
+has a bad year simultaneously has no refuges, and refuges are where populations
+actually persist. The coarse field is interpolated bilinearly and wrapped, so
+droughts have soft edges rather than rectangular boundaries organisms could
+visibly evolve against.
+
+Disturbance — fire, storm, flood — kills a patch at random with severity falling
+off toward the edge. It is a structuring force in most real ecosystems rather
+than an interruption to one: it clears space, resets succession, and kills
+without regard to fitness, which is a different selective regime from starvation
+and predation.
+
+### Diet is two genes, not a dial
+
+There is no "diet" trait. There are two gut investments, one for plants and one
+for flesh, and gut is tissue with upkeep proportional to how much of it you
+carry. Specialisation emerges because a generalist pays for both.
+
+The single-dial version needed a hand-picked curve to say how a half-carnivore
+fared, and every choice of curve is an answer decided in advance. The one I
+chose — linear plant digestion, concave meat digestion — put the midpoint of the
+range at a constructed fitness minimum, which is exactly where uniform-random
+founders start. Founding populations were therefore initialised at the worst
+point on that axis for reasons that had nothing to do with biology.
+
+### Organ costs are fractions of basal rate
+
+Upkeep is `basal x kleiber x (1 + organ load)`, where vision, combat, guts and
+slow ageing each contribute a fraction of basal. They used to be independent
+additive terms of the same magnitude as basal itself, so an animal with middling
+genes paid over two and a half times its basal rate in organ costs alone and
+income never cleared upkeep by any margin. Expressing organ maintenance as a
+fraction of BMR is also how physiologists measure it.
+
 ### Things that killed early versions
 
 Nearly every problem was a modelling error, not a coding one. They are listed

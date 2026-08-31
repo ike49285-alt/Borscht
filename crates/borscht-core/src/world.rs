@@ -109,7 +109,12 @@ struct TickCounters {
     animal_births: u32,
     animal_deaths: u32,
     kills: u32,
-    failed_births: u32,
+    plant_births_blocked: u32,
+    animal_repro_ready: u32,
+    animal_births_blocked_matter: u32,
+    animal_births_blocked_space: u32,
+    disturbances: u32,
+    disturbed: u32,
 }
 
 pub struct World {
@@ -158,7 +163,7 @@ impl World {
         cfg.sanitize();
         let grid = Grid::new(cfg.grid_dim, cfg.world_size);
         let mut world = World {
-            env: Env::new(cfg.grid_dim),
+            env: Env::new(cfg.grid_dim, cfg.climate_regions),
             plants: PlantPool::new(cfg.max_plants as usize),
             animals: AnimalPool::new(cfg.max_animals as usize),
             plant_species: Registry::new(),
@@ -216,7 +221,15 @@ impl World {
         let mut rng = Rng::new(self.seed, SALT_INIT);
         let lineages = cfg.founder_lineages as usize;
 
-        // Founding plant lineages.
+        // Founding lineages are cluster centres, not templates. Every founder
+        // below is an *independent* random genotype assigned to the nearest
+        // centre, which is what makes propagule size mean something: a larger
+        // founding population samples more of the space, so it is more likely to
+        // contain something viable. Drawing founders as small mutations around a
+        // handful of templates caps the genetic variation at the number of
+        // templates, and establishment success then does not respond to
+        // propagule size at all -- contradicting one of the best-supported
+        // results in invasion biology.
         let mut plant_founders: Vec<(PlantGenome, u16)> = Vec::with_capacity(lineages);
         for l in 0..lineages {
             let mut g = [0u8; PLANT_GENE_COUNT];
@@ -227,16 +240,37 @@ impl World {
             let sp = self.plant_species.found(g, hue, 0);
             plant_founders.push((g, sp));
         }
-        for i in 0..cfg.initial_plants as usize {
-            let (g, sp) = plant_founders[i % lineages];
+        for _ in 0..cfg.initial_plants as usize {
+            let mut g = [0u8; PLANT_GENE_COUNT];
+            for slot in g.iter_mut() {
+                *slot = rng.below(256) as u8;
+            }
+            let sp = plant_founders
+                .iter()
+                .min_by(|a, b| {
+                    genome::plant_distance(&a.0, &g).total_cmp(&genome::plant_distance(&b.0, &g))
+                })
+                .map(|c| c.1)
+                .unwrap_or(0);
             let x = rng.range(0.0, world_size);
             let y = rng.range(0.0, world_size);
             let max_size = genome::plant_trait(&g, pg::MAX_SIZE);
-            let biomass = (max_size * cfg.founder_plant_fill).max(cfg.plant_seed_min);
+            let wanted = (max_size * cfg.founder_plant_fill).max(cfg.plant_seed_min);
+            // Founders are built out of the world's matter, not added on top of
+            // it. Handing them free biomass made the founding cohort, rather
+            // than `soil_density`, the thing that actually set the size of the
+            // nutrient budget -- which left the parameter documented as the
+            // world's matter ceiling controlling only a fraction of it.
+            let cell = self.grid.cell_of(x, y) as usize;
+            let biomass = wanted.min(self.grid.soil[cell]);
+            if biomass < cfg.plant_seed_min {
+                continue;
+            }
             let id = self.alloc_id();
             if !self.plants.push(x, y, biomass, &g, sp, id) {
                 break;
             }
+            self.grid.soil[cell] -= biomass;
         }
 
         // Founding animal lineages, each with its own random brain.
@@ -252,23 +286,42 @@ impl World {
             let sp = self.animal_species.found(g, hue, 0);
             animal_founders.push((g, b, sp));
         }
-        for i in 0..cfg.initial_animals as usize {
-            let (g, b, sp) = &animal_founders[i % lineages];
+        for _ in 0..cfg.initial_animals as usize {
+            let mut g = [0u8; ANIMAL_GENE_COUNT];
+            for slot in g.iter_mut() {
+                *slot = rng.below(256) as u8;
+            }
+            let mut b = vec![0i8; BRAIN_LEN];
+            brain::randomize(&mut b, &mut rng);
+            let sp = animal_founders
+                .iter()
+                .min_by(|a, b| {
+                    genome::animal_distance(&a.0, &g).total_cmp(&genome::animal_distance(&b.0, &g))
+                })
+                .map(|c| c.2)
+                .unwrap_or(0);
             let x = rng.range(0.0, world_size);
             let y = rng.range(0.0, world_size);
             let heading = rng.range(0.0, TAU);
-            let size = genome::animal_trait(g, ag::SIZE);
-            let store = genome::animal_trait(g, ag::ENERGY_STORE);
+            let size = genome::animal_trait(&g, ag::SIZE);
+            let store = genome::animal_trait(&g, ag::ENERGY_STORE);
             let energy = cfg.energy_per_size * size * store * cfg.founder_energy;
             let id = self.alloc_id();
-            let (g, b, sp) = (*g, b.clone(), *sp);
-            let reserve = cfg.mass_per_size * size * cfg.reserve_capacity;
+            // A body is matter, drawn from where it stands, like every body born
+            // afterwards. Founders start with no *reserve*: they have to eat
+            // before they can build anything.
+            let cell = self.grid.cell_of(x, y) as usize;
+            let body = cfg.mass_per_size * size;
+            if self.grid.soil[cell] < body {
+                continue;
+            }
             if !self
                 .animals
-                .push(x, y, heading, energy, &g, &b, sp, id, reserve)
+                .push(x, y, heading, energy, &g, &b, sp, id, 0.0)
             {
                 break;
             }
+            self.grid.soil[cell] -= body;
             // Spread founders across their lifespans. A cohort born all at once
             // cannot reproduce at all until the maturity age passes -- several
             // hundred ticks during which the population can only shrink.
@@ -277,7 +330,7 @@ impl World {
             self.animals.age[slot] = rng.range(0.0, maturity * 1.5) as u16;
         }
 
-        self.env.update(&self.cfg, 0);
+        self.env.update(&self.cfg, 0, &mut self.rng);
         self.rebuild_index();
         self.census();
         self.collect_stats();
@@ -287,12 +340,13 @@ impl World {
 
     pub fn tick(&mut self) {
         self.counters = TickCounters::default();
-        self.env.update(&self.cfg, self.tick);
+        self.env.update(&self.cfg, self.tick, &mut self.rng);
         self.rebuild_index();
         self.update_plants();
         self.update_animals();
         self.settle_plant_births();
         self.settle_animal_births();
+        self.apply_disturbances();
         self.plants.compact();
         self.animals.compact();
         self.grid.diffuse_soil(self.cfg.soil_diffusion);
@@ -330,10 +384,13 @@ impl World {
         for i in 0..animal_count {
             let c = self.grid.animals.cell_of[i] as usize;
             let size = tables.animal[ag::SIZE][self.animals.gene(i, ag::SIZE) as usize];
-            let diet = tables.animal[ag::DIET][self.animals.gene(i, ag::DIET) as usize];
+            let carnivory = genome::carnivory(
+                tables.animal[ag::GUT_PLANT][self.animals.gene(i, ag::GUT_PLANT) as usize],
+                tables.animal[ag::GUT_MEAT][self.animals.gene(i, ag::GUT_MEAT) as usize],
+            );
             let mass = self.cfg.mass_per_size * size;
-            self.grid.prey_mass[c] += mass * (1.0 - diet);
-            self.grid.threat_mass[c] += mass * diet;
+            self.grid.prey_mass[c] += mass * (1.0 - carnivory);
+            self.grid.threat_mass[c] += mass * carnivory;
             self.grid.animal_count[c] += 1.0;
         }
     }
@@ -368,9 +425,11 @@ impl World {
             if members.is_empty() {
                 continue;
             }
-            let row = geom.row_of(cell as u32) as usize;
-            let light = env.row_light[row];
-            let temp = env.row_temp[row];
+            let row = geom.row_of(cell as u32);
+            // Light is the latitude baseline scaled by this region's current
+            // productivity, so a drought is a real local loss of income.
+            let light = env.light_at(cell, row);
+            let temp = env.row_temp[row as usize];
             // Shading is computed from the cell's total biomass once, so a
             // crowded cell suppresses everyone in it including the plant that
             // made it crowded.
@@ -509,7 +568,10 @@ impl World {
                             cfg.energy_per_size * size * tables.animal[ag::ENERGY_STORE][b_store];
                         let reserve_cap = mass * cfg.reserve_capacity;
                         let lifespan = tables.animal[ag::LIFESPAN][b_life];
-                        let diet = tables.animal[ag::DIET][animals.gene(i, ag::DIET) as usize];
+                        let b_gut_plant = animals.gene(i, ag::GUT_PLANT) as usize;
+                        let b_gut_meat = animals.gene(i, ag::GUT_MEAT) as usize;
+                        let digest_plant = tables.animal[ag::GUT_PLANT][b_gut_plant];
+                        let digest_meat = tables.animal[ag::GUT_MEAT][b_gut_meat];
                         let temp_opt =
                             tables.animal[ag::TEMP_OPT][animals.gene(i, ag::TEMP_OPT) as usize];
 
@@ -521,11 +583,20 @@ impl World {
                         let vision_n = b_vision as f32 * (1.0 / 255.0);
                         let combat_n = (b_attack + b_defense) as f32 * (1.0 / 510.0);
                         let longevity_n = (b_life + b_store) as f32 * (1.0 / 510.0);
+                        // Both guts are carried, so both are paid for. This is
+                        // the entire cost of being a generalist.
+                        let gut_n = (b_gut_plant + b_gut_meat) as f32 * (1.0 / 255.0);
+                        // Basal rate, scaled up by what the animal is carrying.
+                        // Organ costs are fractions of basal, not independent
+                        // terms of the same size as it.
+                        let organ_load = 1.0
+                            + cfg.vision_upkeep * vision_n
+                            + cfg.combat_upkeep * combat_n
+                            + cfg.longevity_upkeep * longevity_n
+                            + cfg.gut_upkeep * gut_n;
                         let upkeep = tables.kleiber[b_size]
-                            * (cfg.metabolism
-                                + cfg.vision_upkeep * vision_n
-                                + cfg.combat_upkeep * combat_n
-                                + cfg.longevity_upkeep * longevity_n)
+                            * cfg.metabolism
+                            * organ_load
                             * (1.0 + cfg.temp_stress * (1.0 - fit));
 
                         let id = animals.id[i];
@@ -630,12 +701,11 @@ impl World {
                         // decided by diet and temperament together, so a herbivore with
                         // a violent streak still mostly eats plants.
                         if consume > 0.0 {
-                            let (digest_plant, digest_meat) =
-                                genome::digestion(diet, cfg.diet_specialism);
-                            let aggression = tables.animal[ag::AGGRESSION]
-                                [animals.gene(i, ag::AGGRESSION) as usize];
+                            // What it hunts for follows from what it can
+                            // digest: an animal with more carnivore gut than
+                            // herbivore gut spends more of its effort hunting.
                             let hunt = digest_meat > 0.01
-                                && rng.chance(clamp(diet * 0.6 + aggression * 0.4, 0.0, 1.0));
+                                && rng.chance(genome::carnivory(digest_plant, digest_meat));
 
                             // Whether the hunt actually happened. A hunt that finds
                             // nothing must fall through to grazing rather than costing
@@ -769,6 +839,7 @@ impl World {
                                     * tables.animal[ag::REPRO_THRESHOLD]
                                         [animals.gene(i, ag::REPRO_THRESHOLD) as usize]
                         {
+                            counters.animal_repro_ready += 1;
                             animal_births.push(ai);
                         }
 
@@ -814,7 +885,7 @@ impl World {
                 continue;
             }
             if plants.is_full() {
-                counters.failed_births += 1;
+                counters.plant_births_blocked += 1;
                 continue;
             }
             let biomass = plants.biomass[i];
@@ -822,7 +893,7 @@ impl World {
             let seed_mass = (biomass * invest).max(cfg.plant_seed_min);
             // A parent may not starve itself to seed.
             if seed_mass >= biomass - cfg.plant_min_biomass {
-                counters.failed_births += 1;
+                counters.plant_births_blocked += 1;
                 continue;
             }
 
@@ -851,7 +922,7 @@ impl World {
                 plants.biomass[i] = biomass - seed_mass;
                 counters.plant_births += 1;
             } else {
-                counters.failed_births += 1;
+                counters.plant_births_blocked += 1;
             }
         }
     }
@@ -882,7 +953,7 @@ impl World {
                 continue;
             }
             if animals.is_full() {
-                counters.failed_births += 1;
+                counters.animal_births_blocked_space += 1;
                 continue;
             }
 
@@ -896,7 +967,7 @@ impl World {
             let child_size = tables.animal[ag::SIZE][child[ag::SIZE] as usize];
             let child_mass = cfg.mass_per_size * child_size;
             if animals.reserve[i] < child_mass {
-                counters.failed_births += 1;
+                counters.animal_births_blocked_matter += 1;
                 continue;
             }
 
@@ -904,7 +975,7 @@ impl World {
                 tables.animal[ag::OFFSPRING_INVEST][parent_genome[ag::OFFSPRING_INVEST] as usize];
             let dowry = animals.energy[i] * invest;
             if dowry <= 0.0 {
-                counters.failed_births += 1;
+                counters.animal_births_blocked_matter += 1;
                 continue;
             }
 
@@ -945,8 +1016,90 @@ impl World {
                 animals.energy[i] -= dowry;
                 counters.animal_births += 1;
             } else {
-                counters.failed_births += 1;
+                counters.animal_births_blocked_space += 1;
             }
+        }
+    }
+
+    /// Fire, storm, flood: patch-scale destruction.
+    ///
+    /// Disturbance is a structuring force in most real ecosystems rather than
+    /// an interruption to one. It clears space, resets succession, and kills
+    /// without regard to fitness, which is a different selective regime from
+    /// starvation and predation and is why a world without it drifts toward a
+    /// single well-adapted competitor.
+    ///
+    /// Matter is conserved: everything killed goes to the soil where it fell.
+    fn apply_disturbances(&mut self) {
+        let cfg = self.cfg;
+        if cfg.disturbance_rate <= 0.0 {
+            return;
+        }
+        // Poisson-ish: the rate is expected events per tick, so fractional
+        // rates become a per-tick probability and rates above one become
+        // several events.
+        let mut remaining = cfg.disturbance_rate;
+        while remaining > 0.0 {
+            let fire = if remaining >= 1.0 {
+                true
+            } else {
+                self.rng.chance(remaining)
+            };
+            remaining -= 1.0;
+            if !fire {
+                break;
+            }
+
+            let size = cfg.world_size;
+            let cx = self.rng.range(0.0, size);
+            let cy = self.rng.range(0.0, size);
+            let radius = cfg.disturbance_radius * size;
+            let r2 = radius * radius;
+            let tables = genome::tables();
+
+            for i in 0..self.plants.len() {
+                if !self.plants.alive[i] {
+                    continue;
+                }
+                let d2 =
+                    crate::grid::wrap_dist_sq(cx, cy, self.plants.x[i], self.plants.y[i], size);
+                if d2 > r2 {
+                    continue;
+                }
+                // Severity falls off toward the edge, so a burn has a core and
+                // a margin rather than a cliff.
+                let intensity = cfg.disturbance_severity * (1.0 - d2 / r2);
+                if self.rng.chance(intensity) {
+                    let cell = self.grid.cell_of(self.plants.x[i], self.plants.y[i]) as usize;
+                    self.grid.soil[cell] += self.plants.biomass[i].max(0.0);
+                    self.plants.biomass[i] = 0.0;
+                    self.plants.alive[i] = false;
+                    self.counters.plant_deaths += 1;
+                    self.counters.disturbed += 1;
+                }
+            }
+            for i in 0..self.animals.len() {
+                if !self.animals.alive[i] {
+                    continue;
+                }
+                let d2 =
+                    crate::grid::wrap_dist_sq(cx, cy, self.animals.x[i], self.animals.y[i], size);
+                if d2 > r2 {
+                    continue;
+                }
+                let intensity = cfg.disturbance_severity * (1.0 - d2 / r2);
+                if self.rng.chance(intensity) {
+                    let cell = self.grid.cell_of(self.animals.x[i], self.animals.y[i]) as usize;
+                    let size_gene = self.animals.gene(i, ag::SIZE) as usize;
+                    let mass = cfg.mass_per_size * tables.animal[ag::SIZE][size_gene];
+                    self.grid.soil[cell] += mass + self.animals.reserve[i].max(0.0);
+                    self.animals.reserve[i] = 0.0;
+                    self.animals.alive[i] = false;
+                    self.counters.animal_deaths += 1;
+                    self.counters.disturbed += 1;
+                }
+            }
+            self.counters.disturbances += 1;
         }
     }
 
@@ -970,7 +1123,10 @@ impl World {
         for i in 0..self.animals.len() {
             self.animal_species.count(self.animals.species[i]);
             let size = tables.animal[ag::SIZE][self.animals.gene(i, ag::SIZE) as usize];
-            let diet = tables.animal[ag::DIET][self.animals.gene(i, ag::DIET) as usize];
+            let diet = genome::carnivory(
+                tables.animal[ag::GUT_PLANT][self.animals.gene(i, ag::GUT_PLANT) as usize],
+                tables.animal[ag::GUT_MEAT][self.animals.gene(i, ag::GUT_MEAT) as usize],
+            );
             accum.size += size as f64;
             accum.animal_mass += (self.cfg.mass_per_size * size + self.animals.reserve[i]) as f64;
             accum.animal_energy += self.animals.energy[i] as f64;
@@ -1025,7 +1181,15 @@ impl World {
             animal_births: self.counters.animal_births as f32,
             animal_deaths: self.counters.animal_deaths as f32,
             kills: self.counters.kills as f32,
-            failed_births: self.counters.failed_births as f32,
+            disturbances: self.counters.disturbances as f32,
+            disturbance_deaths: self.counters.disturbed as f32,
+            productivity: self.env.mean_productivity(),
+            drought_fraction: self.env.drought_fraction(0.7),
+            temp_anomaly: self.env.temp_anomaly,
+            plant_births_blocked: self.counters.plant_births_blocked as f32,
+            animal_repro_ready: self.counters.animal_repro_ready as f32,
+            animal_births_blocked_matter: self.counters.animal_births_blocked_matter as f32,
+            animal_births_blocked_space: self.counters.animal_births_blocked_space as f32,
             mean_size: (a.size / adiv) as f32,
             mean_max_speed: (a.max_speed / adiv) as f32,
             mean_diet: (a.diet / adiv) as f32,
@@ -1082,7 +1246,11 @@ impl World {
         self.next_id = next_id;
         self.rng = Rng::from_bits(rng_state, rng_inc);
         self.counters = TickCounters::default();
-        self.env.update(&self.cfg, tick);
+        // Deliberately not `env.update`: that would advance the climate a step
+        // and consume a draw, so a loaded world would start one tick out of
+        // step with the one that was saved. The per-row tables are recomputed
+        // from the restored state instead.
+        self.env.refresh(&self.cfg, tick);
         self.rebuild_index();
         self.census();
         self.collect_stats();
@@ -1177,7 +1345,10 @@ impl World {
         }
 
         for i in 0..self.animals.len() {
-            let diet = tables.animal[ag::DIET][self.animals.gene(i, ag::DIET) as usize];
+            let diet = genome::carnivory(
+                tables.animal[ag::GUT_PLANT][self.animals.gene(i, ag::GUT_PLANT) as usize],
+                tables.animal[ag::GUT_MEAT][self.animals.gene(i, ag::GUT_MEAT) as usize],
+            );
             let (r, g, b) = match mode {
                 ColorMode::Species => {
                     let c = self.animal_palette
@@ -1528,6 +1699,96 @@ mod tests {
         let qy = u16::from_le_bytes([buf[2], buf[3]]) as f32 * scale;
         assert!((qx - w.plants.x[0]).abs() < w.cfg.world_size / 32768.0 + 1e-3);
         assert!((qy - w.plants.y[0]).abs() < w.cfg.world_size / 32768.0 + 1e-3);
+    }
+
+    #[test]
+    fn disturbance_kills_and_conserves() {
+        let mut c = small();
+        c.disturbance_rate = 2.0;
+        c.disturbance_radius = 0.25;
+        c.disturbance_severity = 1.0;
+        let mut w = World::new(c, 21);
+        let matter = w.total_matter();
+        let before = w.population();
+        w.tick();
+        assert!(w.stats.disturbances >= 1.0, "no disturbance fired");
+        assert!(
+            w.stats.disturbance_deaths > 0.0,
+            "disturbance killed nothing"
+        );
+        assert!(w.population() < before, "population did not fall");
+        // What burns has to end up in the soil, not vanish.
+        assert!(
+            (w.total_matter() - matter).abs() < matter * 1e-4,
+            "disturbance leaked matter"
+        );
+    }
+
+    #[test]
+    fn disturbance_can_be_switched_off() {
+        let mut c = small();
+        c.disturbance_rate = 0.0;
+        let mut w = World::new(c, 22);
+        for _ in 0..200 {
+            w.tick();
+            assert_eq!(w.stats.disturbances, 0.0);
+            assert_eq!(w.stats.disturbance_deaths, 0.0);
+        }
+    }
+
+    /// A run of bad years has to be able to actually hurt, or the climate is
+    /// decoration. Forced to a single region here so the drought is global and
+    /// the effect is unambiguous; that droughts are normally *regional*, and so
+    /// leave refuges, is covered in `env`.
+    #[test]
+    fn a_severe_drought_suppresses_the_world() {
+        let mut calm = small();
+        calm.climate_regions = 1;
+        calm.climate_variance = 0.0;
+        calm.temp_variance = 0.0;
+        calm.disturbance_rate = 0.0;
+        let mut steady = World::new(calm, 31);
+        steady.tick_many(1_500);
+
+        let mut harsh = calm;
+        harsh.climate_variance = 0.6;
+        harsh.climate_redness = 0.999;
+        let mut stormy = World::new(harsh, 31);
+        let mut worst = f32::MAX;
+        let mut worst_biomass = f32::MAX;
+        for _ in 0..1_500 {
+            stormy.tick();
+            worst = worst.min(stormy.stats.productivity);
+            worst_biomass = worst_biomass.min(stormy.stats.plant_biomass);
+        }
+        assert!(worst < 0.8, "productivity never had a bad spell: {worst}");
+        assert!(
+            worst_biomass < steady.stats.plant_biomass * 0.95,
+            "a drought never dented the biomass: {worst_biomass} against a calm {}",
+            steady.stats.plant_biomass
+        );
+    }
+
+    /// Regional droughts must leave somewhere to survive.
+    #[test]
+    fn droughts_leave_refuges() {
+        let mut c = small();
+        c.climate_regions = 8;
+        c.climate_variance = 0.5;
+        c.climate_redness = 0.995;
+        let mut w = World::new(c, 33);
+        let mut saw_partial_drought = false;
+        for _ in 0..3_000 {
+            w.tick();
+            let f = w.stats.drought_fraction;
+            if f > 0.05 && f < 0.9 {
+                saw_partial_drought = true;
+            }
+        }
+        assert!(
+            saw_partial_drought,
+            "drought was never partial: either it never happened or it was always total"
+        );
     }
 
     #[test]

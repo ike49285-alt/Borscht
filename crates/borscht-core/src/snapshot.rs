@@ -19,7 +19,7 @@ use crate::species::{Record, Registry, MAX_SPECIES};
 use crate::world::World;
 
 const MAGIC: &[u8; 8] = b"BORSCHT\x01";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -221,6 +221,11 @@ pub fn save(world: &World) -> Vec<u8> {
     let (rng_state, rng_inc) = world.rng_bits();
     w.u64(rng_state);
     w.u64(rng_inc);
+    // The climate is an autocorrelated process with a long memory, so it is
+    // state rather than a function of the tick.
+    w.f32(world.env.temp_anomaly);
+    w.u32(world.env.regions_state().len() as u32);
+    w.f32s(world.env.regions_state());
 
     w.u32(PARAMS.len() as u32);
     for i in 0..PARAMS.len() {
@@ -287,6 +292,13 @@ pub fn load(bytes: &[u8]) -> Result<World, SnapshotError> {
     let next_id = r.u32()?;
     let rng_state = r.u64()?;
     let rng_inc = r.u64()?;
+    let temp_anomaly = r.f32()?;
+    let region_count = r.u32()? as usize;
+    if region_count > 64 * 64 {
+        return Err(SnapshotError::TooLarge);
+    }
+    let mut regions = vec![0.0f32; region_count];
+    r.f32s(&mut regions)?;
 
     let param_count = r.u32()? as usize;
     if param_count != PARAMS.len() {
@@ -353,6 +365,10 @@ pub fn load(bytes: &[u8]) -> Result<World, SnapshotError> {
     world.plant_species = read_registry(&mut r)?;
     world.animal_species = read_registry(&mut r)?;
 
+    world.env.temp_anomaly = temp_anomaly;
+    if !world.env.set_regions_state(&regions) {
+        return Err(SnapshotError::ParamMismatch);
+    }
     world.restore(tick, next_id, rng_state, rng_inc);
     Ok(world)
 }

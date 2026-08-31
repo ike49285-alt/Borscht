@@ -102,7 +102,10 @@ config_params! {
     initial_plants: u32 = 300_000, "world", 100.0, 4_000_000.0;
     /// Animals seeded at reset.
     initial_animals: u32 = 12_000, "world", 10.0, 2_000_000.0;
-    /// Distinct founder lineages, each starting from its own random genome.
+    /// Cluster centres used to label the founding population's species.
+    ///
+    /// Founders are independent random genotypes; this only decides how many
+    /// labels they are sorted into, not how much variation there is.
     founder_lineages: u32 = 24, "world", 1.0, 512.0;
     /// Fraction of full reserves that founding animals start with.
     founder_energy: f32 = 0.60, "world", 0.05, 1.0;
@@ -132,6 +135,35 @@ config_params! {
     /// Fraction of a cell's surplus nutrient that spreads to its neighbours
     /// each tick. Keeps dead zones from becoming permanent.
     soil_diffusion: f32 = 0.06, "environment", 0.0, 0.25;
+    // ---- environmental stochasticity ----
+    /// Resolution, per side, of the regional climate field. Regional droughts
+    /// are the reason this is not a single global number: a world where every
+    /// place has a bad year at once has no refuges, and refuges are what
+    /// populations actually persist in.
+    climate_regions: u32 = 8, "environment", 1.0, 64.0;
+    /// Autocorrelation of the regional productivity anomaly, per tick.
+    ///
+    /// Environmental time series are reddened, not white. White noise averages
+    /// out over a lifetime and barely perturbs a population; autocorrelated
+    /// noise produces runs of bad years, which is what actually drives
+    /// populations to extinction. Values near 1 mean long memory.
+    climate_redness: f32 = 0.9970, "environment", 0.0, 0.9999;
+    /// Standard deviation of the regional productivity anomaly, as a fraction
+    /// of mean productivity.
+    climate_variance: f32 = 0.35, "environment", 0.0, 1.0;
+    /// Autocorrelation of the global temperature anomaly, per tick.
+    temp_redness: f32 = 0.9990, "environment", 0.0, 0.9999;
+    /// Standard deviation of the global temperature anomaly, in the same units
+    /// as the latitude gradient.
+    temp_variance: f32 = 0.22, "environment", 0.0, 2.0;
+    /// Expected disturbance events per tick: fire, storm, flood. Patch-scale
+    /// destruction is a structuring force in most real ecosystems, not an
+    /// interruption to one.
+    disturbance_rate: f32 = 0.02, "environment", 0.0, 5.0;
+    /// Disturbance radius as a fraction of the world's width.
+    disturbance_radius: f32 = 0.045, "environment", 0.001, 0.5;
+    /// Fraction of organisms killed at the centre of a disturbance.
+    disturbance_severity: f32 = 0.9, "environment", 0.0, 1.0;
     /// Soil density at which nutrient uptake runs at half rate.
     soil_half: f32 = 0.09, "environment", 0.002, 4.0;
 
@@ -165,14 +197,20 @@ config_params! {
     /// How much matter an animal can hold, as a multiple of its own body mass.
     /// Bounded so a long-lived grazer cannot hoard the world's nutrient budget.
     reserve_capacity: f32 = 4.0, "animals", 0.1, 50.0;
-    /// Baseline upkeep, multiplied by `size^0.75`.
-    metabolism: f32 = 0.040, "animals", 0.0, 1.0;
-    /// Upkeep surcharge for a fully developed sensory system.
-    vision_upkeep: f32 = 0.020, "animals", 0.0, 0.5;
-    /// Upkeep surcharge for maximum weapons and armour.
-    combat_upkeep: f32 = 0.030, "animals", 0.0, 0.5;
-    /// Upkeep surcharge for maximum lifespan and reserves.
-    longevity_upkeep: f32 = 0.020, "animals", 0.0, 0.5;
+    /// Basal metabolic rate coefficient, multiplied by `size^0.75`.
+    ///
+    /// Everything below is expressed as a *fraction of basal*, which is how
+    /// organ maintenance is actually measured. They used to be independent
+    /// additive surcharges of the same magnitude as basal itself, so an animal
+    /// with middling genes paid over two and a half times its basal rate in
+    /// organ costs alone and income never cleared upkeep by any margin.
+    metabolism: f32 = 0.045, "animals", 0.0, 1.0;
+    /// Cost of a fully developed sensory system, as a fraction of basal rate.
+    vision_upkeep: f32 = 0.25, "animals", 0.0, 3.0;
+    /// Cost of maximum weapons and armour, as a fraction of basal rate.
+    combat_upkeep: f32 = 0.30, "animals", 0.0, 3.0;
+    /// Cost of slow ageing and large reserves, as a fraction of basal rate.
+    longevity_upkeep: f32 = 0.25, "animals", 0.0, 3.0;
     /// Cost of movement, multiplied by size and the square of speed.
     move_cost: f32 = 0.085, "animals", 0.0, 2.0;
     /// Plant biomass an animal can ingest per tick, per unit of size, when food
@@ -209,10 +247,13 @@ config_params! {
     energy_per_biomass: f32 = 7.0, "animals", 0.1, 50.0;
     /// How much of a plant's toxicity blocks energy extraction.
     toxicity_defence: f32 = 0.85, "animals", 0.0, 1.0;
-    /// How much better a dietary specialist digests its own food than an
-    /// omnivore does. Raising this deepens the valley between herbivory and
-    /// carnivory and can make predators unreachable by evolution.
-    diet_specialism: f32 = 0.20, "animals", 0.0, 1.0;
+    /// Upkeep surcharge for a fully developed digestive system, per gut.
+    ///
+    /// This is the whole trade-off behind diet. Carrying the machinery for both
+    /// plants and flesh means paying for both, so a generalist runs at a
+    /// standing cost a specialist does not, and specialisation emerges from that
+    /// rather than from a curve chosen in advance to produce it.
+    gut_upkeep: f32 = 0.45, "animals", 0.0, 3.0;
     /// Fraction of a killed animal's energy the predator absorbs.
     predation_efficiency: f32 = 0.85, "animals", 0.0, 1.0;
     /// Energy spent on a failed attack, per unit of size.

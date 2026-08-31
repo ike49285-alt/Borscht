@@ -2,7 +2,7 @@
 // the simulation worker. It never touches WebAssembly directly.
 
 import { Renderer } from './renderer.js';
-import { PARAMS } from './params.js';
+import { PARAMS, ANIMAL_GENES, PLANT_GENES } from './params.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('view');
@@ -197,7 +197,7 @@ const fmt = (v) => {
 const TRAITS = [
   ['mean_size', 'size', (v) => v.toFixed(2)],
   ['mean_max_speed', 'speed', (v) => v.toFixed(2)],
-  ['mean_diet', 'diet', (v) => v.toFixed(3)],
+  ['mean_diet', 'carnivory', (v) => v.toFixed(3)],
   ['mean_vision', 'vision', (v) => v.toFixed(2)],
   ['mean_lifespan', 'lifespan', (v) => fmt(v)],
   ['mean_mutation_rate', 'mutation', (v) => v.toFixed(4)],
@@ -205,6 +205,10 @@ const TRAITS = [
   ['mean_plant_toxicity', 'plant toxin', (v) => v.toFixed(3)],
   ['mean_plant_growth', 'plant growth', (v) => v.toFixed(3)],
   ['kills', 'kills/tick', (v) => v.toFixed(0)],
+  ['productivity', 'productivity', (v) => v.toFixed(2)],
+  ['drought_fraction', 'in drought', (v) => `${(v * 100).toFixed(0)}%`],
+  ['temp_anomaly', 'temp anomaly', (v) => v.toFixed(2)],
+  ['disturbances', 'disturbances', (v) => v.toFixed(0)],
 ];
 
 function updatePanel(stats, species) {
@@ -241,12 +245,12 @@ function updatePanel(stats, species) {
     .join('') || '<div class="item" style="color:var(--muted)">no species yet</div>';
 }
 
+// Generated from the Rust gene definitions, not written out here: the
+// inspector labels traits positionally, so a hand-maintained list mislabels
+// every gene the moment one is renamed or reordered.
 const GENE_NAMES = {
-  animal: ['size', 'max speed', 'vision', 'diet', 'attack', 'defense', 'maturity',
-    'offspring invest', 'mutation rate', 'lifespan', 'temp optimum', 'temp tolerance',
-    'hue', 'energy store', 'repro threshold', 'aggression'],
-  plant: ['growth rate', 'max size', 'seed range', 'seed invest', 'toxicity',
-    'temp optimum', 'temp tolerance', 'hue'],
+  animal: ANIMAL_GENES.map((n) => n.replace(/_/g, ' ')),
+  plant: PLANT_GENES.map((n) => n.replace(/_/g, ' ')),
 };
 
 function showInspector(organism) {

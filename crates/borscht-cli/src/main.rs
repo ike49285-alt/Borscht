@@ -202,6 +202,20 @@ fn emit_params_js() {
         println!("  \"{}\",", esc(name));
     }
     println!("];");
+
+    // Gene names are generated for the same reason the parameters are: the
+    // inspector labels traits positionally, so a hand-written list silently
+    // mislabels every gene the moment one is renamed or reordered.
+    println!("export const ANIMAL_GENES = [");
+    for spec in borscht_core::genome::ANIMAL_GENES {
+        println!("  \"{}\",", esc(spec.name));
+    }
+    println!("];");
+    println!("export const PLANT_GENES = [");
+    for spec in borscht_core::genome::PLANT_GENES {
+        println!("  \"{}\",", esc(spec.name));
+    }
+    println!("];");
 }
 
 fn list_params() {
