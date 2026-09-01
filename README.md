@@ -187,6 +187,23 @@ animals cost 194 MB of weights instead of 780 MB. And brains run on a stagger,
 each animal thinking every fourth tick on its own offset, while movement
 integrates every tick.
 
+## Small worlds die
+
+Establishment depends sharply on how big the world is. Six seeds each, 6,000
+ticks, counting a world as established if it still has more than 100 animals:
+
+| organisms | established | animal species in survivors |
+|-----------|------------:|----------------------------|
+| 40,000    | 1 / 6       | 9                          |
+| 120,000   | 5 / 6       | up to 43                   |
+| 300,000   | 5 / 6       | 123 – 692                  |
+
+This is minimum-viable-population behaviour and it fell out of the model rather
+than being put in. It is also worth knowing before drawing conclusions from a
+small run: most of this project's debugging happened at 40,000 organisms, where
+extinction dominates and it is easy to mistake an island too small to hold a
+sexual population for a bug.
+
 ## Tests
 
 ```
