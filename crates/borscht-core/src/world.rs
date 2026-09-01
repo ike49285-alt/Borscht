@@ -154,6 +154,18 @@ pub struct World {
     /// something engineered away.
     rng: Rng,
     next_id: OrganismId,
+    /// Total matter present when the world was seeded.
+    ///
+    /// Matter is conserved, so this plus `matter_ledger` is what the world
+    /// should hold at every later tick -- which is what makes drift a
+    /// correctness test rather than an outcome.
+    founding_matter: f64,
+    /// Net matter added (positive) or withdrawn (negative) by the operator
+    /// through `set_matter_target`.
+    ///
+    /// The conservation invariant is not relaxed for the control; the control
+    /// is accounted for, so an intervention still cannot hide a leak.
+    matter_ledger: f64,
     plant_births: Vec<u32>,
     animal_births: Vec<u32>,
     counters: TickCounters,
@@ -189,6 +201,8 @@ impl World {
             tick: 0,
             rng: Rng::new(seed, 0x9E37_79B9),
             next_id: 1,
+            founding_matter: 0.0,
+            matter_ledger: 0.0,
             plant_births: Vec::new(),
             animal_births: Vec::new(),
             counters: TickCounters::default(),
@@ -214,6 +228,7 @@ impl World {
         self.plant_species = Registry::new();
         self.animal_species = Registry::new();
         self.counters = TickCounters::default();
+        self.matter_ledger = 0.0;
         self.seed_world();
     }
 
@@ -352,6 +367,7 @@ impl World {
         self.env.update(&self.cfg, 0, &mut self.rng);
         self.rebuild_index();
         self.census();
+        self.founding_matter = self.total_matter();
         self.collect_stats();
     }
 
@@ -1363,6 +1379,187 @@ impl World {
         total
     }
 
+    /// Restore the matter budget alongside the populations. Without it a loaded
+    /// world would measure its conservation against a budget it never had, and
+    /// an operator withdrawal would read as a leak after a rewind.
+    pub fn set_matter_budget(&mut self, founding: f64, ledger: f64) {
+        self.founding_matter = founding;
+        self.matter_ledger = ledger;
+    }
+
+    /// What the world should hold: what it was seeded with, plus whatever the
+    /// operator has since put in or taken out.
+    pub fn matter_budget(&self) -> f64 {
+        self.founding_matter + self.matter_ledger
+    }
+
+    /// Matter the operator has added (positive) or removed (negative).
+    pub fn matter_ledger(&self) -> f64 {
+        self.matter_ledger
+    }
+
+    /// Total matter at the moment the world was seeded.
+    pub fn founding_matter(&self) -> f64 {
+        self.founding_matter
+    }
+
+    /// Add matter to the world, or take it out, as a multiple of what the world
+    /// was founded with. Returns the signed amount actually moved.
+    ///
+    /// This is an intervention, not a process: a step change in how much stuff
+    /// there is to go round, of the kind an experimenter makes rather than one
+    /// an ecosystem makes for itself. It exists so the standing crop can be
+    /// pushed and the consequences watched.
+    ///
+    /// Withdrawal works down the trophic structure from the bottom, taking the
+    /// dead before the living and the producers before the consumers:
+    ///
+    /// 1. **Soil.** In this model soil *is* the dead-organism pool -- everything
+    ///    that dies goes to the soil where it fell -- so stripping the litter
+    ///    layer comes first and costs nothing alive.
+    /// 2. **Plant biomass**, scaled down evenly. Standing crop next.
+    /// 3. **Animal reserves**, then whole animals. Stores are fat and can be
+    ///    taken; past that an animal cannot be partially removed, so it dies and
+    ///    its whole body leaves with it.
+    ///
+    /// Every movement is recorded in `matter_ledger`, so conservation stays a
+    /// hard equality against `matter_budget` rather than being loosened.
+    pub fn set_matter_target(&mut self, factor: f32) -> f64 {
+        let factor = factor.clamp(0.0, 8.0) as f64;
+        let target = self.founding_matter * factor;
+        let current = self.total_matter();
+        let delta = target - current;
+        // A hair either way is not worth disturbing the world for, and floating
+        // point makes an exact match unreachable anyway.
+        if delta.abs() < current * 1e-6 {
+            return 0.0;
+        }
+        let moved = if delta > 0.0 {
+            self.add_matter(delta)
+        } else {
+            -self.withdraw_matter(-delta)
+        };
+        self.matter_ledger += moved;
+        // Withdrawal can kill, and the index and the census both assume the
+        // pools hold only the living.
+        self.animals.compact();
+        self.rebuild_index();
+        self.census();
+        self.collect_stats();
+        moved
+    }
+
+    /// Spread new matter over the soil in proportion to what is already there.
+    ///
+    /// Not uniformly: an even sheet would erase the spatial structure that
+    /// makes some places worth being in, which is most of what the soil field
+    /// is for. Where soil is uniformly absent there is no structure to
+    /// preserve, and it goes down evenly.
+    fn add_matter(&mut self, amount: f64) -> f64 {
+        let total = self.grid.total_soil();
+        let cells = self.grid.soil.len();
+        if cells == 0 {
+            return 0.0;
+        }
+        if total > 1e-9 {
+            let gain = amount / total;
+            for cell in self.grid.soil.iter_mut() {
+                *cell += (*cell as f64 * gain) as f32;
+            }
+        } else {
+            let each = (amount / cells as f64) as f32;
+            for cell in self.grid.soil.iter_mut() {
+                *cell += each;
+            }
+        }
+        amount
+    }
+
+    /// Take `amount` of matter out of the world, bottom of the food web first.
+    /// Returns how much was actually removed, which is less than asked for only
+    /// when the world does not hold that much.
+    fn withdraw_matter(&mut self, amount: f64) -> f64 {
+        let mut left = amount;
+
+        // 1. Soil: the dead.
+        let soil = self.grid.total_soil();
+        if soil > 0.0 {
+            let take = left.min(soil);
+            let keep = (1.0 - take / soil) as f32;
+            for cell in self.grid.soil.iter_mut() {
+                *cell *= keep;
+            }
+            left -= take;
+        }
+        if left <= 0.0 {
+            return amount;
+        }
+
+        // 2. Plants: the standing crop, thinned evenly rather than by choosing
+        //    which plants deserve to survive.
+        let mut plant_total = 0.0f64;
+        for i in 0..self.plants.len() {
+            if self.plants.alive[i] {
+                plant_total += self.plants.biomass[i].max(0.0) as f64;
+            }
+        }
+        if plant_total > 0.0 {
+            let take = left.min(plant_total);
+            let keep = (1.0 - take / plant_total) as f32;
+            for i in 0..self.plants.len() {
+                if self.plants.alive[i] {
+                    self.plants.biomass[i] *= keep;
+                }
+            }
+            left -= take;
+        }
+        if left <= 0.0 {
+            return amount;
+        }
+
+        // 3. Animals: reserves first, since stores are the losable part.
+        let mut reserve_total = 0.0f64;
+        for i in 0..self.animals.len() {
+            if self.animals.alive[i] {
+                reserve_total += self.animals.reserve[i].max(0.0) as f64;
+            }
+        }
+        if reserve_total > 0.0 {
+            let take = left.min(reserve_total);
+            let keep = (1.0 - take / reserve_total) as f32;
+            for i in 0..self.animals.len() {
+                if self.animals.alive[i] {
+                    self.animals.reserve[i] *= keep;
+                }
+            }
+            left -= take;
+        }
+        if left <= 0.0 {
+            return amount;
+        }
+
+        // 4. Bodies. An animal cannot be partly removed, so past its reserves
+        //    it dies and its whole mass leaves the world with it. Taken in
+        //    update order, like every other draw in this model.
+        let tables = genome::tables();
+        for i in 0..self.animals.len() {
+            if left <= 0.0 {
+                break;
+            }
+            if !self.animals.alive[i] {
+                continue;
+            }
+            let size = tables.animal[ag::SIZE][self.animals.gene(i, ag::SIZE) as usize];
+            let mass = (self.cfg.mass_per_size * size + self.animals.reserve[i].max(0.0)) as f64;
+            self.animals.reserve[i] = 0.0;
+            self.animals.alive[i] = false;
+            self.counters.animal_deaths += 1;
+            left -= mass;
+        }
+
+        amount - left.max(0.0)
+    }
+
     /// The id the next organism will receive.
     pub fn next_id(&self) -> OrganismId {
         self.next_id
@@ -1626,6 +1823,103 @@ mod tests {
     /// The central invariant. Matter moves between soil, plants and animal
     /// bodies but is never created or destroyed, so any drift here is a bug in
     /// one of the transfer paths rather than an ecological outcome.
+    /// The control moves matter to where it was asked to, and the ledger says
+    /// exactly how much moved -- so conservation stays an equality afterwards
+    /// rather than being excused.
+    #[test]
+    fn the_matter_control_hits_its_target_and_is_accounted_for() {
+        for factor in [0.4f32, 1.6, 0.9] {
+            let mut w = World::new(Config::default(), 91);
+            let founding = w.founding_matter();
+            let moved = w.set_matter_target(factor);
+            let now = w.total_matter();
+            let want = founding * factor as f64;
+            assert!(
+                (now - want).abs() < want * 1e-3,
+                "factor {factor}: holds {now}, asked for {want}"
+            );
+            assert!(
+                (w.matter_budget() - now).abs() < now * 1e-3,
+                "factor {factor}: budget {} vs total {now}",
+                w.matter_budget()
+            );
+            assert!(
+                (moved - (want - founding)).abs() < founding * 1e-3,
+                "factor {factor}: reported {moved}"
+            );
+            // And it still holds after the world runs on.
+            for _ in 0..200 {
+                w.tick();
+            }
+            let drift = (w.total_matter() - w.matter_budget()).abs() / w.matter_budget().max(1.0);
+            assert!(
+                drift < 1e-3,
+                "factor {factor}: drifted {drift} after 200 ticks"
+            );
+        }
+    }
+
+    /// Withdrawal takes the dead before the living, and the producers before the
+    /// consumers. A draw the soil alone can cover must leave every plant and
+    /// every animal untouched.
+    #[test]
+    fn withdrawal_takes_the_dead_first_then_plants_then_animals() {
+        let mut w = World::new(Config::default(), 17);
+        // Run a while so all three pools hold something worth taking.
+        for _ in 0..300 {
+            w.tick();
+        }
+        let soil = w.grid.total_soil();
+        let plants: f64 = (0..w.plants.len())
+            .map(|i| w.plants.biomass[i] as f64)
+            .sum();
+        let animals = w.animals.len();
+        assert!(soil > 0.0 && plants > 0.0 && animals > 0, "nothing to take");
+
+        // A withdrawal of half the soil must come entirely out of the soil.
+        let total = w.total_matter();
+        let want_out = soil * 0.5;
+        w.set_matter_target(((total - want_out) / w.founding_matter()) as f32);
+        let plants_after: f64 = (0..w.plants.len())
+            .map(|i| w.plants.biomass[i] as f64)
+            .sum();
+        assert!(
+            (plants_after - plants).abs() < plants * 1e-3,
+            "plants were touched while soil remained: {plants} -> {plants_after}"
+        );
+        assert_eq!(w.animals.len(), animals, "animals died while soil remained");
+        assert!(
+            (w.grid.total_soil() - soil * 0.5).abs() < soil * 1e-2,
+            "soil {} should be about half of {soil}",
+            w.grid.total_soil()
+        );
+
+        // Animals are a small share of the total, so a draw that reaches them
+        // has to be aimed at their own mass: leave half the bodies standing and
+        // nothing else.
+        let tables = genome::tables();
+        // Structural mass only: reserves are given up before any animal dies,
+        // so a target above what the bodies alone weigh never reaches them.
+        let bodies: f64 = (0..w.animals.len())
+            .filter(|&i| w.animals.alive[i])
+            .map(|i| {
+                let size = tables.animal[ag::SIZE][w.animals.gene(i, ag::SIZE) as usize];
+                (w.cfg.mass_per_size * size) as f64
+            })
+            .sum();
+        assert!(bodies > 0.0, "no bodies to take");
+        w.set_matter_target((bodies * 0.5 / w.founding_matter()) as f32);
+        assert!(w.grid.total_soil() < soil * 1e-3, "soil should be stripped");
+        assert!(
+            w.animals.len() < animals,
+            "animals should have died once soil and plants were gone"
+        );
+        assert!(
+            (w.total_matter() - w.matter_budget()).abs() < w.founding_matter() * 1e-3,
+            "the ledger lost track of a kill"
+        );
+    }
+
     #[test]
     fn matter_is_conserved() {
         let mut w = World::new(small(), 3);

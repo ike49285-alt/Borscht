@@ -191,8 +191,45 @@ const treeDrawn = await page.evaluate(() => {
 });
 await page.screenshot({ path: `${OUT}/tree.png` });
 const treeSummary = await page.textContent('#tree-summary');
+
+// The footer claims a number of lineages shown. Check that claim against the
+// geometry: every row must have its centre inside the canvas. An earlier
+// version clamped the row height upward, so a few thousand rows needed several
+// times the canvas height and most were painted below the bottom edge while the
+// footer still counted them.
+const treeFit = await page.evaluate(() => {
+  const c = document.getElementById('tree');
+  const h = c.getBoundingClientRect().height;
+  const rows = window.__treeLayout?.length ?? 0;
+  const pad = { t: 34, b: 76 };
+  const avail = h - pad.t - pad.b;
+  const rowH = Math.min(26, avail / Math.max(1, rows));
+  const top = pad.t + Math.max(0, (avail - rows * rowH) / 2);
+  const lastCentre = top + (rows - 1) * rowH + rowH / 2;
+  return { rows, height: h, lastCentre, fits: rows === 0 || lastCentre <= h - pad.b };
+});
 await page.click('#view-world');
 await page.waitForTimeout(300);
+
+// The biomass control must actually move matter. It scales plant biomass rather
+// than killing plants, so the organism counts barely move -- the matter panel is
+// where the effect is, and where it has to be checked.
+const matterOf = async () => {
+  const parts = await Promise.all(
+    ['#c-biomass', '#c-soil', '#c-bodies'].map((id) => page.textContent(id)),
+  );
+  return parts.reduce((n, t) => n + parseReadout(t), 0);
+};
+const matterBefore = await matterOf();
+await page.fill('#matter', '0.4');
+await page.dispatchEvent('#matter', 'input');
+await page.waitForTimeout(700);
+const matterAfter = await matterOf();
+// Back to a full world, so the rewind check below runs on an undisturbed one.
+await page.fill('#matter', '1');
+await page.dispatchEvent('#matter', 'input');
+await page.waitForTimeout(700);
+const matterRestored = await matterOf();
 
 // Rewind: drag the timeline back and confirm the world actually goes back.
 // Read the scrubber, which carries the raw tick rather than an abbreviation.
@@ -235,7 +272,11 @@ console.log(`ms/tick:    ${ms}    fps: ${fps}`);
 console.log(`pixels lit: ${(drawn.fraction * 100).toFixed(1)}% of the world square`);
 console.log(`inspector:  ${inspected ? 'opened' : 'did not open'}`);
 console.log(`tree:       ${((treeDrawn.lit / treeDrawn.total) * 100).toFixed(1)}% drawn — ${treeSummary}`);
+console.log(`tree rows:  ${treeFit.rows} laid out, last centre at ${treeFit.lastCentre.toFixed(0)}px of ${treeFit.height.toFixed(0)}px`);
 console.log(`rewind:     tick ${tickBefore} -> ${tickAfterSeek}`);
+console.log(
+  `biomass:    ${matterBefore.toFixed(0)} -> ${matterAfter.toFixed(0)} at 0.4x -> ${matterRestored.toFixed(0)} back at 1x`,
+);
 
 await browser.close();
 stop();
@@ -244,12 +285,27 @@ const failures = [];
 if (parseReadout(tickAfter) <= 5) failures.push('simulation did not advance');
 // A blank-canvas detector, not a density assertion: how much of the square is
 // lit depends on the world size, the zoom and how well the run happens to be
-// doing, none of which this check is here to police.
-if (drawn.fraction < 0.01) {
+// doing, none of which this check is here to police. The default world is a few
+// thousand organisms and is usually losing its animals, so the bar is only far
+// enough above zero to catch a renderer that draws nothing at all.
+if (drawn.fraction < 0.0015) {
   failures.push(`canvas is effectively empty (${(drawn.fraction * 100).toFixed(2)}% lit)`);
 }
 if (!inspected) failures.push('inspector did not open on click');
 if (treeDrawn.lit < treeDrawn.total * 0.002) failures.push('tree of life rendered nothing');
+if (!treeFit.fits) {
+  failures.push(
+    `tree draws ${treeFit.rows} rows past the canvas: last centre ${treeFit.lastCentre.toFixed(0)}px of ${treeFit.height.toFixed(0)}px`,
+  );
+}
+// 0.4x, with a wide band: the readouts are rounded for display and the world
+// keeps running between the two samples.
+if (!(matterAfter < matterBefore * 0.6) || !(matterAfter > matterBefore * 0.2)) {
+  failures.push(`biomass control did not take matter out: ${matterBefore} -> ${matterAfter}`);
+}
+if (!(matterRestored > matterAfter * 1.5)) {
+  failures.push(`biomass control did not put matter back: ${matterAfter} -> ${matterRestored}`);
+}
 if (!(tickAfterSeek < tickBefore)) {
   failures.push(`rewind did not go back: ${tickBefore} -> ${tickAfterSeek}`);
 }

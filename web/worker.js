@@ -210,6 +210,13 @@ self.onmessage = async (event) => {
       case 'param':
         sim.setParam(msg.id, msg.value);
         break;
+      case 'matter':
+        // An intervention, not a parameter: it can kill, so the checkpoint ring
+        // and the tree both have to see the world as it is afterwards.
+        sim.setMatter(msg.value);
+        checkpoint(true);
+        publish({ treeNow: true });
+        break;
       case 'recycle':
         // Frame buffers come back after the main thread uploads them.
         if (spare.length < 3) spare.push(msg.buffer);

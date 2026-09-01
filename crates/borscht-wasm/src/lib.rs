@@ -172,6 +172,25 @@ pub extern "C" fn set_param(id: u32, value: f32) -> u32 {
     ok as u32
 }
 
+/// Set how much matter the world holds, as a multiple of what it was founded
+/// with. Returns the signed amount actually moved.
+///
+/// An intervention rather than a parameter: it does not belong in the parameter
+/// table because it is not a rule the world runs by, it is a thing done to the
+/// world once.
+#[no_mangle]
+pub extern "C" fn set_matter(factor: f32) -> f64 {
+    world().map_or(0.0, |w| w.set_matter_target(factor))
+}
+
+/// What the world should hold: what it was seeded with, plus every operator
+/// addition and withdrawal. A viewer can show the difference against
+/// `total_matter`; a test can assert they are the same.
+#[no_mangle]
+pub extern "C" fn matter_budget() -> f64 {
+    world().map_or(0.0, |w| w.matter_budget())
+}
+
 #[no_mangle]
 pub extern "C" fn get_param(id: u32) -> f32 {
     match world() {

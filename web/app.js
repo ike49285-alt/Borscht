@@ -333,6 +333,23 @@ function layoutTree(lineages) {
   return rows;
 }
 
+// Bottom padding clears the time bar, which floats over this canvas.
+const TREE_PAD = { l: 18, r: 18, t: 34, b: 76 };
+
+// Row geometry, computed once and used by both the draw and the hover test.
+//
+// The row height is *not* clamped upward. It used to have a 1.2px floor, which
+// meant a few thousand rows needed several times the height of the canvas and
+// everything past the first few hundred was painted below the bottom edge --
+// while the footer still reported them all as shown. Letting rows go to a
+// hairline keeps every one of them on the canvas by construction.
+function treeRows(H, count) {
+  const avail = H - TREE_PAD.t - TREE_PAD.b;
+  const rowH = Math.min(26, avail / Math.max(1, count));
+  const top = TREE_PAD.t + Math.max(0, (avail - count * rowH) / 2);
+  return { rowH, top, y: (i) => top + i * rowH + rowH / 2 };
+}
+
 function drawTree(now) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = Math.max(1, Math.floor(treeCanvas.clientWidth * dpr));
@@ -357,17 +374,13 @@ function drawTree(now) {
     return;
   }
 
-  // Bottom padding clears the time bar, which floats over this canvas.
-  const pad = { l: 18, r: 18, t: 34, b: 76 };
+  const pad = TREE_PAD;
   const tMax = Math.max(now, ...rows.map((r) => r.extinctTick ?? now), 1);
   const x = (t) => pad.l + (t / tMax) * (W - pad.l - pad.r);
-  const avail = H - pad.t - pad.b;
   // Rows grow to fill the space when there are few lineages and shrink to a
   // hairline when there are thousands; the block is centred so a small tree
   // does not sit in a corner of an empty canvas.
-  const rowH = Math.max(1.2, Math.min(26, avail / rows.length));
-  const top = pad.t + Math.max(0, (avail - rows.length * rowH) / 2);
-  const y = (i) => top + i * rowH + rowH / 2;
+  const { rowH, y } = treeRows(H, rows.length);
   const index = new Map(rows.map((r, i) => [r.id, i]));
 
   // Recessive time grid, labelled at the top so it never crosses the branches.
@@ -380,13 +393,16 @@ function drawTree(now) {
     const px = Math.round(x(t)) + 0.5;
     ctx.beginPath();
     ctx.moveTo(px, pad.t - 6);
-    ctx.lineTo(px, H - pad.b + 10);
+    ctx.lineTo(px, H - pad.b + 4);
     ctx.stroke();
     ctx.fillText(t >= 1000 ? `${(t / 1000).toFixed(t >= 10000 ? 0 : 1)}k` : String(t), px + 3, pad.t - 10);
   }
 
-  // Connectors first, so branches sit on top of them.
-  ctx.strokeStyle = '#3d4a63';
+  // Connectors first, so branches sit on top of them. Opaque, they merge into a
+  // solid block once there are thousands of them spanning hundreds of pixels
+  // each; fading with the row height keeps them legible on a small tree and
+  // turns them into texture on a large one.
+  ctx.strokeStyle = `rgba(61, 74, 99, ${Math.max(0.15, Math.min(0.7, rowH * 0.35)).toFixed(3)})`;
   ctx.lineWidth = 1;
   for (const r of rows) {
     if (r.anchor === null || !index.has(r.anchor)) continue;
@@ -402,14 +418,20 @@ function drawTree(now) {
     const x0 = x(r.birthTick);
     const x1 = Math.max(x0 + 1.5, x(end));
     ctx.strokeStyle = `hsl(${(r.hue * 360).toFixed(0)} 72% 60%)`;
-    ctx.lineWidth = Math.max(1.4, Math.min(3.5, rowH * 0.5));
+    ctx.lineWidth = Math.max(0.6, Math.min(3.5, rowH * 0.8));
+    // Below a pixel a row cannot have its own line, so overlapping rows shade
+    // rather than saturate and the density is readable.
+    ctx.globalAlpha = rowH < 1 ? Math.max(0.25, rowH) : 1;
     ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(x0, y(r.row));
     ctx.lineTo(x1, y(r.row));
     ctx.stroke();
-    // A living lineage gets an emphasised end; an extinct one just stops.
-    if (r.extinctTick === null) {
+    ctx.globalAlpha = 1;
+    // A living lineage gets an emphasised end; an extinct one just stops. At
+    // hairline heights thousands of dots become a block of their own, so they
+    // only appear once a row is tall enough to own one.
+    if (r.extinctTick === null && rowH >= 2) {
       ctx.fillStyle = '#e6ebf5';
       ctx.beginPath();
       ctx.arc(x1, y(r.row), Math.max(1.5, ctx.lineWidth * 0.5), 0, Math.PI * 2);
@@ -424,18 +446,19 @@ function drawTree(now) {
     `${rows.length} lineages shown · ${living} living · ${treeData.total} ever recorded` +
       (treeData.dropped > 0 ? ` · ${treeData.dropped} not recorded` : ''),
     pad.l,
-    H - pad.b + 8,
+    H - pad.b + 22,
   );
   treeLayout = rows;
+  // Exposed so the browser check can test the drawn geometry rather than
+  // trusting the footer's count.
+  window.__treeLayout = rows;
 }
 
 treeCanvas.addEventListener('pointermove', (e) => {
   if (!treeLayout.length) { treeTip.style.display = 'none'; return; }
   const rect = treeCanvas.getBoundingClientRect();
-  const pad = { t: 34, b: 76 };
-  const avail = rect.height - pad.t - pad.b;
-  const rowH = Math.max(1.2, Math.min(26, avail / treeLayout.length));
-  const top = pad.t + Math.max(0, (avail - treeLayout.length * rowH) / 2);
+  // Same geometry the draw used, or the tooltip names the wrong lineage.
+  const { rowH, top } = treeRows(rect.height, treeLayout.length);
   const i = Math.floor((e.clientY - rect.top - top) / rowH);
   const r = treeLayout[i];
   if (!r || e.clientY - rect.top < top) { treeTip.style.display = 'none'; return; }
@@ -459,10 +482,24 @@ function setView(tree) {
   $('view-tree').setAttribute('aria-pressed', String(tree));
   $('view-world').setAttribute('aria-pressed', String(!tree));
 }
+const matterSlider = $('matter');
+function showMatter() {
+  $('matter-val').textContent = `${Number(matterSlider.value).toFixed(2)}\u00d7`;
+}
+matterSlider.addEventListener('input', () => {
+  showMatter();
+  worker.postMessage({ type: 'matter', value: Number(matterSlider.value) });
+});
+
 $('view-world').addEventListener('click', () => setView(false));
 $('view-tree').addEventListener('click', () => setView(true));
+// A big tree needs thinning by hundreds, a small one by ones, so the slider is
+// linear where the detail is and geometric where it is not.
+function minPeakFor(step) {
+  return step <= 10 ? step : Math.round(10 * Math.pow(50, (step - 10) / 20));
+}
 $('tree-min').addEventListener('input', (e) => {
-  treeMinPeak = Number(e.target.value);
+  treeMinPeak = minPeakFor(Number(e.target.value));
   $('tree-min-val').textContent = String(treeMinPeak);
   treeLayout = layoutTree(treeData.lineages);
 });
@@ -540,16 +577,23 @@ worker.onmessage = (event) => {
 // same at every setting and only the size of the map changes.
 function scaleOverrides(target) {
   const byName = Object.fromEntries(params.map((p) => [p.name, p.value]));
-  const base = (byName.max_plants ?? 700000) + (byName.max_animals ?? 300000);
+  const base = byName.max_plants + byName.max_animals;
   const scale = target / base;
   const root = Math.sqrt(scale);
+  // Nearest power of two, not the next one up. Cell size is what every per-cell
+  // budget is denominated in -- how far mate search reaches, whether a cell has
+  // anybody in it -- so rounding up would change the ecology at some scales and
+  // not others. Mirrors Config::for_population.
+  const want = byName.grid_dim * root;
+  const lo = Math.max(1, Math.pow(2, Math.floor(Math.log2(Math.max(want, 1)))));
+  const grid = Math.min(4096, Math.max(8, want >= lo * Math.SQRT2 ? lo * 2 : lo));
   return {
-    max_plants: Math.round((byName.max_plants ?? 700000) * scale),
-    max_animals: Math.round((byName.max_animals ?? 300000) * scale),
-    initial_plants: Math.round((byName.initial_plants ?? 300000) * scale),
-    initial_animals: Math.round((byName.initial_animals ?? 12000) * scale),
-    world_size: (byName.world_size ?? 2048) * root,
-    grid_dim: Math.max(32, Math.round((byName.grid_dim ?? 256) * root)),
+    max_plants: Math.round(byName.max_plants * scale),
+    max_animals: Math.round(byName.max_animals * scale),
+    initial_plants: Math.round(byName.initial_plants * scale),
+    initial_animals: Math.round(byName.initial_animals * scale),
+    world_size: byName.world_size * root,
+    grid_dim: grid,
   };
 }
 
@@ -607,6 +651,10 @@ $('reset').addEventListener('click', () => {
   setRunning(false);
   history.clear();
   showInspector(null);
+  // A new world is founded with its own stock of matter, so the control that
+  // says how much of that stock is present goes back to all of it.
+  matterSlider.value = '1';
+  showMatter();
   worker.postMessage({ type: 'reset', ...currentSetup() });
 });
 

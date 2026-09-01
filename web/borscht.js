@@ -125,6 +125,27 @@ export class Borscht {
     this.#exports.params_reset();
   }
 
+  // -------------------------------------------------------------- matter --
+
+  /**
+   * Set how much matter the world holds, as a multiple of what it was founded
+   * with. Withdrawal takes the soil (which is where the dead are) before the
+   * plants, and the plants before the animals. Returns the signed amount moved.
+   */
+  setMatter(factor) {
+    return this.#exports.set_matter(factor);
+  }
+
+  /** What the world holds now. */
+  totalMatter() {
+    return this.#exports.total_matter();
+  }
+
+  /** What it should hold: founding stock plus every operator intervention. */
+  matterBudget() {
+    return this.#exports.matter_budget();
+  }
+
   /** Apply `{ name: value }` using the generated parameter table. */
   configure(params, values) {
     for (const [name, value] of Object.entries(values)) {

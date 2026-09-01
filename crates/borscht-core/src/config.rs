@@ -82,13 +82,17 @@ config_params! {
     // ---- world structure (reset required) ----
     /// Side length of the square, toroidal world in simulation units.
     ///
-    /// The defaults describe a world of about a hundred thousand organisms.
-    /// Smaller than that and animal populations start failing to establish for
-    /// reasons that are real but not interesting to watch: at forty thousand
-    /// only one seed in six holds on, against six in six at eighty thousand.
-    world_size: f32 = 648.0, "world", 128.0, 8192.0;
+    /// The defaults describe a world of about ten thousand organisms.
+    ///
+    /// That is well below the density at which a sexual animal population
+    /// reliably establishes -- at forty thousand organisms only one seed in six
+    /// still had animals after six thousand ticks, against six in six at eighty
+    /// thousand. A default world will therefore usually lose its animals, and
+    /// that is a minimum-viable-population result rather than a fault. Use the
+    /// larger scales to watch a food web that persists.
+    world_size: f32 = 205.0, "world", 64.0, 4096.0;
     /// Cells per side of the spatial grid. Must be a power of two.
-    grid_dim: u32 = 64, "world", 32.0, 2048.0;
+    grid_dim: u32 = 32, "world", 8.0, 2048.0;
     /// Side length, in grid cells, of the block within which animals can
     /// actually reach each other and the plants they eat.
     ///
@@ -100,18 +104,18 @@ config_params! {
     /// each still owns its organisms and its soil exclusively.
     interaction_block: u32 = 4, "world", 1.0, 32.0;
     /// Hard cap on live plants. Reaching it simply makes seeding fail.
-    max_plants: u32 = 70_000, "world", 1000.0, 4_000_000.0;
+    max_plants: u32 = 7_000, "world", 100.0, 2_000_000.0;
     /// Hard cap on live animals.
-    max_animals: u32 = 30_000, "world", 100.0, 2_000_000.0;
+    max_animals: u32 = 3_000, "world", 10.0, 1_000_000.0;
     /// Plants seeded at reset.
-    initial_plants: u32 = 30_000, "world", 100.0, 4_000_000.0;
+    initial_plants: u32 = 3_000, "world", 10.0, 2_000_000.0;
     /// Animals seeded at reset.
-    initial_animals: u32 = 1_200, "world", 10.0, 2_000_000.0;
+    initial_animals: u32 = 120, "world", 1.0, 1_000_000.0;
     /// Distinct founding plant populations.
     ///
     /// Plants can self, so unrelated founding stocks are viable on their own and
     /// a varied starting flora costs nothing.
-    founder_lineages: u32 = 24, "world", 1.0, 512.0;
+    founder_lineages: u32 = 8, "world", 1.0, 512.0;
     /// Distinct founding animal populations.
     ///
     /// Far lower than the plant figure, and for a real reason. Animals need a
@@ -127,7 +131,7 @@ config_params! {
     /// run turn on a single random genotype; dozens fragment the propagule into
     /// groups too sparse to find mates in, since separate stocks are
     /// reproductively isolated from the first tick.
-    animal_founder_lineages: u32 = 6, "world", 1.0, 128.0;
+    animal_founder_lineages: u32 = 2, "world", 1.0, 128.0;
     /// Standing genetic variation within each founding population, in gene
     /// units out of 255.
     ///
@@ -138,7 +142,7 @@ config_params! {
     /// the mating threshold, so such founders cannot interbreed and every world
     /// ends immediately. Propagule pressure works through the standing variation
     /// *within* a source population, which is what this sets.
-    founder_spread: f32 = 26.0, "world", 0.0, 128.0;
+    founder_spread: f32 = 8.2, "world", 0.0, 128.0;
     /// Fraction of full reserves that founding animals start with.
     founder_energy: f32 = 0.60, "world", 0.05, 1.0;
     /// How close to its maximum size a founding plant starts. Founders that
@@ -344,7 +348,7 @@ config_params! {
     /// it made every animal population fail for want of a mate regardless of
     /// how healthy it was. The search is still bounded, so mate limitation
     /// remains a real Allee effect at genuinely low density.
-    mate_search_cells: u32 = 160, "speciation", 1.0, 4096.0;
+    mate_search_cells: u32 = 400, "speciation", 1.0, 4096.0;
     /// Cells sampled for a pollen donor before a plant selfs.
     ///
     /// Plants fall back to selfing rather than failing, which is what mixed
@@ -439,7 +443,20 @@ impl Config {
         // Area scales with population so density, and therefore every
         // interaction rate, is unchanged.
         c.world_size *= crate::fastmath::sqrt(scale);
-        c.grid_dim = ((c.grid_dim as f32 * crate::fastmath::sqrt(scale)) as u32).clamp(32, 4096);
+        // Round the grid to the *nearest* power of two rather than up. Cell size
+        // is what every per-cell budget is denominated in -- mate search covers a
+        // fixed number of cells, and a cell has to hold somebody -- so rounding
+        // up could halve the area those budgets reach at some scales and not
+        // others, which is a change in the ecology dressed up as a change in
+        // resolution.
+        let want = c.grid_dim as f32 * crate::fastmath::sqrt(scale);
+        let lo = (want as u32).max(1).next_power_of_two();
+        let lo = if lo as f32 > want { lo / 2 } else { lo };
+        // The geometric midpoint between lo and 2*lo, so the pick is nearest in
+        // the ratio that matters rather than in absolute cells.
+        let midpoint = lo as f32 * core::f32::consts::SQRT_2;
+        let nearest = if want >= midpoint { lo * 2 } else { lo };
+        c.grid_dim = nearest.clamp(8, 4096);
         // Interaction blocks are an absolute area, not a fraction of the grid:
         // they exist to hold a workable number of organisms, and that number
         // must not change when the world is rescaled.
@@ -570,12 +587,30 @@ mod tests {
         let base = Config::default();
         let base_density =
             (base.max_plants + base.max_animals) as f32 / (base.world_size * base.world_size);
-        for target in [50_000u32, 200_000, 1_000_000] {
+        for target in [2_500u32, 10_000, 25_000, 60_000, 200_000, 1_000_000] {
             let c = Config::for_population(target);
             let density = (c.max_plants + c.max_animals) as f32 / (c.world_size * c.world_size);
             assert!(
                 (density / base_density - 1.0).abs() < 0.05,
                 "target {target}: density {density} vs base {base_density}"
+            );
+        }
+    }
+
+    /// Per-cell budgets -- how many cells mate search may visit, how many
+    /// organisms an interaction block holds -- are only meaningful if a cell
+    /// covers about the same ground at every scale. Rounding the grid to the
+    /// nearest power of two keeps that within sqrt(2); rounding up did not.
+    #[test]
+    fn for_population_keeps_cell_size_stable() {
+        let base = Config::default().cell_size();
+        for target in [2_500u32, 10_000, 25_000, 60_000, 200_000, 1_000_000] {
+            let c = Config::for_population(target);
+            let ratio = c.cell_size() / base;
+            assert!(
+                (0.70..=1.42).contains(&ratio),
+                "target {target}: cell {} vs base {base} (ratio {ratio})",
+                c.cell_size()
             );
         }
     }

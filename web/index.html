@@ -185,21 +185,23 @@
         </label>
         <label>scale
           <select id="scale" style="flex:1">
+            <option value="2500">2.5k organisms</option>
+            <option value="10000" selected>10k organisms</option>
             <option value="25000">25k organisms</option>
-            <option value="100000" selected>100k organisms</option>
-            <option value="250000">250k organisms</option>
-            <option value="600000">600k organisms</option>
+            <option value="60000">60k organisms</option>
           </select>
         </label>
         <label>seed <input id="seed" type="number" value="1" min="0" step="1"></label>
+        <label>biomass <input id="matter" type="range" min="0.1" max="3" step="0.05" value="1"><span class="val" id="matter-val">1.00&times;</span></label>
       </div>
+      <div class="hint" style="margin-top:8px">Biomass adds or removes matter, as a multiple of what the world was founded with. Taking it out strips the soil first &mdash; that is where the dead are &mdash; then thins the plants, then starves and kills animals.</div>
       <div class="hint" style="margin-top:8px">Drag to pan, scroll to zoom, click an organism to inspect it. Drag the timeline to rewind.</div>
     </div>
 
     <div class="card" id="tree-card" hidden>
       <h2>Tree of life</h2>
       <div class="hint" id="tree-summary">no lineages yet</div>
-      <label style="margin-top:8px">min peak <input id="tree-min" type="range" min="1" max="60" value="3"><span class="val" id="tree-min-val">3</span></label>
+      <label style="margin-top:8px">min peak <input id="tree-min" type="range" min="1" max="30" value="3"><span class="val" id="tree-min-val">3</span></label>
       <div class="hint" style="margin-top:6px">Each line is one lineage, from the tick it split off to the tick it died out. Colour is inherited with drift, so relatives sit near each other in hue.</div>
     </div>
 

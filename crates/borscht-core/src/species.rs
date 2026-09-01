@@ -27,8 +27,19 @@ pub const NO_SPECIES: u16 = u16::MAX;
 /// Slots in the live registry are recycled the moment a species dies, which is
 /// what keeps it bounded -- but it also means the live registry holds no history
 /// at all. A tree of life needs every lineage that ever existed and who it split
-/// from, so that is recorded separately and never reused.
-pub const MAX_LINEAGES: usize = 16_384;
+/// from, so that is recorded separately.
+///
+/// At 24 bytes an entry this is about 1.6 MB, which is nothing beside the
+/// organism pools, and enough that a normal run never reaches it. A run that
+/// does prunes (see `prune_history`) rather than refusing to record anything
+/// further: refusing keeps the deep past and throws away the living, which is
+/// backwards for a phylogeny.
+pub const MAX_LINEAGES: usize = 65_536;
+
+/// How much of the history one prune reclaims, as a fraction. Pruning walks the
+/// whole history, so doing it in batches amortises that cost over many births
+/// instead of paying it on every one.
+const PRUNE_FRACTION: f64 = 0.25;
 
 /// Sentinel for a lineage with no recorded parent.
 pub const NO_LINEAGE: u32 = u32::MAX;
@@ -105,7 +116,10 @@ pub struct Registry<const N: usize> {
     /// entries are never reused, because a tree whose branches get overwritten
     /// is not a record of anything.
     pub history: Vec<Lineage>,
-    /// Lineages that could not be recorded because the history was full.
+    /// Lineages no longer in the history: pruned to make room, or -- when
+    /// nothing could be pruned without breaking the tree -- never recorded at
+    /// all. Surfaced so the viewer says the tree is incomplete instead of
+    /// implying it is the whole record.
     pub history_dropped: u64,
     free: Vec<u16>,
     /// Times a split was wanted but no slot was available. Surfaced in stats so
@@ -148,6 +162,9 @@ impl<const N: usize> Registry<N> {
             .get(parent as usize)
             .filter(|_| parent != NO_SPECIES)
             .map_or(NO_LINEAGE, |r| r.lineage);
+        if self.history.len() >= MAX_LINEAGES {
+            self.prune_history();
+        }
         let history_at = if self.history.len() < MAX_LINEAGES {
             self.history.push(Lineage {
                 id: lineage,
@@ -237,6 +254,126 @@ impl<const N: usize> Registry<N> {
     /// Retirement is strictly at zero population. Retiring at any positive
     /// threshold would recycle a slot while organisms still carried its id, and
     /// they would silently be relabelled as whatever species claimed the slot
+    /// Make room in the history by dropping the least informative branches.
+    ///
+    /// The alternative -- refusing to record anything once the history is full
+    /// -- is first-come-first-kept, which preserves the deep past and discards
+    /// the recent radiation. That is the wrong way round: a phylogeny is mostly
+    /// read to explain what is alive now.
+    ///
+    /// Two things are never evicted, because losing either shatters the tree
+    /// rather than thinning it: a lineage that is still alive, and a lineage
+    /// with a surviving recorded descendant. Everything else is ranked by peak
+    /// population, then by how long ago it died, and the smallest and oldest go
+    /// first -- exactly the ephemeral dead ends the viewer's minimum-peak
+    /// control already hides.
+    ///
+    /// Survivors whose parent was evicted are re-pointed at their nearest
+    /// surviving recorded ancestor, which is the same rule the viewer applies
+    /// when the control prunes the tree at draw time.
+    fn prune_history(&mut self) {
+        let n = self.history.len();
+        if n == 0 {
+            return;
+        }
+
+        // A lineage is an ancestor if anything in the history claims it as a
+        // parent. Ancestry is transitive, so this has to close upward: keeping
+        // a lineage means keeping its whole line back to a root.
+        let mut index = std::collections::HashMap::with_capacity(n);
+        for (at, l) in self.history.iter().enumerate() {
+            index.insert(l.id, at);
+        }
+
+        let mut keep: Vec<bool> = self
+            .history
+            .iter()
+            .map(|l| l.extinct_tick == u32::MAX)
+            .collect();
+        // Close the living set upward through their parents.
+        for at in 0..n {
+            if !keep[at] {
+                continue;
+            }
+            let mut parent = self.history[at].parent;
+            while parent != NO_LINEAGE {
+                let Some(&pat) = index.get(&parent) else {
+                    break;
+                };
+                if keep[pat] {
+                    break;
+                }
+                keep[pat] = true;
+                parent = self.history[pat].parent;
+            }
+        }
+
+        // Rank what is left by how little it says: smallest peak first, and
+        // among equals the one that died longest ago.
+        let mut candidates: Vec<usize> = (0..n).filter(|&at| !keep[at]).collect();
+        candidates.sort_unstable_by(|&a, &b| {
+            let (la, lb) = (&self.history[a], &self.history[b]);
+            la.peak_population
+                .cmp(&lb.peak_population)
+                .then(la.extinct_tick.cmp(&lb.extinct_tick))
+                .then(la.id.cmp(&lb.id))
+        });
+
+        let want = ((n as f64) * PRUNE_FRACTION) as usize;
+        let drop_count = want.min(candidates.len());
+        if drop_count == 0 {
+            // Everything recorded is alive or an ancestor of something alive.
+            // Nothing can go without breaking the tree, so the newcomer is the
+            // one that is lost -- and counted, so the viewer still says the
+            // history is incomplete.
+            return;
+        }
+        let mut dropped = vec![false; n];
+        for &at in &candidates[..drop_count] {
+            dropped[at] = true;
+        }
+
+        // Re-point orphans before anything moves: a survivor whose parent is
+        // going takes that parent's parent, walked until it lands on something
+        // that stays or on a root.
+        for at in 0..n {
+            if dropped[at] {
+                continue;
+            }
+            let mut parent = self.history[at].parent;
+            while parent != NO_LINEAGE {
+                match index.get(&parent) {
+                    Some(&pat) if dropped[pat] => parent = self.history[pat].parent,
+                    Some(_) => break,
+                    // Already absent from the history -- an earlier prune took
+                    // it, so this lineage is a root as far as the record goes.
+                    None => {
+                        parent = NO_LINEAGE;
+                        break;
+                    }
+                }
+            }
+            self.history[at].parent = parent;
+        }
+
+        // Compact, and rewrite the record indices that point into the history.
+        let mut moved_to = vec![usize::MAX; n];
+        let mut write = 0usize;
+        for at in 0..n {
+            if dropped[at] {
+                continue;
+            }
+            moved_to[at] = write;
+            self.history[write] = self.history[at];
+            write += 1;
+        }
+        self.history.truncate(write);
+        for r in self.records.iter_mut() {
+            r.history_at = moved_to.get(r.history_at).copied().unwrap_or(usize::MAX);
+        }
+        self.history_dropped += drop_count as u64;
+    }
+
     /// next.
     pub fn end_census(&mut self, tick: u64) {
         for id in 0..self.records.len() {
@@ -262,6 +399,17 @@ impl<const N: usize> Registry<N> {
                 }
             }
         }
+    }
+
+    /// The free slots, in the order they will be handed out (last first).
+    ///
+    /// Order is state, not redundancy. The list is a stack, so a slot freed by
+    /// a recent extinction is reused before an older one, and which slot a new
+    /// species lands in decides its id, its colour and where it sits in the
+    /// registry. Rebuilding the list by scanning for dead slots reproduces a
+    /// *fresh* world's ordering, not this world's history.
+    pub fn free_list(&self) -> &[u16] {
+        &self.free
     }
 
     /// Replace the free list, for snapshot loading.
@@ -531,7 +679,7 @@ mod tests {
         let mut rng = Rng::new(3, 1);
         let root = r.found([0; N], 0.0, 0);
         // Churn: create a species, retire it, repeat, well past the cap.
-        for step in 0..(MAX_LINEAGES + 200) {
+        for step in 0..(MAX_LINEAGES + 2_000) {
             let genome = [((step * 37) % 256) as u8; N];
             let id = r.classify(root, &genome, 0.0001, dist, step as u64, &mut rng);
             if id != root {
@@ -540,11 +688,83 @@ mod tests {
                 r.end_census(step as u64);
             }
         }
-        assert_eq!(r.history.len(), MAX_LINEAGES);
+        assert!(
+            r.history.len() <= MAX_LINEAGES,
+            "the history must stay bounded: {}",
+            r.history.len()
+        );
         assert!(
             r.history_dropped > 0,
-            "overflow should be visible, not silent"
+            "pruning should be visible, not silent"
         );
+
+        // Pruning thins the tree; it must not shatter it. Every survivor's
+        // parent is either a root or still present, so no branch dangles.
+        let present: std::collections::HashSet<u32> = r.history.iter().map(|l| l.id).collect();
+        for l in &r.history {
+            assert!(
+                l.parent == NO_LINEAGE || present.contains(&l.parent),
+                "lineage {} points at a parent that was pruned away",
+                l.id
+            );
+        }
+
+        // Nothing alive is ever evicted, and neither is anything an ancestor of
+        // something alive -- those are the backbone.
+        for rec in r.records.iter().filter(|rec| rec.alive) {
+            assert!(
+                present.contains(&rec.lineage),
+                "a living lineage was pruned out of its own tree"
+            );
+            assert_ne!(
+                rec.history_at,
+                usize::MAX,
+                "a living lineage lost its history entry"
+            );
+            assert_eq!(
+                r.history[rec.history_at].id, rec.lineage,
+                "history_at was not remapped after compaction"
+            );
+        }
+    }
+
+    /// The point of the eviction rule: what goes is the ephemeral dead ends,
+    /// not the line leading to what is alive.
+    #[test]
+    fn pruning_keeps_the_line_that_leads_to_the_living() {
+        let mut r = reg();
+        let mut rng = Rng::new(11, 7);
+        let root = r.found([0; N], 0.0, 0);
+        // A long-lived chain nobody retires, threaded through the churn.
+        let mut chain = vec![r.history[0].id];
+        let mut parent = root;
+        for depth in 1..6 {
+            let genome = [(depth * 41) as u8; N];
+            let child = r.classify(parent, &genome, 0.0001, dist, depth as u64, &mut rng);
+            assert_ne!(child, parent, "expected a split");
+            chain.push(r.records[child as usize].lineage);
+            parent = child;
+        }
+        // Now churn hard enough to force many prunes, keeping the chain alive
+        // through every census.
+        for step in 0..(MAX_LINEAGES + 2_000) {
+            let genome = [((step * 37 + 7) % 256) as u8; N];
+            // The species this makes is left uncounted below, so it retires at
+            // once and becomes prunable -- which is the churn.
+            let _ = r.classify(root, &genome, 0.0001, dist, step as u64, &mut rng);
+            r.begin_census();
+            r.count(root);
+            r.count(parent);
+            r.end_census(step as u64);
+        }
+        assert!(r.history_dropped > 0, "the churn should have forced prunes");
+        let present: std::collections::HashSet<u32> = r.history.iter().map(|l| l.id).collect();
+        for lineage in &chain {
+            assert!(
+                present.contains(lineage),
+                "lineage {lineage} is on the line to a living species and was pruned"
+            );
+        }
     }
 
     #[test]

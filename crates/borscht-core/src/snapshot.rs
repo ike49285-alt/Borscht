@@ -19,7 +19,7 @@ use crate::species::{Lineage, Record, Registry, MAX_LINEAGES, MAX_SPECIES};
 use crate::world::World;
 
 const MAGIC: &[u8; 8] = b"BORSCHT\x01";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -90,6 +90,9 @@ impl Writer {
     fn u64(&mut self, v: u64) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
+    fn f64(&mut self, v: f64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
     fn f32(&mut self, v: f32) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
@@ -140,6 +143,9 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Result<u64, SnapshotError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
+    fn f64(&mut self) -> Result<f64, SnapshotError> {
+        Ok(f64::from_bits(self.u64()?))
+    }
     fn f32(&mut self) -> Result<f32, SnapshotError> {
         Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
@@ -178,6 +184,14 @@ fn write_registry<const N: usize>(w: &mut Writer, reg: &Registry<N>) {
         w.u32(r.lineage);
         w.u32(r.history_at as u32);
     }
+    // The free list is a stack, and its order decides which slot the next
+    // species gets -- so it is state. Deriving it on load reproduces a fresh
+    // world's ordering instead of this one's, which quietly changes species ids
+    // and colours from the first extinction after a restore.
+    w.u32(reg.free_list().len() as u32);
+    for &id in reg.free_list() {
+        w.u16(id);
+    }
     // The tree of life is history, not a cache: it cannot be recomputed from
     // the live population, so a snapshot that dropped it would lose every
     // branch that had already gone extinct.
@@ -197,7 +211,7 @@ fn read_registry<const N: usize>(r: &mut Reader) -> Result<Registry<N>, Snapshot
     let mut reg: Registry<N> = Registry::new();
     reg.blocked_splits = r.u64()?;
     reg.total_ever = r.u64()?;
-    let mut free = Vec::new();
+    let mut dead = Vec::new();
     for id in 0..MAX_SPECIES {
         let mut founder = [0u8; N];
         founder.copy_from_slice(r.take(N)?);
@@ -214,10 +228,30 @@ fn read_registry<const N: usize>(r: &mut Reader) -> Result<Registry<N>, Snapshot
             history_at: r.u32()? as usize,
         };
         if !rec.alive {
-            free.push(id as u16);
+            dead.push(id as u16);
         }
         reg.records[id] = rec;
     }
+
+    // Read the stored order, then check it against the records rather than
+    // trusting it: a list that disagreed would hand out a slot living organisms
+    // still point at, or leak one forever.
+    let free_len = r.u32()? as usize;
+    if free_len != dead.len() {
+        return Err(SnapshotError::ParamMismatch);
+    }
+    let mut free = Vec::with_capacity(free_len);
+    let mut seen = vec![false; MAX_SPECIES];
+    for _ in 0..free_len {
+        let id = r.u16()?;
+        let slot = id as usize;
+        if slot >= MAX_SPECIES || reg.records[slot].alive || seen[slot] {
+            return Err(SnapshotError::ParamMismatch);
+        }
+        seen[slot] = true;
+        free.push(id);
+    }
+
     reg.history_dropped = r.u64()?;
     let count = r.u32()? as usize;
     if count > MAX_LINEAGES {
@@ -236,10 +270,6 @@ fn read_registry<const N: usize>(r: &mut Reader) -> Result<Registry<N>, Snapshot
         });
     }
 
-    // The free list is derived rather than stored: it is pure redundancy, and
-    // a stored copy that disagreed with the records would hand out a slot that
-    // living organisms still point at.
-    free.reverse();
     reg.set_free_list(free);
     Ok(reg)
 }
@@ -258,6 +288,11 @@ pub fn save(world: &World) -> Vec<u8> {
     w.u64(rng_inc);
     // The climate is an autocorrelated process with a long memory, so it is
     // state rather than a function of the tick.
+    // The matter budget is state too: the operator can add or withdraw matter,
+    // and a world restored without that history would fail its own conservation
+    // check for a reason that is not a leak.
+    w.f64(world.founding_matter());
+    w.f64(world.matter_ledger());
     w.f32(world.env.temp_anomaly);
     w.u32(world.env.regions_state().len() as u32);
     w.f32s(world.env.regions_state());
@@ -327,6 +362,8 @@ pub fn load(bytes: &[u8]) -> Result<World, SnapshotError> {
     let next_id = r.u32()?;
     let rng_state = r.u64()?;
     let rng_inc = r.u64()?;
+    let founding_matter = r.f64()?;
+    let matter_ledger = r.f64()?;
     let temp_anomaly = r.f32()?;
     let region_count = r.u32()? as usize;
     if region_count > 64 * 64 {
@@ -404,6 +441,7 @@ pub fn load(bytes: &[u8]) -> Result<World, SnapshotError> {
     if !world.env.set_regions_state(&regions) {
         return Err(SnapshotError::ParamMismatch);
     }
+    world.set_matter_budget(founding_matter, matter_ledger);
     world.restore(tick, next_id, rng_state, rng_inc);
     Ok(world)
 }

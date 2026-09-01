@@ -260,6 +260,50 @@ reproductively isolated from the first tick, so two dozen of them means two doze
 populations each below the density at which mates can be found. One is no better:
 the whole run then turns on a single random genotype. A few is right.
 
+**The species free list is a stack, and its order is state.** A snapshot rebuilt
+it by scanning for dead slots, on the reasoning that it was pure redundancy. It
+is not. Slots are handed out last-in-first-out, so a slot freed by a recent
+extinction is reused before an older one, and which slot a new species lands in
+decides its id and its colour. Deriving the list on load reproduces a *fresh*
+world's ordering rather than this world's history, so a restored world diverged
+from the one it was saved from — at the first extinction, and only then. It went
+unnoticed for as long as it did because the divergence needs a speciation *and*
+an extinction inside the test's window; widening the mate search made both common
+enough to catch. The order is stored now, and validated against the records on
+load so a disagreeing file is rejected rather than trusted.
+
+**Scaling the world rounded the grid up to the next power of two.** Cell size is
+what every per-cell budget is denominated in — how many cells mate search may
+visit, whether a cell holds anybody at all — so rounding up could halve the area
+those budgets reach at one scale and not another. That is a change in the ecology
+dressed up as a change in resolution. Rounding to the nearest power of two holds
+cell size within a factor of sqrt(2) at every scale.
+
+## Taking matter out of a world
+
+The biomass control is deliberately not a parameter. Parameters are rules the
+world runs by; this is a thing done to the world once, and putting it in the
+parameter table would make it look like a rate.
+
+Withdrawal follows the trophic structure from the bottom: soil, then plant
+biomass, then animal reserves, then whole animals. The order is not arbitrary
+sequencing — it is what taking matter out of a real ecosystem does. The litter
+layer goes first because it is already dead. The standing crop is thinned evenly
+rather than by deciding which plants deserve to survive, since an intervention
+that selected would be doing selection's job. Reserves go before bodies because
+stores are the losable part of an animal. Past that an animal cannot be partially
+removed, so it dies and its whole mass leaves with it, taken in update order like
+every other draw in this model.
+
+Conservation had to stay an equality rather than becoming a tolerance. A world
+carries the matter it was founded with plus a ledger of what the operator moved,
+and the invariant checks against that sum. Loosening the check instead would have
+retired the single most useful correctness test in the project — the one that
+caught the diploid indexing bug — in exchange for a slider.
+
+The budget is snapshot state for the same reason: a rewound world that measured
+itself against a budget it never had would report a withdrawal as a leak.
+
 ## The WebAssembly boundary
 
 Raw `extern "C"`, no wasm-bindgen. The interface is entirely numeric, so

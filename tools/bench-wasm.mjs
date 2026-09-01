@@ -9,7 +9,7 @@ import { PARAMS, STAT_NAMES } from '../web/params.js';
 
 const wasmPath = new URL('../target/wasm32-unknown-unknown/release/borscht_wasm.wasm', import.meta.url);
 const targets = process.argv.slice(2).map(Number).filter(Boolean);
-const populations = targets.length ? targets : [100_000, 500_000, 1_000_000];
+const populations = targets.length ? targets : [10_000, 25_000, 60_000];
 const TICKS = Number(process.env.TICKS ?? 60);
 
 const wasm = await readFile(wasmPath);

@@ -114,6 +114,21 @@ equivalent to drawing from the soil under a closed budget, but it is not: plants
 sit at their nutrient-limited equilibrium and hold nearly all the matter, so
 soil stays pinned near zero and births fail however well-fed the animal is.
 
+The **biomass** control moves that budget. It is an intervention rather than a
+parameter — a step change in how much stuff there is to go round, of the kind an
+experimenter makes and an ecosystem does not. Taking matter out works up from the
+bottom of the food web: the soil first, because in this model the soil *is* the
+dead-organism pool and everything that dies goes to the soil where it fell; then
+the standing crop, thinned evenly; then animal reserves, which are fat and can be
+given up; and only then whole animals, because an animal cannot be partly
+removed. Adding matter puts it back into the soil in proportion to what is
+already there, so the spatial structure that makes some places worth being in
+survives the intervention.
+
+Conservation is not relaxed for the control. Every gram moved is recorded, and
+the invariant becomes an equality against founding stock plus that ledger — so an
+intervention still cannot hide a leak.
+
 ## Layout
 
 ```
@@ -167,16 +182,21 @@ borscht run --population 400000 --ticks 20000 --set temp_stress=2.0 --quiet
 Measured on four cores. WebAssembly figures come from running the same module
 the browser runs, under Node.
 
-| organisms | native ms/tick | native ticks/s |
-|-----------|---------------:|---------------:|
-| 5,200     | 0.4            | 2,575          |
-| 21,000    | 1.7            | 597            |
-| 83,000    | 8.2            | 122            |
+The world is sized for a target population, but the population it actually
+carries is an ecological outcome, so both columns are given. Living organisms is
+the number that sets the cost.
 
-Cost is linear in population at roughly 100 ns per organism natively and about
-170 ns in WebAssembly. The default hundred-thousand-organism world runs at a
-comfortable interactive rate; a full million is about 170 ms a tick in the
-browser. Diploidy and sex account for much of the per-organism cost — the genome
+| target | living organisms | native ms/tick | wasm ms/tick |
+|--------|-----------------:|---------------:|-------------:|
+| 10,000 | 2,400            | —              | 0.24         |
+| 25,000 | 5,900            | 0.3            | 0.51         |
+| 60,000 | 14,100           | —              | 1.28         |
+| 83,000 | 17,700           | 1.2            | —            |
+
+Cost is linear in the living population at roughly 65 ns per organism natively
+and 90 ns in WebAssembly. Every scale the viewer offers runs faster than display
+rate, so the timeline speed control rather than the machine is what decides how
+fast the world advances. Diploidy and sex account for much of the per-organism cost — the genome
 doubled, the brain widened to take a conspecific sense, and mate search walks
 outward until it finds someone. Rendering is decoupled from that: the simulation runs in
 a worker and the page draws at display rate from whatever frame is current, so
@@ -199,8 +219,20 @@ relatives sit near each other in hue and a radiation reads as a block.
 
 Extinct branches are most of the tree, and keeping them is what makes it a
 history rather than a snapshot. They also cost something: registry slots are
-recycled the moment a species dies, so lineages are recorded separately in an
-append-only history that outlives the slot.
+recycled the moment a species dies, so lineages are recorded separately in a
+history that outlives the slot.
+
+That history is bounded, and how it is bounded matters. It used to stop recording
+once it was full, which is first-come-first-kept: it preserved the deep past and
+threw away the recent radiation, so in a long run most of the *living* lineages
+were missing from their own phylogeny. It now prunes instead. Nothing alive is
+ever evicted, and neither is anything that is an ancestor of something alive —
+that is the backbone, and losing it shatters the tree rather than thinning it.
+What goes is the smallest, longest-dead leaves, which is exactly what the
+viewer's minimum-peak control already hides. Survivors whose parent was pruned
+are re-pointed at their nearest surviving recorded ancestor. Whatever is lost is
+counted and shown, so the tree says it is incomplete instead of implying it is
+the whole record.
 
 The timeline **rewinds**. The worker keeps periodic snapshots in a ring bounded
 by bytes rather than by count — a snapshot scales with the population, so a
@@ -214,17 +246,28 @@ watched rather than a new one.
 Establishment depends sharply on how big the world is. Six seeds each, 6,000
 ticks, counting a world as established if it still has more than 100 animals:
 
-| organisms | established | animal species in survivors |
-|-----------|------------:|----------------------------|
-| 40,000    | 1 / 6       | 9                          |
-| 120,000   | 5 / 6       | up to 43                   |
-| 300,000   | 5 / 6       | 123 – 692                  |
+| organisms | established | animals in survivors | animal species |
+|-----------|------------:|---------------------:|----------------|
+| 2,500     | 1 / 6       | 156                  | 1              |
+| 10,000    | 0 / 6       | —                    | —              |
+| 25,000    | 1 / 6       | 2,762                | 63             |
+| 60,000    | 3 / 6       | 902 – 6,373          | 8 – 109        |
+| 120,000   | 5 / 6       | —                    | up to 43       |
+| 300,000   | 5 / 6       | —                    | 123 – 692      |
 
 This is minimum-viable-population behaviour and it fell out of the model rather
-than being put in. It is also worth knowing before drawing conclusions from a
-small run: most of this project's debugging happened at 40,000 organisms, where
-extinction dominates and it is easy to mistake an island too small to hold a
-sexual population for a bug.
+than being put in. Read the top of that table before drawing conclusions from a
+small run: **a default world usually loses its animals**, and every one of the
+scales the viewer offers is at or below the threshold where a sexual population
+reliably holds on. That is a result, not a fault — but it does mean the small
+scales are for watching mechanism and the large ones for watching an ecosystem.
+Most of this project's debugging happened at 40,000 organisms, where extinction
+dominates and it is easy to mistake an island too small to hold a sexual
+population for a bug.
+
+The plants are unaffected: they can self, so a plant flora establishes and
+persists at every scale. What the small worlds cannot support is animals that
+need to find a compatible mate.
 
 ## Tests
 
