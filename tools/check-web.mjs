@@ -6,7 +6,7 @@
 
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 
 /**
@@ -89,11 +89,31 @@ function litFraction(path, region) {
   return { lit, total, fraction: lit / Math.max(total, 1) };
 }
 
-const PORT = 8099;
+// --bundle runs the same assertions against the single-file build instead of
+// the multi-file app. That build has no worker and no fetch, so "it loads" is
+// not evidence it simulates; only driving it is.
+const BUNDLE = process.argv.includes('--bundle');
+const PORT = BUNDLE ? 8100 : 8099;
 const OUT = new URL('../out/web/', import.meta.url).pathname;
 mkdirSync(OUT, { recursive: true });
 
-const server = spawn('python3', ['-m', 'http.server', '-d', 'web', String(PORT), '--bind', '127.0.0.1'], {
+let serveDir = 'web';
+if (BUNDLE) {
+  // The Artifact host wraps the page in a document skeleton; reproduce that
+  // here so the bundle is tested in the shape it is actually served in.
+  const bundle = readFileSync(new URL('../out/borscht-artifact.html', import.meta.url).pathname, 'utf8');
+  serveDir = `${OUT}bundle`;
+  mkdirSync(serveDir, { recursive: true });
+  writeFileSync(
+    `${serveDir}/index.html`,
+    `<!doctype html><html><head><meta charset="utf-8">` +
+      `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+      `<style>:root{color-scheme:light dark}body{margin:0;font:14px system-ui}img{max-width:100%}[hidden]{display:none!important}</style>` +
+      `</head><body>${bundle}</body></html>`,
+  );
+}
+
+const server = spawn('python3', ['-m', 'http.server', '-d', serveDir, String(PORT), '--bind', '127.0.0.1'], {
   cwd: new URL('..', import.meta.url).pathname,
   stdio: 'ignore',
 });
@@ -118,7 +138,10 @@ const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 
 const problems = [];
 page.on('console', (m) => {
-  if (m.type() === 'error') problems.push(`console: ${m.text()}`);
+  // A missing favicon is the host's business, not the page's.
+  if (m.type() === 'error' && !/favicon/i.test(m.text()) && !/404/.test(m.text())) {
+    problems.push(`console: ${m.text()}`);
+  }
 });
 page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
 
@@ -144,10 +167,23 @@ await page.waitForFunction(() => document.getElementById('h-plants').textContent
 const banner = await page.$eval('#banner', (el) => (el.style.display === 'none' ? '' : el.textContent));
 if (banner) throw new Error(`page reported: ${banner}`);
 
-await page.click('#t-play');
-await page.waitForFunction(() => Number(document.getElementById('h-tick').textContent) > 5, null, {
-  timeout: 30000,
-});
+// The single-file build starts itself; the multi-file app waits to be told. So
+// ensure it is running rather than toggling, or the click pauses the one build
+// that was already going.
+if ((await page.getAttribute('#t-play', 'aria-label')) === 'Play') {
+  await page.click('#t-play');
+}
+await page.waitForFunction(
+  // Not Number(): the readout abbreviates past a thousand, and Number('1.2k')
+  // is NaN, so a world that had already run would look stalled.
+  () => {
+    const t = document.getElementById('h-tick').textContent.trim();
+    const n = parseFloat(t) * (t.endsWith('k') ? 1000 : t.endsWith('M') ? 1e6 : 1);
+    return n > 5;
+  },
+  null,
+  { timeout: 30000 },
+);
 
 // Let it run long enough for the charts to have a shape.
 await page.waitForTimeout(6000);
@@ -272,6 +308,23 @@ for (const [x, y] of [[700, 450], [640, 400], [760, 500], [700, 380], [620, 520]
 }
 await page.screenshot({ path: `${OUT}/zoomed.png` });
 
+// A published page is often read on a phone or in a side panel, so the layout
+// has to survive a narrow viewport: the world visible, the controls reachable,
+// and nothing scrolled off sideways.
+await page.setViewportSize({ width: 400, height: 800 });
+await page.waitForTimeout(1200);
+const narrow = await page.evaluate(() => {
+  const stage = document.getElementById('stage').getBoundingClientRect();
+  return {
+    stageHeight: Math.round(stage.height),
+    stageWidth: Math.round(stage.width),
+    resetVisible: !!document.getElementById('reset')?.getBoundingClientRect().width,
+    playVisible: !!document.getElementById('t-play')?.getBoundingClientRect().width,
+    overflows: document.documentElement.scrollWidth > window.innerWidth + 1,
+  };
+});
+await page.screenshot({ path: `${OUT}/narrow.png` });
+
 console.log(`ticks:      ${tickAfter}`);
 console.log(`animals:    ${await readAnimals()}`);
 console.log(`species:    ${species}   carnivores: ${carn}`);
@@ -283,6 +336,9 @@ console.log(`tree rows:  ${treeFit.rows} laid out, last centre at ${treeFit.last
 console.log(`rewind:     tick ${tickBefore} -> ${tickAfterSeek}`);
 console.log(
   `biomass:    ${matterBefore.toFixed(0)} -> ${matterAfter.toFixed(0)} at 0.4x -> ${matterRestored.toFixed(0)} back at 1x`,
+);
+console.log(
+  `narrow:     stage ${narrow.stageWidth}x${narrow.stageHeight} at 400px wide, controls ${narrow.resetVisible && narrow.playVisible ? 'reachable' : 'MISSING'}`,
 );
 
 await browser.close();
@@ -314,6 +370,9 @@ if (!(matterAfter < matterBefore * 0.6) || !(matterAfter > matterBefore * 0.2)) 
 if (!(matterRestored > matterAfter * 1.5)) {
   failures.push(`biomass control did not put matter back: ${matterAfter} -> ${matterRestored}`);
 }
+if (narrow.overflows) failures.push('page scrolls sideways at 400px wide');
+if (narrow.stageHeight < 300) failures.push(`world is only ${narrow.stageHeight}px tall at 400px wide`);
+if (!narrow.resetVisible || !narrow.playVisible) failures.push('controls unreachable at 400px wide');
 if (!(tickAfterSeek < tickBefore)) {
   failures.push(`rewind did not go back: ${tickBefore} -> ${tickAfterSeek}`);
 }

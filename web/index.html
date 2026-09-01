@@ -26,7 +26,9 @@
     display: grid; grid-template-columns: 1fr 320px; overflow: hidden;
   }
   #stage { position: relative; }
-  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  /* touch-action: none so a drag pans and a pinch zooms, rather than the
+     browser scrolling or page-zooming over the top of them. */
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
   canvas.dragging { cursor: grabbing; }
 
   #hud {
@@ -137,8 +139,14 @@
   #inspector { display: none; }
   .hint { color: var(--muted); font-size: 11px; }
   @media (max-width: 820px) {
-    body { grid-template-columns: 1fr; grid-template-rows: 55% 45%; }
-    #panel { border-left: none; border-top: 1px solid var(--line); }
+    /* The world is the thing worth looking at, so it keeps most of a small
+       screen and the readouts go under it. */
+    body { grid-template-columns: 1fr; grid-template-rows: 62% 38%; }
+    #panel { border-left: none; border-top: 1px solid var(--line); padding: 12px; }
+    #panel h1 { font-size: 15px; }
+    .card { padding: 10px; }
+    #hud { font-size: 11px; padding: 8px 10px; }
+    #timebar { left: 8px; right: 8px; bottom: 8px; }
   }
 </style>
 </head>

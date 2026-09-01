@@ -21,7 +21,14 @@ try {
   throw error;
 }
 
-const worker = new Worker('./worker.js', { type: 'module' });
+// The engine's home is a decision the host makes, not this file.
+//
+// `window.__borschtEngineHost` lets the single-file build hand over a
+// same-thread shim with the same postMessage/onmessage surface, so every
+// message site below is identical in both builds and there is only one viewer
+// to maintain. Absent it -- which is the multi-file app -- this is a real
+// Worker, exactly as before.
+const worker = globalThis.__borschtEngineHost ?? new Worker('./worker.js', { type: 'module' });
 
 // --------------------------------------------------------------- view state --
 
@@ -41,15 +48,42 @@ let dragging = false;
 let last = { x: 0, y: 0 };
 let moved = 0;
 
+// Every pointer currently down, so a second one can turn a drag into a pinch.
+// Touch devices have no wheel, so without this they cannot zoom at all.
+const pointers = new Map();
+let pinch = null;
+
+const spread = () => {
+  const [a, b] = [...pointers.values()];
+  return Math.hypot(a.x - b.x, a.y - b.y);
+};
+
 canvas.addEventListener('pointerdown', (e) => {
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  canvas.setPointerCapture(e.pointerId);
+  if (pointers.size === 2) {
+    // A pinch is not a click and not a drag; drop out of both.
+    dragging = false;
+    canvas.classList.remove('dragging');
+    pinch = { from: spread(), zoom: view.zoom };
+    return;
+  }
+  if (pointers.size > 2) return;
   dragging = true;
   moved = 0;
   last = { x: e.clientX, y: e.clientY };
   canvas.classList.add('dragging');
-  canvas.setPointerCapture(e.pointerId);
 });
 
 canvas.addEventListener('pointermove', (e) => {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && pointers.size === 2) {
+    const now = spread();
+    if (pinch.from > 0) {
+      view.zoom = Math.min(400, Math.max(0.6, pinch.zoom * (now / pinch.from)));
+    }
+    return;
+  }
   if (!dragging) return;
   const dx = e.clientX - last.x;
   const dy = e.clientY - last.y;
@@ -64,6 +98,8 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 const endDrag = (e) => {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
   if (!dragging) return;
   dragging = false;
   canvas.classList.remove('dragging');
@@ -522,6 +558,12 @@ worker.onmessage = (event) => {
       // Hand the buffer straight back so the worker can reuse it.
       worker.postMessage({ type: 'recycle', buffer: msg.buffer }, [msg.buffer]);
       latest = msg;
+      // The engine stops itself on a seek or a reset, and starts itself when
+      // the page is built to autoplay. The button follows it rather than the
+      // other way round, so the two cannot disagree.
+      if (typeof msg.running === 'boolean' && msg.running !== running && !scrubbing) {
+        showRunning(msg.running);
+      }
       history.push({
         plants: msg.stats.plants,
         animals: msg.stats.animals,
@@ -608,10 +650,15 @@ let scrubbing = false;
 let latestTick = 0;
 let oldestTick = 0;
 
-function setRunning(next) {
+/** Paint the play button to match whatever the engine is actually doing. */
+function showRunning(next) {
   running = next;
   $('t-play').textContent = running ? '❚❚' : '▶';
   $('t-play').setAttribute('aria-label', running ? 'Pause' : 'Play');
+}
+
+function setRunning(next) {
+  showRunning(next);
   worker.postMessage({ type: running ? 'play' : 'pause' });
 }
 
@@ -640,11 +687,13 @@ $('t-scrub').addEventListener('input', (e) => {
   $('t-tick').textContent = fmt(Number(e.target.value));
 });
 
-$('t-speed').addEventListener('input', (e) => {
-  const value = Number(e.target.value);
+/** Send the speed control's current position to the engine, and label it. */
+function applySpeed() {
+  const value = Number($('t-speed').value);
   $('t-speed-val').textContent = String(value);
   worker.postMessage({ type: 'speed', value });
-});
+}
+$('t-speed').addEventListener('input', applySpeed);
 
 $('reset').addEventListener('click', () => {
   running = false;
@@ -664,17 +713,23 @@ $('color').addEventListener('change', (e) => {
   worker.postMessage({ type: 'color', value: Number(e.target.value) });
 });
 
-$('save').addEventListener('click', () => worker.postMessage({ type: 'save' }));
-$('load').addEventListener('click', () => $('file').click());
-$('file').addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  setRunning(false);
-  history.clear();
-  const bytes = await file.arrayBuffer();
-  worker.postMessage({ type: 'load', bytes }, [bytes]);
-  e.target.value = '';
-});
+// Snapshot controls are optional. The single-file build leaves them out --
+// a published page cannot start a download, so the buttons would be dead -- and
+// wiring absent elements would take the whole viewer down with a null
+// dereference before anything had a chance to draw.
+if ($('save') && $('load') && $('file')) {
+  $('save').addEventListener('click', () => worker.postMessage({ type: 'save' }));
+  $('load').addEventListener('click', () => $('file').click());
+  $('file').addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setRunning(false);
+    history.clear();
+    const bytes = await file.arrayBuffer();
+    worker.postMessage({ type: 'load', bytes }, [bytes]);
+    e.target.value = '';
+  });
+}
 
 function buildParamUI() {
   const container = $('params');
@@ -741,19 +796,32 @@ function loop() {
 }
 requestAnimationFrame(loop);
 
-// Boot: fetch the module here rather than in the worker so a failure surfaces
-// with a readable message on the page.
+// Boot: get the module bytes here rather than in the engine so a failure
+// surfaces with a readable message on the page.
+//
+// The single-file build has no file to fetch, so it leaves the bytes in
+// `__borschtWasm` instead. Everything after that is the same in both builds.
 (async () => {
   try {
-    const response = await fetch('./borscht.wasm');
-    if (!response.ok) {
-      throw new Error(`could not load borscht.wasm (${response.status}). Run tools/build-web.sh first.`);
+    let wasm = globalThis.__borschtWasm;
+    if (!wasm) {
+      const response = await fetch('./borscht.wasm');
+      if (!response.ok) {
+        throw new Error(`could not load borscht.wasm (${response.status}). Run tools/build-web.sh first.`);
+      }
+      wasm = await response.arrayBuffer();
     }
-    const wasm = await response.arrayBuffer();
     // The world is built inside 'init'. Posting a separate 'reset' here would
-    // race the worker's asynchronous module load and arrive before there is a
+    // race the engine's asynchronous module load and arrive before there is a
     // simulation to reset.
-    worker.postMessage({ type: 'init', wasm, ...currentSetup() }, [wasm]);
+    worker.postMessage(
+      { type: 'init', wasm, autoplay: Boolean(globalThis.__borschtAutoplay), ...currentSetup() },
+      [wasm],
+    );
+    // 'input' does not fire on load, so without this the engine keeps its own
+    // default of one tick a frame however the control is set -- which made a
+    // page built to open at speed look identical to one built at 1x.
+    applySpeed();
   } catch (error) {
     fail(error.message);
   }

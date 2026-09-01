@@ -241,6 +241,21 @@ the newest checkpoint at or before the target and re-ticks forward. Because a
 snapshot carries the generator state, replaying reproduces the run you already
 watched rather than a new one.
 
+### One file, no server
+
+`node tools/build-artifact.mjs` writes the whole viewer as a single HTML file:
+the WebAssembly module embedded as base64, and the engine running on the main
+thread rather than in a Worker. The worker existed for million-organism worlds;
+at the sizes the viewer now offers a tick is a fraction of a frame, so there is
+nothing left to decouple.
+
+It is generated from `web/`, never hand-maintained, and every substitution in
+the builder asserts that it matched — a silent no-op replacement produces a page
+that looks right and quietly runs the wrong world. `node tools/check-web.mjs
+--bundle` runs the same browser assertions against the bundle as against the
+multi-file app, and `node tools/watch-bundle.mjs` answers the separate question
+of whether the result is worth watching.
+
 ## Small worlds die
 
 Establishment depends sharply on how big the world is. Six seeds each, 6,000
