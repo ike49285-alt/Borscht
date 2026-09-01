@@ -210,6 +210,13 @@ const treeFit = await page.evaluate(() => {
 });
 await page.click('#view-world');
 await page.waitForTimeout(300);
+// Switching back must actually switch back. The tree canvas is opaque and sits
+// on top of the world, so a rule that defeats [hidden] makes the tree view a
+// one-way door with no other symptom.
+const treeStillShowing = await page.evaluate(() => {
+  const c = document.getElementById('tree');
+  return getComputedStyle(c).display !== 'none' && c.getBoundingClientRect().height > 0;
+});
 
 // The biomass control must actually move matter. It scales plant biomass rather
 // than killing plants, so the organism counts barely move -- the matter panel is
@@ -292,6 +299,7 @@ if (drawn.fraction < 0.0015) {
   failures.push(`canvas is effectively empty (${(drawn.fraction * 100).toFixed(2)}% lit)`);
 }
 if (!inspected) failures.push('inspector did not open on click');
+if (treeStillShowing) failures.push('tree canvas stays on screen after switching back to the world');
 if (treeDrawn.lit < treeDrawn.total * 0.002) failures.push('tree of life rendered nothing');
 if (!treeFit.fits) {
   failures.push(

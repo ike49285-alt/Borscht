@@ -78,6 +78,10 @@
   .tb-speed input { width: 74px; accent-color: var(--accent); }
   .tb-speed span { min-width: 18px; text-align: right; color: var(--ink); }
   #tree { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+  /* The id selector outranks the user agent's [hidden] { display: none }, so
+     without this the canvas stays painted over the world and switching back to
+     the world view does nothing. */
+  #tree[hidden] { display: none; }
   #tree-tip {
     position: absolute; pointer-events: none; display: none; z-index: 5;
     background: rgba(8,11,18,.94); border: 1px solid var(--line); border-radius: 7px;
