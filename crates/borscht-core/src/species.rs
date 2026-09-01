@@ -73,11 +73,42 @@ impl Default for Lineage {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Record<const N: usize> {
-    /// Genome of the individual that founded this species. New members are
-    /// measured against this, not against a running centroid: a centroid drifts
-    /// with its members, so a lineage can wander arbitrarily far from its origin
-    /// without ever tripping the threshold.
+    /// Genome of the individual that founded this species. Kept as the
+    /// species' identity -- what it was when it appeared.
+    ///
+    /// It is deliberately *not* what newborns are measured against any more.
+    /// Doing that answered "how far has this changed since it began?", and an
+    /// earlier version of this comment defended it on the grounds that a running
+    /// centroid drifts with its members, letting a lineage wander arbitrarily
+    /// far from its origin without ever tripping the threshold.
+    ///
+    /// That is true, and it is the correct behaviour. A lineage that wanders
+    /// without splitting is anagenesis: one species changing through time.
+    /// Horses today sit a long way from Hyracotherium and that is one lineage,
+    /// not ten thousand branching events. Branching means two groups diverging
+    /// *from each other*, so the comparison has to be against where the species
+    /// is now, not where it started. Measured against the founder, every
+    /// population eventually drifts past the threshold and then every single
+    /// birth is a new "species" until a new founder resets the clock -- which is
+    /// how a 12,000-tick run produced 15,317 lineages, 73.9% of which never
+    /// contained more than one individual.
     pub founder: [u8; N],
+    /// What a newborn is actually measured against: the species as it currently
+    /// is, tracking its members at `species_drift` per birth.
+    ///
+    /// The rate is what gives the threshold its meaning. Divergence faster than
+    /// the reference can follow is a split; drift slower than it is the species
+    /// changing as a whole, and produces no branch.
+    pub reference: [u8; N],
+    /// Whether this species ever reached the population that makes it a group
+    /// rather than one unusual individual. Only established species enter the
+    /// tree of life.
+    pub established: bool,
+    /// Lineage id of the nearest *established* ancestor, resolved when this
+    /// species was created. A provisional species that never establishes must
+    /// not orphan its descendants, so they inherit its anchor rather than
+    /// pointing at a branch that was never recorded.
+    pub anchor: u32,
     pub parent: u16,
     pub birth_tick: u32,
     pub extinct_tick: u32,
@@ -97,6 +128,9 @@ impl<const N: usize> Default for Record<N> {
     fn default() -> Self {
         Record {
             founder: [0; N],
+            reference: [0; N],
+            established: false,
+            anchor: NO_LINEAGE,
             parent: NO_SPECIES,
             birth_tick: 0,
             extinct_tick: u32::MAX,
@@ -144,8 +178,13 @@ impl<const N: usize> Registry<N> {
     }
 
     /// Start a lineage with no parent.
+    ///
+    /// Founding stock is established on sight: it is the seed of the run, not a
+    /// candidate that has to prove itself.
     pub fn found(&mut self, founder: [u8; N], hue: f32, tick: u64) -> u16 {
-        self.create(founder, NO_SPECIES, hue, tick).unwrap_or(0)
+        let id = self.create(founder, NO_SPECIES, hue, tick).unwrap_or(0);
+        self.establish(id as usize);
+        id
     }
 
     fn create(&mut self, founder: [u8; N], parent: u16, hue: f32, tick: u64) -> Option<u16> {
@@ -155,34 +194,28 @@ impl<const N: usize> Registry<N> {
         let birth_tick = tick.min(u32::MAX as u64) as u32;
         let hue = hue - crate::fastmath::floor(hue);
 
-        // Record the branch before the slot is written, so the parent's lineage
-        // id is still readable.
-        let parent_lineage = self
+        // Where this branch will hang once -- if -- it establishes. A parent
+        // that is itself provisional has no branch of its own yet, so its anchor
+        // is inherited: descendants of an outlier that never became a group
+        // attach to the last real ancestor instead of dangling.
+        let anchor = self
             .records
             .get(parent as usize)
             .filter(|_| parent != NO_SPECIES)
-            .map_or(NO_LINEAGE, |r| r.lineage);
-        if self.history.len() >= MAX_LINEAGES {
-            self.prune_history();
-        }
-        let history_at = if self.history.len() < MAX_LINEAGES {
-            self.history.push(Lineage {
-                id: lineage,
-                parent: parent_lineage,
-                birth_tick,
-                extinct_tick: u32::MAX,
-                peak_population: 1,
-                hue,
-            });
-            self.history.len() - 1
-        } else {
-            self.history_dropped += 1;
-            usize::MAX
-        };
+            .map_or(
+                NO_LINEAGE,
+                |r| if r.established { r.lineage } else { r.anchor },
+            );
 
+        // Nothing is written to the tree here. A species that crosses the
+        // distance threshold is one individual, and one individual is not a
+        // branch; `end_census` promotes it if it ever becomes a group.
         self.records[id as usize] = Record {
             lineage,
-            history_at,
+            history_at: usize::MAX,
+            reference: founder,
+            established: false,
+            anchor,
             founder,
             parent,
             birth_tick,
@@ -198,17 +231,45 @@ impl<const N: usize> Registry<N> {
         Some(id)
     }
 
+    /// Write a species into the tree of life, now that it has proved to be a
+    /// group rather than one unusual birth.
+    fn establish(&mut self, id: usize) {
+        if self.history.len() >= MAX_LINEAGES {
+            self.prune_history();
+        }
+        let r = &self.records[id];
+        let (lineage, anchor, birth_tick, hue, peak) =
+            (r.lineage, r.anchor, r.birth_tick, r.hue, r.peak_population);
+        if self.history.len() < MAX_LINEAGES {
+            self.history.push(Lineage {
+                id: lineage,
+                parent: anchor,
+                birth_tick,
+                extinct_tick: u32::MAX,
+                peak_population: peak,
+                hue,
+            });
+            let at = self.history.len() - 1;
+            self.records[id].history_at = at;
+        } else {
+            self.history_dropped += 1;
+        }
+        self.records[id].established = true;
+    }
+
     /// Decide which species a newborn belongs to.
     ///
     /// Returns the parent's species when the child is close enough, otherwise
     /// registers and returns a new one. If the registry is full the child stays
     /// with its parent's species rather than failing, so a saturated pool
     /// degrades the record instead of the simulation.
+    #[allow(clippy::too_many_arguments)]
     pub fn classify(
         &mut self,
         parent_species: u16,
         child: &[u8; N],
         threshold: f32,
+        drift: f32,
         distance: fn(&[u8; N], &[u8; N]) -> f32,
         tick: u64,
         rng: &mut Rng,
@@ -218,7 +279,16 @@ impl<const N: usize> Registry<N> {
             return parent_species;
         }
         let parent = &self.records[idx];
-        if distance(&parent.founder, child) <= threshold {
+        if distance(&parent.reference, child) <= threshold {
+            // Inside the species: the species moves a little toward its newest
+            // member. Slowly, so that a group diverging faster than this can
+            // follow still separates, while the whole population drifting
+            // together does not manufacture a branch.
+            let r = &mut self.records[idx];
+            for (slot, &want) in r.reference.iter_mut().zip(child.iter()) {
+                let cur = *slot as f32;
+                *slot = (cur + (want as f32 - cur) * drift).round() as u8;
+            }
             return parent_species;
         }
         let hue = parent.hue + rng.signed() * 0.07;
@@ -375,7 +445,7 @@ impl<const N: usize> Registry<N> {
     }
 
     /// next.
-    pub fn end_census(&mut self, tick: u64) {
+    pub fn end_census(&mut self, tick: u64, establish_at: u32) {
         for id in 0..self.records.len() {
             let r = &mut self.records[id];
             if !r.alive {
@@ -386,10 +456,18 @@ impl<const N: usize> Registry<N> {
             }
             let (history_at, peak) = (r.history_at, r.peak_population);
             let retiring = r.population == 0;
+            let promote = !r.established && r.peak_population >= establish_at;
             if retiring {
                 r.alive = false;
                 r.extinct_tick = tick.min(u32::MAX as u64) as u32;
                 self.free.push(id as u16);
+            }
+            // A candidate that has become a group earns its branch. One that
+            // dies first never had one, which is the whole point: it was an
+            // unusual individual, not a lineage.
+            if promote && !retiring {
+                self.establish(id);
+                continue;
             }
             // Mirror into the permanent record, which outlives the slot.
             if let Some(entry) = self.history.get_mut(history_at) {
@@ -494,7 +572,7 @@ mod tests {
         let mut r = reg();
         let mut rng = Rng::new(1, 1);
         let id = r.found([100; N], 0.5, 0);
-        let got = r.classify(id, &[102; N], 0.2, dist, 10, &mut rng);
+        let got = r.classify(id, &[102; N], 0.2, 0.0, dist, 10, &mut rng);
         assert_eq!(got, id);
         assert_eq!(r.live_count(), 1);
     }
@@ -504,7 +582,7 @@ mod tests {
         let mut r = reg();
         let mut rng = Rng::new(1, 1);
         let parent = r.found([0; N], 0.5, 0);
-        let child = r.classify(parent, &[255; N], 0.2, dist, 42, &mut rng);
+        let child = r.classify(parent, &[255; N], 0.2, 0.0, dist, 42, &mut rng);
         assert_ne!(child, parent);
         assert_eq!(r.records[child as usize].parent, parent);
         assert_eq!(r.records[child as usize].birth_tick, 42);
@@ -523,7 +601,7 @@ mod tests {
         let mut splits = 0;
         for step in 1..=40 {
             genome = [(step * 6) as u8; N];
-            let next = r.classify(current, &genome, 0.1, dist, step as u64, &mut rng);
+            let next = r.classify(current, &genome, 0.1, 0.0, dist, step as u64, &mut rng);
             if next != current {
                 splits += 1;
             }
@@ -541,7 +619,7 @@ mod tests {
         let mut r = reg();
         let mut rng = Rng::new(3, 1);
         let parent = r.found([0; N], 0.5, 0);
-        let child = r.classify(parent, &[255; N], 0.1, dist, 1, &mut rng);
+        let child = r.classify(parent, &[255; N], 0.1, 0.0, dist, 1, &mut rng);
         let (ph, ch) = (r.hue(parent), r.hue(child));
         assert!(
             (ph - ch).abs() < 0.15,
@@ -559,7 +637,7 @@ mod tests {
         for _ in 0..5 {
             r.count(a);
         }
-        r.end_census(10);
+        r.end_census(10, 1);
         assert_eq!(r.records[a as usize].population, 5);
         assert!(r.records[a as usize].alive);
         assert!(!r.records[b as usize].alive, "empty species should retire");
@@ -572,7 +650,7 @@ mod tests {
         let mut r = reg();
         let a = r.found([0; N], 0.0, 0);
         r.begin_census();
-        r.end_census(1);
+        r.end_census(1, 1);
         assert!(!r.records[a as usize].alive);
         let before = r.free.len();
         let b = r.found([9; N], 0.2, 2);
@@ -588,7 +666,7 @@ mod tests {
         for tick in 0..100 {
             r.begin_census();
             r.count(a);
-            r.end_census(tick);
+            r.end_census(tick, 1);
             assert!(r.records[a as usize].alive, "retired at tick {tick}");
         }
         assert_eq!(r.records[a as usize].peak_population, 1);
@@ -602,7 +680,7 @@ mod tests {
         let mut created = 1;
         for i in 0..MAX_SPECIES * 2 {
             let genome = [(i % 256) as u8; N];
-            let id = r.classify(root, &genome, 0.0001, dist, i as u64, &mut rng);
+            let id = r.classify(root, &genome, 0.0001, 0.0, dist, i as u64, &mut rng);
             if id != root {
                 created += 1;
             }
@@ -623,14 +701,23 @@ mod tests {
         let mut r = reg();
         let mut rng = Rng::new(1, 1);
         let root = r.found([0; N], 0.0, 0);
-        let child = r.classify(root, &[255; N], 0.1, dist, 5, &mut rng);
+        let child = r.classify(root, &[255; N], 0.1, 0.0, dist, 5, &mut rng);
         assert_ne!(child, root);
         let child_lineage = r.records[child as usize].lineage;
 
-        // Kill the child off; its slot returns to the free list.
+        // It has to be a group before it is a branch: a candidate that never
+        // had members is an unusual individual, not a lineage, and is
+        // deliberately absent from the tree.
         r.begin_census();
         r.count(root);
-        r.end_census(20);
+        r.count(child);
+        r.end_census(10, 1);
+        assert!(r.records[child as usize].established);
+
+        // Now kill the child off; its slot returns to the free list.
+        r.begin_census();
+        r.count(root);
+        r.end_census(20, 1);
         assert!(!r.records[child as usize].alive);
 
         // And is handed to something else entirely.
@@ -657,18 +744,22 @@ mod tests {
         assert_eq!(r.history.len(), 1);
         assert_eq!(r.history[0].parent, NO_LINEAGE, "a founder has no parent");
 
-        let child = r.classify(root, &[255; N], 0.1, dist, 9, &mut rng);
-        assert_eq!(r.history.len(), 2);
-        assert_eq!(r.history[1].parent, r.history[0].id);
-        // Ids are globally unique and never reused.
-        assert_ne!(r.history[0].id, r.history[1].id);
+        let child = r.classify(root, &[255; N], 0.1, 0.0, dist, 9, &mut rng);
+        // Provisional: it crossed the distance threshold, but one individual is
+        // not a branch and nothing is written to the tree yet.
+        assert_eq!(r.history.len(), 1, "a lone outlier is not a lineage");
 
         r.begin_census();
         for _ in 0..4 {
             r.count(root);
         }
         r.count(child);
-        r.end_census(10);
+        r.end_census(10, 1);
+        // Counted, so now it is a group and earns its branch.
+        assert_eq!(r.history.len(), 2);
+        assert_eq!(r.history[1].parent, r.history[0].id);
+        // Ids are globally unique and never reused.
+        assert_ne!(r.history[0].id, r.history[1].id);
         assert_eq!(r.history[0].peak_population, 4);
         assert_eq!(r.history[0].extinct_tick, u32::MAX, "still alive");
     }
@@ -681,11 +772,19 @@ mod tests {
         // Churn: create a species, retire it, repeat, well past the cap.
         for step in 0..(MAX_LINEAGES + 2_000) {
             let genome = [((step * 37) % 256) as u8; N];
-            let id = r.classify(root, &genome, 0.0001, dist, step as u64, &mut rng);
+            let id = r.classify(root, &genome, 0.0001, 0.0, dist, step as u64, &mut rng);
             if id != root {
+                // Counted once so it becomes a real lineage and enters the
+                // tree, then dropped so it dies. A candidate that is never
+                // counted is never recorded at all, which is correct but would
+                // leave this test with an empty history to bound.
                 r.begin_census();
                 r.count(root);
-                r.end_census(step as u64);
+                r.count(id);
+                r.end_census(step as u64, 1);
+                r.begin_census();
+                r.count(root);
+                r.end_census(step as u64, 1);
             }
         }
         assert!(
@@ -738,11 +837,20 @@ mod tests {
         // A long-lived chain nobody retires, threaded through the churn.
         let mut chain = vec![r.history[0].id];
         let mut parent = root;
+        let mut slots = vec![root];
         for depth in 1..6 {
             let genome = [(depth * 41) as u8; N];
-            let child = r.classify(parent, &genome, 0.0001, dist, depth as u64, &mut rng);
+            let child = r.classify(parent, &genome, 0.0001, 0.0, dist, depth as u64, &mut rng);
             assert_ne!(child, parent, "expected a split");
             chain.push(r.records[child as usize].lineage);
+            slots.push(child);
+            // Each link has to be counted to become a real lineage; a chain of
+            // provisional candidates is not in the tree to be pruned from.
+            r.begin_census();
+            for &slot in &slots {
+                r.count(slot);
+            }
+            r.end_census(depth as u64, 1);
             parent = child;
         }
         // Now churn hard enough to force many prunes, keeping the chain alive
@@ -751,11 +859,22 @@ mod tests {
             let genome = [((step * 37 + 7) % 256) as u8; N];
             // The species this makes is left uncounted below, so it retires at
             // once and becomes prunable -- which is the churn.
-            let _ = r.classify(root, &genome, 0.0001, dist, step as u64, &mut rng);
+            let born = r.classify(root, &genome, 0.0001, 0.0, dist, step as u64, &mut rng);
+            // Established, then abandoned: a real lineage that lived briefly,
+            // which is exactly what pruning is meant to reclaim.
             r.begin_census();
-            r.count(root);
-            r.count(parent);
-            r.end_census(step as u64);
+            for &slot in &slots {
+                r.count(slot);
+            }
+            if born != root {
+                r.count(born);
+            }
+            r.end_census(step as u64, 1);
+            r.begin_census();
+            for &slot in &slots {
+                r.count(slot);
+            }
+            r.end_census(step as u64, 1);
         }
         assert!(r.history_dropped > 0, "the churn should have forced prunes");
         let present: std::collections::HashSet<u32> = r.history.iter().map(|l| l.id).collect();
@@ -779,7 +898,7 @@ mod tests {
                 r.count(id);
             }
         }
-        r.end_census(1);
+        r.end_census(1, 1);
         let ranked = r.ranked(3);
         assert_eq!(ranked.len(), 3);
         assert_eq!(ranked[0], (ids[0], 10));
@@ -793,12 +912,12 @@ mod tests {
         let mut r = reg();
         let mut rng = Rng::new(6, 1);
         assert_eq!(
-            r.classify(NO_SPECIES, &[1; N], 0.1, dist, 0, &mut rng),
+            r.classify(NO_SPECIES, &[1; N], 0.1, 0.0, dist, 0, &mut rng),
             NO_SPECIES
         );
         let a = r.found([0; N], 0.0, 0);
         r.begin_census();
-        r.end_census(1);
-        assert_eq!(r.classify(a, &[255; N], 0.1, dist, 2, &mut rng), a);
+        r.end_census(1, 1);
+        assert_eq!(r.classify(a, &[255; N], 0.1, 0.0, dist, 2, &mut rng), a);
     }
 }

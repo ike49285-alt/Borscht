@@ -19,7 +19,7 @@ use crate::species::{Lineage, Record, Registry, MAX_LINEAGES, MAX_SPECIES};
 use crate::world::World;
 
 const MAGIC: &[u8; 8] = b"BORSCHT\x01";
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -174,6 +174,9 @@ fn write_registry<const N: usize>(w: &mut Writer, reg: &Registry<N>) {
     w.u64(reg.total_ever);
     for r in &reg.records {
         w.bytes(&r.founder);
+        w.bytes(&r.reference);
+        w.u8(r.established as u8);
+        w.u32(r.anchor);
         w.u16(r.parent);
         w.u32(r.birth_tick);
         w.u32(r.extinct_tick);
@@ -215,8 +218,13 @@ fn read_registry<const N: usize>(r: &mut Reader) -> Result<Registry<N>, Snapshot
     for id in 0..MAX_SPECIES {
         let mut founder = [0u8; N];
         founder.copy_from_slice(r.take(N)?);
+        let mut reference = [0u8; N];
+        reference.copy_from_slice(r.take(N)?);
         let rec = Record {
             founder,
+            reference,
+            established: r.u8()? != 0,
+            anchor: r.u32()?,
             parent: r.u16()?,
             birth_tick: r.u32()?,
             extinct_tick: r.u32()?,
@@ -508,7 +516,10 @@ mod tests {
     #[test]
     fn the_tree_of_life_survives_the_trip() {
         let mut w = World::new(small(), 4);
-        w.tick_many(600);
+        // Long enough for a lineage to establish *and* then die: only species
+        // that became a group are in the tree at all, so a short run can finish
+        // with nothing extinct to check.
+        w.tick_many(3_000);
         let before = w.animal_species.history.clone();
         assert!(before.len() > 2, "expected some lineages to have appeared");
         let restored = load(&save(&w)).unwrap();

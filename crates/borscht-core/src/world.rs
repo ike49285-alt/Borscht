@@ -729,7 +729,19 @@ impl World {
                         let consume = animals.action_of(i, output::CONSUME);
 
                         // Steering and movement, every tick regardless of thinking.
-                        let mut heading = animals.heading[i] + turn * cfg.turn_rate;
+                        //
+                        // How hard it can turn depends on how fast it is going.
+                        // A fixed angle per tick let an animal pivot at full
+                        // speed, which is not something a body can do, and the
+                        // degenerate strategy it permits -- orbit a circle
+                        // smaller than one sensing cell and never leave -- is
+                        // what evolution actually found. Grip limits lateral
+                        // acceleration, so the tightest turn at speed `v` has
+                        // angular rate `a / v`; near a standstill the pivot rate
+                        // takes over.
+                        let agility = (cfg.turn_lateral_accel / animals.speed[i].max(1e-3))
+                            .min(cfg.turn_rate);
+                        let mut heading = animals.heading[i] + clamp(turn, -1.0, 1.0) * agility;
                         heading -= TAU * floor(heading / TAU);
                         animals.heading[i] = heading;
 
@@ -977,6 +989,7 @@ impl World {
                 plants.species[i],
                 &child,
                 cfg.species_threshold,
+                cfg.species_drift,
                 genome::plant_distance,
                 tick,
                 rng,
@@ -1136,6 +1149,7 @@ impl World {
                 animals.species[i],
                 &child,
                 cfg.species_threshold,
+                cfg.species_drift,
                 genome::animal_distance,
                 tick,
                 rng,
@@ -1264,7 +1278,8 @@ impl World {
             accum.plant_growth +=
                 tables.plant[pg::GROWTH_RATE][self.plants.gene(i, pg::GROWTH_RATE) as usize] as f64;
         }
-        self.plant_species.end_census(self.tick);
+        self.plant_species
+            .end_census(self.tick, self.cfg.species_min_population);
 
         self.animal_species.begin_census();
         for i in 0..self.animals.len() {
@@ -1297,7 +1312,8 @@ impl World {
             accum.temp_opt +=
                 tables.animal[ag::TEMP_OPT][self.animals.gene(i, ag::TEMP_OPT) as usize] as f64;
         }
-        self.animal_species.end_census(self.tick);
+        self.animal_species
+            .end_census(self.tick, self.cfg.species_min_population);
 
         self.accum = accum;
     }
@@ -2188,19 +2204,41 @@ mod tests {
         let mut harsh = calm;
         harsh.climate_variance = 0.6;
         harsh.climate_redness = 0.999;
-        let mut stormy = World::new(harsh, 31);
-        let mut worst = f32::MAX;
-        let mut worst_biomass = f32::MAX;
-        for _ in 0..1_500 {
-            stormy.tick();
-            worst = worst.min(stormy.stats.productivity);
-            worst_biomass = worst_biomass.min(stormy.stats.plant_biomass);
+
+        // Across seeds, not one. The whole point of reddened noise is that a run
+        // is a handful of long excursions rather than many independent samples,
+        // so any single seed can spend its whole length on the good side without
+        // that saying anything about the mechanism. Asserting on one draw made
+        // this test fail whenever an unrelated change shifted the shared
+        // generator stream, which is a property of the test, not of the climate.
+        let mut droughts = 0;
+        let mut dented = 0;
+        let seeds = [31u64, 32, 33, 34, 35, 36];
+        for &seed in &seeds {
+            let mut stormy = World::new(harsh, seed);
+            let mut worst = f32::MAX;
+            let mut worst_biomass = f32::MAX;
+            for _ in 0..1_500 {
+                stormy.tick();
+                worst = worst.min(stormy.stats.productivity);
+                worst_biomass = worst_biomass.min(stormy.stats.plant_biomass);
+            }
+            if worst < 0.8 {
+                droughts += 1;
+            }
+            if worst_biomass < steady.stats.plant_biomass * 0.95 {
+                dented += 1;
+            }
         }
-        assert!(worst < 0.8, "productivity never had a bad spell: {worst}");
         assert!(
-            worst_biomass < steady.stats.plant_biomass * 0.95,
-            "a drought never dented the biomass: {worst_biomass} against a calm {}",
-            steady.stats.plant_biomass
+            droughts >= seeds.len() / 2,
+            "only {droughts} of {} seeds had a bad spell",
+            seeds.len()
+        );
+        assert!(
+            dented >= seeds.len() / 2,
+            "only {dented} of {} seeds had biomass dented",
+            seeds.len()
         );
     }
 

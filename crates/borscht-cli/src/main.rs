@@ -18,6 +18,7 @@ fn usage() -> ! {
 
 USAGE:
     borscht bench   [--population N]... [--ticks N] [--seed N]
+    borscht diag    [--population N] [--ticks N] [--seed N] [--set key=value]...
     borscht run     [--population N] [--ticks N] [--seed N] [--out DIR]
                     [--frames N] [--image-size N] [--color MODE] [--set key=value]...
     borscht params [--json]
@@ -37,7 +38,13 @@ OPTIONS:
     --set key=value  override any simulation parameter; repeatable
                      (`borscht params` lists them)
     --quiet          suppress the per-tick table and print one summary line of
-                     key=value pairs, for parameter sweeps"
+                     key=value pairs, for parameter sweeps
+
+DIAG:
+    `diag` answers questions about *why* a world looks the way it does, which
+    the stats table does not: whether the tree is recording real lineages or
+    sampling noise, whether the herd is a foraging population or a single
+    advancing front, and what is actually stopping births."
     );
     std::process::exit(2)
 }
@@ -170,6 +177,7 @@ fn main() {
     }
     match args.command.as_str() {
         "bench" => bench(&args),
+        "diag" => diag(&args),
         "run" => run(&args),
         "params" if args.json => emit_params_js(),
         "params" => list_params(),
@@ -241,6 +249,214 @@ fn list_params() {
             p.description()
         );
     }
+}
+
+/// Measure *why* a world looks the way it does.
+///
+/// The stats table says what the populations are; this says whether the tree is
+/// recording lineages or noise, whether the animals are a foraging population or
+/// one advancing front, and what is actually stopping births. Every number here
+/// exists because a specific complaint about the simulation needed evidence
+/// rather than an opinion.
+fn diag(args: &Args) {
+    let cfg = build_config(args.populations.first().copied(), &args.overrides);
+    let seed = args.seed;
+    let mut world = World::new(cfg, seed);
+    let ticks = if args.ticks == 2000 { 6000 } else { args.ticks };
+
+    // Displacement needs a before, so positions are sampled and re-read a fixed
+    // interval later rather than integrated over the whole run: what matters is
+    // how far an animal gets in a hundred ticks, not how far it wanders in six
+    // thousand.
+    const WINDOW: u32 = 100;
+    let mut marks: Vec<(u32, f32, f32)> = Vec::new();
+    let mut displacement = Vec::new();
+
+    for tick in 0..ticks {
+        world.tick();
+        if tick % WINDOW == 0 {
+            if !marks.is_empty() {
+                let size = world.cfg.world_size;
+                for &(id, x0, y0) in &marks {
+                    if let Some(i) = (0..world.animals.len()).find(|&i| world.animals.id[i] == id) {
+                        let d2 = borscht_core::grid::wrap_dist_sq(
+                            x0,
+                            y0,
+                            world.animals.x[i],
+                            world.animals.y[i],
+                            size,
+                        );
+                        displacement.push(d2.sqrt());
+                    }
+                }
+            }
+            marks.clear();
+            // A sample, not the whole population: the lookup below is linear.
+            let step = (world.animals.len() / 200).max(1);
+            for i in (0..world.animals.len()).step_by(step) {
+                marks.push((world.animals.id[i], world.animals.x[i], world.animals.y[i]));
+            }
+        }
+    }
+
+    let tables = borscht_core::genome::tables();
+    use borscht_core::genome::{ag, pg};
+
+    println!(
+        "seed {seed}, {ticks} ticks, {} organisms",
+        world.population()
+    );
+    println!(
+        "  plants {}   animals {}",
+        world.plants.len(),
+        world.animals.len()
+    );
+
+    // ---- the tree: lineages, or sampling noise? ----
+    let history = &world.animal_species.history;
+    let total = history.len().max(1);
+    let above = |n: u32| history.iter().filter(|l| l.peak_population > n).count();
+    println!("\nTREE");
+    println!("  lineages recorded          {}", history.len());
+    println!(
+        "  never exceeded 1 individual {:>6}  ({:.1}%)",
+        history.len() - above(1),
+        100.0 * (history.len() - above(1)) as f32 / total as f32
+    );
+    println!(
+        "  reached 8                   {:>6}  ({:.1}%)",
+        above(8),
+        100.0 * above(8) as f32 / total as f32
+    );
+    println!(
+        "  reached 50                  {:>6}  ({:.1}%)",
+        above(50),
+        100.0 * above(50) as f32 / total as f32
+    );
+    let births = world.stats.get("animal_births").unwrap_or(0.0).max(1.0);
+    println!(
+        "  splits per 1000 births      {:>6.1}",
+        1000.0 * history.len() as f32 / (births * ticks as f32)
+    );
+
+    // ---- the grazing front ----
+    // A plant held at the refuge floor is one grazing has pinned: it cannot
+    // regrow, because logistic growth is proportional to the biomass it has
+    // left.
+    let refuge = world.cfg.graze_refuge;
+    let mut pinned = 0usize;
+    let mut alive = 0usize;
+    for i in 0..world.plants.len() {
+        if !world.plants.alive[i] {
+            continue;
+        }
+        alive += 1;
+        let max_size = tables.plant[pg::MAX_SIZE][world.plants.gene(i, pg::MAX_SIZE) as usize];
+        if world.plants.biomass[i] <= refuge * max_size * 1.05 {
+            pinned += 1;
+        }
+    }
+    // Circular concentration of headings. One is a column marching in step -- a
+    // front; zero is a population milling in every direction.
+    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    for i in 0..world.animals.len() {
+        sx += borscht_core::fastmath::cos(world.animals.heading[i]);
+        sy += borscht_core::fastmath::sin(world.animals.heading[i]);
+    }
+    let n = world.animals.len().max(1) as f32;
+    let concentration = (sx * sx + sy * sy).sqrt() / n;
+    displacement.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = displacement
+        .get(displacement.len() / 2)
+        .copied()
+        .unwrap_or(0.0);
+    println!("\nGRAZING");
+    println!(
+        "  plants pinned at refuge     {:>6.1}%  ({pinned} of {alive})",
+        100.0 * pinned as f32 / alive.max(1) as f32
+    );
+    println!(
+        "  heading concentration       {:>6.2}   (1 = one column in step, 0 = milling)",
+        concentration
+    );
+    println!(
+        "  median travel / {WINDOW} ticks  {:>6.1}   ({:.1}% of the world)",
+        median,
+        100.0 * median / world.cfg.world_size
+    );
+    // Net displacement alone cannot tell a stationary animal from one that
+    // swims hard in circles, and the two want opposite fixes. Realised speed
+    // against the speed the genes allow separates them.
+    let mut realised = 0.0f64;
+    let mut capable = 0.0f64;
+    let mut thrust = 0.0f64;
+    let mut turn = 0.0f64;
+    for i in 0..world.animals.len() {
+        realised += world.animals.speed[i] as f64;
+        capable +=
+            tables.animal[ag::MAX_SPEED][world.animals.gene(i, ag::MAX_SPEED) as usize] as f64;
+        thrust += world
+            .animals
+            .action_of(i, borscht_core::brain::output::THRUST) as f64;
+        turn += world
+            .animals
+            .action_of(i, borscht_core::brain::output::TURN)
+            .abs() as f64;
+    }
+    let n64 = world.animals.len().max(1) as f64;
+    println!(
+        "  mean speed                  {:>6.3}   of {:.3} the genes allow ({:.0}% of capacity)",
+        realised / n64,
+        capable / n64,
+        100.0 * realised / capable.max(1e-9)
+    );
+    println!(
+        "  path length / {WINDOW} ticks    {:>6.1}   versus {median:.1} of net travel",
+        100.0 * realised / n64
+    );
+    println!(
+        "  mean thrust {:>6.2}   mean |turn| {:>6.2}",
+        thrust / n64,
+        turn / n64
+    );
+
+    // ---- satiation ----
+    // An animal at capacity that keeps cropping wastes the plant and never has
+    // a reason to stop and do something else.
+    let mut full = 0usize;
+    for i in 0..world.animals.len() {
+        let size = tables.animal[ag::SIZE][world.animals.gene(i, ag::SIZE) as usize];
+        let cap = world.cfg.mass_per_size * size * world.cfg.reserve_capacity;
+        if world.animals.reserve[i] >= cap * 0.98 {
+            full += 1;
+        }
+    }
+    println!("\nSATIATION");
+    println!(
+        "  animals at full reserves    {:>6.1}%  ({full} of {})",
+        100.0 * full as f32 / world.animals.len().max(1) as f32,
+        world.animals.len()
+    );
+
+    // ---- what is stopping births ----
+    let stat = |n: &str| world.stats.get(n).unwrap_or(0.0);
+    println!("\nBIRTHS BLOCKED (per tick, at the end of the run)");
+    println!(
+        "  on finding a mate           {:>8.2}",
+        stat("animal_births_blocked_mate")
+    );
+    println!(
+        "  on matter                   {:>8.2}",
+        stat("animal_births_blocked_matter")
+    );
+    println!(
+        "  on space                    {:>8.2}",
+        stat("animal_births_blocked_space")
+    );
+    println!(
+        "  actual births               {:>8.2}",
+        stat("animal_births")
+    );
 }
 
 fn bench(args: &Args) {

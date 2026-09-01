@@ -301,8 +301,28 @@ config_params! {
     predation_efficiency: f32 = 0.85, "animals", 0.0, 1.0;
     /// Energy spent on a failed attack, per unit of size.
     attack_cost: f32 = 0.22, "animals", 0.0, 5.0;
-    /// Turn applied per tick at full rudder, in radians.
+    /// Turn applied per tick at full rudder when barely moving, in radians.
+    ///
+    /// This is the pivot rate, not the turn rate at speed: see
+    /// `turn_lateral_accel`.
     turn_rate: f32 = 0.42, "animals", 0.0, 3.2;
+    /// Lateral acceleration an animal can generate, which is what actually
+    /// limits how tightly it can turn while moving.
+    ///
+    /// Without this, turning was a fixed angle per tick regardless of speed --
+    /// an animal could pivot on the spot at a sprint, for free. Evolution found
+    /// that immediately: animals turned at four fifths of full rudder
+    /// continuously and orbited a circle of radius 0.8 world units, less than
+    /// half a sensing cell. They travelled 27 units of path for every 0.6 of
+    /// actual ground covered, never left the cell they were born in, and held
+    /// their patch pinned at the grazing floor forever. Station-keeping was the
+    /// optimal strategy because it cost nothing.
+    ///
+    /// Cornering is limited by grip, so the radius of a turn grows with the
+    /// square of speed (`r = v^2 / a`) and the angular rate falls as `a / v`.
+    /// The default puts the turning circle of a typical animal at a few sensing
+    /// cells across, so moving takes it somewhere it can sense a difference.
+    turn_lateral_accel: f32 = 0.009, "animals", 0.0001, 1.0;
     /// Fraction of velocity retained each tick.
     drag: f32 = 0.82, "animals", 0.0, 1.0;
     /// Per-weight mutation probability for brains, relative to the animal's own
@@ -358,8 +378,22 @@ config_params! {
     /// Genetic distance from a species' founding genome at which a lineage is
     /// recorded as a new species.
     species_threshold: f32 = 0.16, "speciation", 0.01, 1.0;
-    /// Population below which a species is retired from the registry.
+    /// Population below which a species is retired from the registry, and the
+    /// population a candidate must reach before it enters the tree of life.
     species_min_population: u32 = 8, "speciation", 1.0, 10_000.0;
+    /// How fast a species' reference genome follows its own members, per birth.
+    ///
+    /// This is what makes the distance threshold ask whether a lineage has
+    /// split, rather than how far it has changed since it began. A group
+    /// diverging faster
+    /// than the reference can follow separates; a population drifting as a whole
+    /// carries its reference with it and produces no branch, because one lineage
+    /// changing through time is not a branching event.
+    ///
+    /// Too high and nothing ever speciates; too low and it reverts to measuring
+    /// cumulative change from the founder. At the default the reference tracks
+    /// its population over roughly a hundred births.
+    species_drift: f32 = 0.01, "speciation", 0.0, 1.0;
 }
 
 impl ParamInfo {
