@@ -20,14 +20,13 @@ const arg = (name, fallback) => {
   return at >= 0 && process.argv[at + 1] ? process.argv[at + 1] : fallback;
 };
 const OUT = arg('out', `${root}out/borscht-artifact.html`);
-const SEED = arg('seed', '4');
-const SCALE = arg('scale', '15000');
-// 16 ticks a frame, measured rather than guessed. Under software rendering it
-// reaches the radiation (about tick 12,000 at this seed) in a minute, which is
-// 87% of what 32 achieves while staying at eight frames a second instead of
-// five. Past 16 the render and publish overhead stops being the bottleneck and
-// smoothness is spent for very little extra speed.
-const SPEED = arg('speed', '16');
+const SEED = arg('seed', '7');
+const SCALE = arg('scale', '100000');
+// One tick a frame. A battle at a hundred thousand men already costs several
+// milliseconds a tick, so the frame is the budget rather than the tick, and
+// asking for more per frame buys nothing but a chunkier picture. The control
+// goes to 64 for anyone watching a small muster.
+const SPEED = arg('speed', '1');
 
 const read = (f) => readFileSync(`${root}web/${f}`, 'utf8');
 
@@ -57,12 +56,6 @@ let body = html.slice(bodyAt, bodyEnd);
 
 // The module tag is replaced by the inlined bundle at the end.
 body = sub(body, /\s*<script type="module" src="\.\/app\.js"><\/script>/, '', 'module script tag');
-
-// Snapshot save and load: the Artifact viewer makes page-initiated downloads
-// inert, so these would be dead controls. Better absent than broken.
-const snapshotCard = body.match(/\s*<div class="card">\s*<h2>Snapshot<\/h2>[\s\S]*?<\/div>\s*<\/div>/);
-if (!snapshotCard) throw new Error('snapshot card not found in index.html');
-body = body.replace(snapshotCard[0], '');
 
 // Opening world.
 body = sub(
@@ -105,14 +98,7 @@ const params = strip(read('params.js'));
 const borscht = strip(read('borscht.js'));
 const renderer = strip(read('renderer.js'));
 const engine = strip(read('worker.js'));
-let app = strip(read('app.js'));
-
-// Snapshot save and load, removed whole. A published page cannot start a
-// download, so the controls are dropped from the markup above and the code
-// behind them goes too rather than sitting there unreachable.
-const region = /\n\/\/ #region snapshot\n[\s\S]*?\n\/\/ #endregion snapshot/;
-if (!region.test(app)) throw new Error('snapshot region markers not found in app.js');
-app = app.replace(region, '');
+const app = strip(read('app.js'));
 
 const wasm = readFileSync(`${root}web/borscht.wasm`).toString('base64');
 
