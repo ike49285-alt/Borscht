@@ -1,4 +1,11 @@
 // Capture the viewer after it has run long enough to look like an ecosystem.
+//
+// A freshly seeded world is uniform noise: herds, patchiness and species
+// clustering only appear after thousands of ticks, so this runs the page
+// forward before taking the picture. Writes two images -- the whole page, and
+// the world square on its own, which is the one worth showing.
+//
+// Env: SEED, SCALE (organisms), UNTIL (ticks to run to).
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
@@ -22,9 +29,9 @@ const page = await browser.newPage({ viewport: { width: 1500, height: 940 } });
 await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'load' });
 await page.waitForFunction(() => document.getElementById('h-plants').textContent !== '0', null, { timeout: 30000 });
 
-await page.selectOption('#scale', '50000');
+await page.selectOption('#scale', process.env.SCALE ?? '50000');
 await page.waitForTimeout(1500);
-await page.fill('#seed', '4');
+await page.fill('#seed', process.env.SEED ?? '4');
 await page.click('#reset');
 await page.waitForTimeout(1200);
 await page.fill('#speed', '24');
@@ -35,12 +42,14 @@ await page.click('#play');
 const deadline = Date.now() + 150000;
 while (Date.now() < deadline) {
   const tick = Number((await page.textContent('#h-tick')).replace(/[^0-9.]/g, '')) * ((await page.textContent('#h-tick')).includes('k') ? 1000 : 1);
-  if (tick > 9000) break;
+  if (tick > Number(process.env.UNTIL ?? 9000)) break;
   await page.waitForTimeout(2000);
 }
 await page.click('#play');
 await page.waitForTimeout(800);
 await page.screenshot({ path: `${OUT}/world.png` });
+// The world on its own, without the side panel.
+await page.locator('#stage').screenshot({ path: `${OUT}/stage.png` });
 
 console.log('tick    ', await page.textContent('#h-tick'));
 console.log('plants  ', await page.textContent('#h-plants'));
