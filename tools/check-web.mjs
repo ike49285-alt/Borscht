@@ -299,12 +299,16 @@ await page.mouse.wheel(0, -900);
 await page.waitForTimeout(400);
 // A world can be sparse, so try a few points rather than assuming an organism
 // sits under one particular pixel.
+// A sparse world means most pixels are empty, so this walks a grid rather than
+// trying a handful of points: with roughly a third of an organism under any one
+// click, five attempts miss often enough to fail a passing build.
 let inspected = false;
-for (const [x, y] of [[700, 450], [640, 400], [760, 500], [700, 380], [620, 520]]) {
-  await page.mouse.click(x, y);
-  await page.waitForTimeout(400);
-  inspected = await page.$eval('#inspector', (el) => el.style.display !== 'none');
-  if (inspected) break;
+for (let gy = 0; gy < 5 && !inspected; gy += 1) {
+  for (let gx = 0; gx < 5 && !inspected; gx += 1) {
+    await page.mouse.click(560 + gx * 70, 340 + gy * 60);
+    await page.waitForTimeout(120);
+    inspected = await page.$eval('#inspector', (el) => el.style.display !== 'none');
+  }
 }
 await page.screenshot({ path: `${OUT}/zoomed.png` });
 

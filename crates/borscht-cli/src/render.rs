@@ -55,10 +55,10 @@ impl Canvas {
 
         for p in 0..count {
             let o = p * RENDER_STRIDE;
-            let qx = u16::from_le_bytes([buf[o + render_field::X], buf[o + render_field::X + 1]])
-                as u32;
-            let qy = u16::from_le_bytes([buf[o + render_field::Y], buf[o + render_field::Y + 1]])
-                as u32;
+            let qx =
+                u16::from_le_bytes([buf[o + render_field::X], buf[o + render_field::X + 1]]) as u32;
+            let qy =
+                u16::from_le_bytes([buf[o + render_field::Y], buf[o + render_field::Y + 1]]) as u32;
             // Quantised coordinates are already world-relative in [0, 65535].
             let px = (qx as usize * size) >> 16;
             let py = (qy as usize * size) >> 16;

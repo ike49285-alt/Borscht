@@ -20,8 +20,8 @@ const arg = (name, fallback) => {
   return at >= 0 && process.argv[at + 1] ? process.argv[at + 1] : fallback;
 };
 const OUT = arg('out', `${root}out/borscht-artifact.html`);
-const SEED = arg('seed', '3');
-const SCALE = arg('scale', '60000');
+const SEED = arg('seed', '4');
+const SCALE = arg('scale', '15000');
 // 16 ticks a frame, measured rather than guessed. Under software rendering it
 // reaches the radiation (about tick 12,000 at this seed) in a minute, which is
 // 87% of what 32 achieves while staying at eight frames a second instead of
@@ -71,13 +71,20 @@ body = sub(
   `<input id="seed" type="number" value="${SEED}"`,
   'seed default',
 );
+// Clear whatever the page selects by default, then select the requested scale.
+// Doing it in that order means the builder does not care whether the two happen
+// to agree, which they did not the moment web/ was rescaled.
+const selectedCount = body.split(' selected>').length - 1;
+if (selectedCount !== 1) {
+  throw new Error(`expected exactly one selected option in index.html, found ${selectedCount}`);
+}
+body = body.replace(' selected>', '>');
 body = sub(
   body,
   `<option value="${SCALE}">`,
   `<option value="${SCALE}" selected>`,
   `scale option ${SCALE}`,
 );
-body = sub(body, '<option value="10000" selected>', '<option value="10000">', 'old selected scale');
 body = sub(
   body,
   'id="t-speed" type="range" min="1" max="64" value="1"',

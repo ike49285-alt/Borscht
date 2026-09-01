@@ -245,7 +245,18 @@ config_params! {
     /// meaningful -- so this sets the scale rather than deciding an outcome.
     /// Sexual reproduction needs a lower figure than clonal did: two parents
     /// per offspring, plus the possibility of finding no mate.
-    metabolism: f32 = 0.015, "animals", 0.0, 1.0;
+    ///
+    /// It also decides whether animals move at all, which was not obvious until
+    /// it was measured. At 0.015 an animal could live indefinitely off the
+    /// regrowth of the patch it was standing on, so sitting still was the
+    /// optimal strategy and evolution took it: mean thrust was *negative*, and
+    /// the population held station while the vegetation around it stayed pinned
+    /// at the grazing floor. That is a sea anemone, not a grazer. Raising it
+    /// makes a single patch insufficient, so foraging pays. Across five seeds at
+    /// 25,000 organisms, tripling it took median travel from 4.9 world units per
+    /// hundred ticks to 24.5 and, far from costing lives, took establishment
+    /// from two seeds in five to three.
+    metabolism: f32 = 0.045, "animals", 0.0, 1.0;
     /// Cost of a fully developed sensory system, as a fraction of basal rate.
     vision_upkeep: f32 = 0.25, "animals", 0.0, 3.0;
     /// Cost of maximum weapons and armour, as a fraction of basal rate.

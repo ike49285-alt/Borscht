@@ -2189,7 +2189,10 @@ mod tests {
                     "organism {p} is fully transparent"
                 );
                 // A body needs a size, or it draws as nothing at all.
-                assert!(buf[o + render_field::RADIUS] > 0, "organism {p} has no body");
+                assert!(
+                    buf[o + render_field::RADIUS] > 0,
+                    "organism {p} has no body"
+                );
                 // Kind is a tag the renderer branches on: plants first, then
                 // animals, in that order in the buffer.
                 let kind = buf[o + render_field::KIND];

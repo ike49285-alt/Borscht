@@ -261,24 +261,28 @@ of whether the result is worth watching.
 Establishment depends sharply on how big the world is. Six seeds each, 6,000
 ticks, counting a world as established if it still has more than 100 animals:
 
-| organisms | established | animals in survivors | animal species |
-|-----------|------------:|---------------------:|----------------|
-| 2,500     | 1 / 6       | 156                  | 1              |
-| 10,000    | 0 / 6       | —                    | —              |
-| 25,000    | 1 / 6       | 2,762                | 63             |
-| 60,000    | 3 / 6       | 902 – 6,373          | 8 – 109        |
-| 120,000   | 5 / 6       | —                    | up to 43       |
-| 300,000   | 5 / 6       | —                    | 123 – 692      |
+| organisms | established | animals in survivors |
+|-----------|------------:|---------------------:|
+| 5,000     | 1 / 6       | 112                  |
+| 10,000    | 2 / 6       | 121 – 164            |
+| 15,000    | 2 / 6       | 483 – 654            |
+| 25,000    | 3 / 6       | 123 – 1,841          |
+| 120,000   | 5 / 6       | —                    |
+| 300,000   | 5 / 6       | —                    |
 
 This is minimum-viable-population behaviour and it fell out of the model rather
-than being put in. Read the top of that table before drawing conclusions from a
-small run: **a default world usually loses its animals**, and every one of the
-scales the viewer offers is at or below the threshold where a sexual population
-reliably holds on. That is a result, not a fault — but it does mean the small
-scales are for watching mechanism and the large ones for watching an ecosystem.
-Most of this project's debugging happened at 40,000 organisms, where extinction
-dominates and it is easy to mistake an island too small to hold a sexual
-population for a bug.
+than being put in. Read it before drawing conclusions from a small run: at these
+sizes **a world is as likely to lose its animals as to keep them**, and the
+scales the viewer offers all sit below the threshold where a sexual population
+reliably holds on. That is a result, not a fault.
+
+The floor did come down, though, and by mechanism rather than tuning. Making
+turning cost speed, making speciation a population event, and raising metabolism
+to the point where an animal cannot live off one patch together took 10,000
+organisms from zero worlds in six to two, and 25,000 from one to three. Most of
+this project's debugging happened at 40,000 organisms, where extinction dominates
+and it is easy to mistake an island too small to hold a sexual population for a
+bug.
 
 The plants are unaffected: they can self, so a plant flora establishes and
 persists at every scale. What the small worlds cannot support is animals that

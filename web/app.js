@@ -135,8 +135,9 @@ function inspectAt(event) {
   const { x, y } = toWorld(event);
   const rect = canvas.getBoundingClientRect();
   const shorter = Math.min(rect.width, rect.height);
-  // Ten screen pixels' worth of world, so the hit area feels the same at any zoom.
-  const radius = (10 / (shorter * view.zoom)) * worldSize;
+  // Fourteen screen pixels' worth of world, so the hit area feels the same at
+  // any zoom and is reachable with a fingertip rather than a mouse pixel.
+  const radius = (14 / (shorter * view.zoom)) * worldSize;
   worker.postMessage({ type: 'inspect', x, y, radius: Math.max(radius, worldSize / 2000) });
 }
 

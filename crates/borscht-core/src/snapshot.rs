@@ -515,13 +515,27 @@ mod tests {
 
     #[test]
     fn the_tree_of_life_survives_the_trip() {
+        // What this test needs is a world whose tree contains an extinct branch,
+        // and only species that became a group are in the tree at all. Waiting a
+        // fixed number of ticks on a fixed seed and hoping is how this broke
+        // twice: any change that shifts the shared generator stream moves
+        // whether that particular run happened to lose a lineage. Search for the
+        // condition instead of assuming it.
         let mut w = World::new(small(), 4);
-        // Long enough for a lineage to establish *and* then die: only species
-        // that became a group are in the tree at all, so a short run can finish
-        // with nothing extinct to check.
-        w.tick_many(3_000);
+        'found: {
+            for seed in 4..12u64 {
+                w = World::new(small(), seed);
+                for _ in 0..40 {
+                    w.tick_many(250);
+                    let h = &w.animal_species.history;
+                    if h.len() > 2 && h.iter().any(|l| l.extinct_tick != u32::MAX) {
+                        break 'found;
+                    }
+                }
+            }
+            panic!("no seed produced an extinct lineage to test the round trip against");
+        }
         let before = w.animal_species.history.clone();
-        assert!(before.len() > 2, "expected some lineages to have appeared");
         let restored = load(&save(&w)).unwrap();
         let after = &restored.animal_species.history;
         assert_eq!(before.len(), after.len());

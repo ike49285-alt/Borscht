@@ -279,6 +279,36 @@ those budgets reach at one scale and not another. That is a change in the ecolog
 dressed up as a change in resolution. Rounding to the nearest power of two holds
 cell size within a factor of sqrt(2) at every scale.
 
+## The animals had evolved to sit still
+
+Worth recording because it took a diagnostic to see and two wrong guesses to get
+there. The viewer looked like a cellular automaton: plants pinned at the grazing
+floor, animals in clumps that crept rather than foraged. The two hypotheses in
+the plan -- that animals were eating while full, and that they could not find
+mates -- were both measured and both wrong. Satiation was 4.7%, and zero births
+were blocked on mate against 212 a tick blocked on matter.
+
+What `borscht diag` actually showed was animals covering 27 world units of path
+for every 0.6 of ground. They were not stationary and they were not marching:
+they were **spinning**. Two causes, one mechanical and one evolutionary.
+
+**Turning was a fixed angle per tick regardless of speed**, so an animal could
+pivot on the spot at a sprint for free. That permits a degenerate strategy --
+orbit a circle smaller than one sensing cell, so every gradient you can sense is
+constant and moving can never teach you anything -- and evolution took it
+immediately. Cornering is limited by grip, so the turn rate now falls as `a / v`
+and the tightest circle grows with the square of speed. That alone tripled net
+travel, and left the ratio at 13:1.
+
+**Metabolism was low enough that sitting still was viable.** An animal could
+live indefinitely off the regrowth of the patch under it, so thrust was selected
+to zero -- mean thrust was *negative*. Sweeping it across five seeds at 25,000
+organisms: at 0.015, median travel 4.9 units per hundred ticks and two seeds in
+five established; at 0.045, travel 24.5 and three in five. Movement is not free,
+so it only gets selected when standing still costs more. Being wrong about this
+for so long is what a low metabolic rate looks like from the inside: the animals
+were behaving optimally, and the optimum was to be a sea anemone.
+
 ## Taking matter out of a world
 
 The biomass control is deliberately not a parameter. Parameters are rules the
