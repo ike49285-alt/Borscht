@@ -127,6 +127,68 @@ config_params! {
     /// reason to break: it would only ever see the deaths of the current
     /// instant.
     loss_memory: f32 = 0.92, "combat", 0.0, 0.999;
+    /// How much harder a blow lands on a man who has broken and is running.
+    ///
+    /// He cannot turn and defend himself. This is why most of the killing in a
+    /// real battle happened in the pursuit rather than in the fighting, and it
+    /// is what makes breaking an enemy line worth more than grinding it down.
+    rout_vulnerability: f32 = 2.6, "combat", 1.0, 10.0;
+
+    /// Steadying from having the better of it locally, per tick at even odds
+    /// against none.
+    morale_odds: f32 = 0.010, "morale", 0.0, 0.5;
+    /// Steadying from having friends at your shoulder, per tick at full
+    /// cohesion.
+    morale_cohesion: f32 = 0.006, "morale", 0.0, 0.5;
+    /// Shock per unit of the local casualty field.
+    ///
+    /// That field decays rather than clearing, so this is what makes a volley go
+    /// on being felt after it lands.
+    ///
+    /// Chosen against the rout trace rather than by eye: at 0.04 a line wears
+    /// down without ever giving way, and past 0.2 both armies dissolve on
+    /// contact before anyone has fought.
+    morale_shock: f32 = 0.08, "morale", 0.0, 2.0;
+    /// Shock per friend running past you.
+    ///
+    /// The carrier of a collapse: one broken company frightens the next, which
+    /// is the whole phenomenon. Without it a line wears down evenly and never
+    /// gives way.
+    ///
+    /// This is the term that decides the *shape* of a collapse. Too little and
+    /// men break one at a time and are killed one at a time; too much and the
+    /// whole army goes in a single tick, which is a flash rout and looks fake.
+    /// At the default a line holds for about four hundred ticks and then gives
+    /// over roughly a hundred and forty, with the break accelerating as it
+    /// spreads -- ten per cent of the men running at tick 422, half by 501, nine
+    /// in ten by 560.
+    morale_panic: f32 = 0.12, "morale", 0.0, 2.0;
+    /// Shock from your own wounds, per tick at the point of death.
+    morale_wound: f32 = 0.004, "morale", 0.0, 0.5;
+    /// Men in a cell at which cohesion counts as full.
+    cohesion_full: f32 = 6.0, "morale", 1.0, 64.0;
+    /// How far above its nerve a broken unit must recover before it will rally.
+    ///
+    /// A single threshold makes units flicker in and out of rout at the
+    /// boundary, which looks wrong and is a quiet way to get this subtly broken.
+    rally_margin: f32 = 0.22, "morale", 0.0, 1.0;
+    /// Ticks a man must spend running before he will re-form, however calm he
+    /// has become.
+    ///
+    /// Without it, breaking and rallying flicker: the instant a man breaks he
+    /// stops being frightened by the other fugitives, recovers past the margin
+    /// within a few ticks and falls in again right beside the melee he just
+    /// fled -- an army of ten thousand logged three hundred thousand breaks and
+    /// half a million rallies. He has to get away and be gathered up, and that
+    /// takes time.
+    rally_delay: f32 = 140.0, "morale", 0.0, 255.0;
+    /// Weight of the push away from your own side's crowding, against the pull
+    /// toward the enemy.
+    ///
+    /// Without it every man steers up the same enemy gradient and both armies
+    /// converge on a point, which leaves the local odds and local density that
+    /// morale reads nearly uniform everywhere.
+    spacing: f32 = 0.55, "movement", 0.0, 4.0;
 }
 
 impl ParamInfo {
@@ -188,6 +250,8 @@ impl Config {
         self.turn_rate = self.turn_rate.max(1e-4);
         self.drag = self.drag.clamp(0.0, 0.99);
         self.loss_memory = self.loss_memory.clamp(0.0, 0.999);
+        self.rout_vulnerability = self.rout_vulnerability.max(1.0);
+        self.cohesion_full = self.cohesion_full.max(1.0);
     }
 
     /// A field sized to hold `total` units at a constant density, so the

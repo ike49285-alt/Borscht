@@ -6,6 +6,7 @@ pub mod combat;
 pub mod config;
 pub mod fastmath;
 pub mod grid;
+pub mod morale;
 pub mod rng;
 pub mod stats;
 

@@ -88,15 +88,29 @@ pub struct Blow {
 /// Returns the blow to apply rather than applying it: the target may be any
 /// unit in the pool, and handing back the intent keeps the mutable borrow of
 /// the army in one place instead of threading it through the search.
-pub fn engage(
-    army: &mut Army,
-    grid: &Grid,
-    i: usize,
-    reach: f32,
-    search: f32,
-    damage: f32,
-    cooldown: u8,
-) -> Option<Blow> {
+/// Everything about how one kind of man fights, gathered so the call site reads
+/// as an intent rather than as seven loose numbers in an order nobody can
+/// remember.
+#[derive(Clone, Copy, Debug)]
+pub struct Strike {
+    /// How far he can reach to land a blow.
+    pub reach: f32,
+    /// How far he will look for someone to fight.
+    pub search: f32,
+    pub damage: f32,
+    pub cooldown: u8,
+    /// How much harder a blow lands on a man who is running.
+    pub rout_vulnerability: f32,
+}
+
+pub fn engage(army: &mut Army, grid: &Grid, i: usize, s: Strike) -> Option<Blow> {
+    let (reach, search, damage, cooldown, rout_vulnerability) = (
+        s.reach,
+        s.search,
+        s.damage,
+        s.cooldown,
+        s.rout_vulnerability,
+    );
     let cell = grid.units.cell_of[i] as usize;
     if !enemy_near(grid, cell, army.team[i]) {
         army.target[i] = NO_TARGET;
@@ -126,9 +140,17 @@ pub fn engage(
         return None;
     }
     army.cooldown[i] = cooldown;
+    // A man who has broken cannot turn and defend himself, which is why most of
+    // the killing in a real battle happened in the pursuit rather than in the
+    // fighting.
+    let fleeing = if army.routing(t) {
+        rout_vulnerability
+    } else {
+        1.0
+    };
     Some(Blow {
         target: t,
-        damage: flank_bonus(army, i, t) * damage,
+        damage: flank_bonus(army, i, t) * damage * fleeing,
     })
 }
 
@@ -173,7 +195,19 @@ mod tests {
     #[test]
     fn a_unit_with_no_enemy_nearby_does_not_search() {
         let (mut army, grid) = field(&[(10.0, 10.0, 0), (11.0, 10.0, 0)]);
-        assert!(engage(&mut army, &grid, 0, 2.0, 4.0, 10.0, 5).is_none());
+        assert!(engage(
+            &mut army,
+            &grid,
+            0,
+            Strike {
+                reach: 2.0,
+                search: 4.0,
+                damage: 10.0,
+                cooldown: 5,
+                rout_vulnerability: 1.0
+            }
+        )
+        .is_none());
         assert_eq!(army.target[0], NO_TARGET);
     }
 
@@ -192,15 +226,50 @@ mod tests {
     #[test]
     fn a_blow_lands_only_within_reach_and_only_off_cooldown() {
         let (mut army, grid) = field(&[(10.0, 10.0, 0), (10.5, 10.0, 1)]);
-        let blow = engage(&mut army, &grid, 0, 1.0, 4.0, 10.0, 7);
+        let blow = engage(
+            &mut army,
+            &grid,
+            0,
+            Strike {
+                reach: 1.0,
+                search: 4.0,
+                damage: 10.0,
+                cooldown: 7,
+                rout_vulnerability: 1.0,
+            },
+        );
         assert!(blow.is_some(), "in reach and ready, so it should strike");
         assert_eq!(army.cooldown[0], 7);
         // Still on cooldown now.
-        assert!(engage(&mut army, &grid, 0, 1.0, 4.0, 10.0, 7).is_none());
+        assert!(engage(
+            &mut army,
+            &grid,
+            0,
+            Strike {
+                reach: 1.0,
+                search: 4.0,
+                damage: 10.0,
+                cooldown: 7,
+                rout_vulnerability: 1.0
+            }
+        )
+        .is_none());
 
         // Out of reach, but the enemy is in the neighbourhood.
         let (mut army, grid) = field(&[(10.0, 10.0, 0), (13.0, 10.0, 1)]);
-        assert!(engage(&mut army, &grid, 0, 1.0, 8.0, 10.0, 7).is_none());
+        assert!(engage(
+            &mut army,
+            &grid,
+            0,
+            Strike {
+                reach: 1.0,
+                search: 8.0,
+                damage: 10.0,
+                cooldown: 7,
+                rout_vulnerability: 1.0
+            }
+        )
+        .is_none());
         assert_ne!(army.target[0], NO_TARGET, "it should still have marked him");
     }
 
@@ -210,10 +279,32 @@ mod tests {
         // reach means re-scanning the neighbourhood every tick for every unit
         // that has not made contact.
         let (mut army, grid) = field(&[(10.0, 10.0, 0), (12.5, 10.0, 1), (12.6, 10.0, 1)]);
-        engage(&mut army, &grid, 0, 1.0, 6.0, 10.0, 7);
+        engage(
+            &mut army,
+            &grid,
+            0,
+            Strike {
+                reach: 1.0,
+                search: 6.0,
+                damage: 10.0,
+                cooldown: 7,
+                rout_vulnerability: 1.0,
+            },
+        );
         let first = army.target[0];
         assert_ne!(first, NO_TARGET, "it should mark someone to close with");
-        engage(&mut army, &grid, 0, 1.0, 6.0, 10.0, 7);
+        engage(
+            &mut army,
+            &grid,
+            0,
+            Strike {
+                reach: 1.0,
+                search: 6.0,
+                damage: 10.0,
+                cooldown: 7,
+                rout_vulnerability: 1.0,
+            },
+        );
         assert_eq!(army.target[0], first, "it changed its mind for no reason");
     }
 
@@ -222,7 +313,19 @@ mod tests {
         let (mut army, grid) = field(&[(10.0, 10.0, 0), (10.5, 10.0, 1), (10.6, 10.0, 1)]);
         army.target[0] = 1;
         army.kill(1);
-        let blow = engage(&mut army, &grid, 0, 1.0, 4.0, 10.0, 7).expect("a live foe remains");
+        let blow = engage(
+            &mut army,
+            &grid,
+            0,
+            Strike {
+                reach: 1.0,
+                search: 4.0,
+                damage: 10.0,
+                cooldown: 7,
+                rout_vulnerability: 1.0,
+            },
+        )
+        .expect("a live foe remains");
         assert_eq!(blow.target, 2, "it should have switched to the living one");
     }
 

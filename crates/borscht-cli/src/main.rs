@@ -277,8 +277,35 @@ fn battle(args: &Args) {
     };
     let mut frame = 0;
 
+    // The rout trace. The spread between these is the measurement that matters:
+    // a real collapse is progressive and accelerating, so if 10%, 50% and 90%
+    // land on nearly the same tick the whole army broke at once, which is a
+    // flash rout and looks fake however good every other number is.
+    let mut milestones = [[None::<u32>; 3]; 2];
+    let mut peak_routing = 0u32;
+
     for tick in 0..args.ticks {
         b.tick();
+        {
+            let alive = b.army.muster();
+            let mut routing_now = 0u32;
+            for team in 0..2 {
+                let holding = b.army.holding(team as u8);
+                let routing = alive[team].saturating_sub(holding);
+                routing_now += routing;
+                // Against the men still on the field, not against the muster:
+                // a router who is cut down stops counting as routing, so a
+                // share of the starting strength can never reach the top of
+                // the scale and the last milestone would never fire.
+                let share = routing as f32 / alive[team].max(1) as f32;
+                for (slot, want) in [0.10f32, 0.50, 0.90].iter().enumerate() {
+                    if milestones[team][slot].is_none() && share >= *want {
+                        milestones[team][slot] = Some(tick);
+                    }
+                }
+            }
+            peak_routing = peak_routing.max(routing_now);
+        }
         if tick % 20 == 0 {
             csv.push_str(&format!("{tick},"));
             let row: Vec<String> = b.stats.as_slice().iter().map(|v| format!("{v}")).collect();
@@ -301,10 +328,14 @@ fn battle(args: &Args) {
     }
 
     let end = b.army.muster();
-    let winner = match (end[0], end[1]) {
-        (0, 0) => "mutual annihilation",
-        (0, _) => "blue",
-        (_, 0) => "red",
+    // Decided on who is still holding, not on who is still breathing: the
+    // battle ends when one army stops contesting the ground, and the men
+    // streaming away from it are no longer part of that argument.
+    let holding = [b.army.holding(0), b.army.holding(1)];
+    let winner = match (holding[0], holding[1]) {
+        (0, 0) => "both armies broke",
+        (0, _) => "blue holds the field",
+        (_, 0) => "red holds the field",
         _ => "undecided",
     };
     if args.quiet {
@@ -326,6 +357,31 @@ fn battle(args: &Args) {
         println!(
             "  mean nerve   red {:.2}   blue {:.2}",
             b.stats.red_morale, b.stats.blue_morale
+        );
+
+        let c = b.counters;
+        let at = |m: Option<u32>| m.map_or("never".to_string(), |t| t.to_string());
+        println!("\n  ROUT");
+        for (team, name) in ["red", "blue"].iter().enumerate() {
+            println!(
+                "    {name:<5} broke {:>8}   10% at {:>6}   50% at {:>6}   90% at {:>6}",
+                c.broke[team],
+                at(milestones[team][0]),
+                at(milestones[team][1]),
+                at(milestones[team][2]),
+            );
+        }
+        println!(
+            "    peak running at once {peak_routing}, rallied {}",
+            c.rallied
+        );
+        let fighting: u32 = c.killed_fighting.iter().sum();
+        let running: u32 = c.killed_routing.iter().sum();
+        let total = (fighting + running).max(1);
+        println!(
+            "    cut down fighting {fighting} ({:.0}%), running {running} ({:.0}%)",
+            100.0 * fighting as f32 / total as f32,
+            100.0 * running as f32 / total as f32
         );
     }
 

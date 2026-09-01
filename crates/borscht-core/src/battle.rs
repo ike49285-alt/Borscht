@@ -17,7 +17,7 @@
 
 use crate::army::{Archetype, Army};
 use crate::config::Config;
-use crate::fastmath::{atan2, clamp, floor, sin_cos, TAU};
+use crate::fastmath::{atan2, clamp, floor, sin_cos, sqrt, TAU};
 use crate::grid::{clamp_field, foe, Grid, TEAMS};
 use crate::rng::Rng;
 use crate::stats::Stats;
@@ -63,6 +63,22 @@ impl ColorMode {
     }
 }
 
+/// Running totals a battle is judged by, kept apart from the per-tick stats
+/// because they accumulate rather than being sampled.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Counters {
+    /// Men who broke, per side. Counts the transition, so a man who rallies and
+    /// breaks again is counted twice -- which is the honest reading of it.
+    pub broke: [u32; TEAMS],
+    /// Times a broken man pulled himself together.
+    pub rallied: u32,
+    /// Men cut down while standing and fighting, per side.
+    pub killed_fighting: [u32; TEAMS],
+    /// Men cut down while running, per side. History says this should be the
+    /// larger number.
+    pub killed_routing: [u32; TEAMS],
+}
+
 const SALT_INIT: u64 = 0x5EED_0001;
 
 pub struct Battle {
@@ -79,8 +95,21 @@ pub struct Battle {
     pub order_point: [(f32, f32); TEAMS],
     rng: Rng,
     started: [u32; TEAMS],
+    pub counters: Counters,
     render_buf: Vec<u8>,
     render_count: usize,
+}
+
+/// A direction of unit length, or zero when there is no direction to be had.
+#[inline(always)]
+fn unit(x: f32, y: f32) -> (f32, f32) {
+    let len2 = x * x + y * y;
+    if len2 <= 1e-12 {
+        (0.0, 0.0)
+    } else {
+        let inv = 1.0 / sqrt(len2);
+        (x * inv, y * inv)
+    }
 }
 
 impl Battle {
@@ -98,6 +127,7 @@ impl Battle {
             tick: 0,
             rng: Rng::new(seed, 0x9E37_79B9),
             started: [0; TEAMS],
+            counters: Counters::default(),
             render_buf: Vec::new(),
             render_count: 0,
         };
@@ -111,6 +141,7 @@ impl Battle {
         self.tick = 0;
         self.rng = Rng::new(seed, 0x9E37_79B9);
         self.army.clear();
+        self.counters = Counters::default();
         self.deploy();
     }
 
@@ -204,6 +235,7 @@ impl Battle {
         self.rebuild_fields();
         self.steer_and_move();
         self.fight();
+        self.steady_or_break();
         if self.army.should_compact() {
             self.army.compact();
         }
@@ -242,6 +274,9 @@ impl Battle {
             // Where the enemy is, sensed as a field rather than by looking at
             // anybody in particular.
             let (foe_here, fgx, fgy) = geom.sample(&self.grid.strength[foe(team as u8)], cx, cy);
+            // And where his own side is thickest, which he wants to be beside
+            // rather than inside.
+            let (_, ogx, ogy) = geom.sample(&self.grid.strength[team], cx, cy);
 
             let (mut tx, mut ty) = if foe_here > 0.0 || fgx != 0.0 || fgy != 0.0 {
                 (fgx, fgy)
@@ -249,6 +284,16 @@ impl Battle {
                 let (ox, oy) = self.order_point[team];
                 (ox - self.army.x[i], oy - self.army.y[i])
             };
+
+            // Push out of the crush. Both directions are normalised first: the
+            // enemy gradient and the friendly one have unrelated magnitudes, and
+            // combining them raw would let whichever field happens to be
+            // steeper decide the behaviour -- a units mistake that looks exactly
+            // like a tuning problem.
+            (tx, ty) = unit(tx, ty);
+            let (sx, sy) = unit(ogx, ogy);
+            tx -= sx * cfg.spacing;
+            ty -= sy * cfg.spacing;
 
             if self.army.routing(i) {
                 // Away from the enemy, and away fast.
@@ -300,17 +345,26 @@ impl Battle {
                 &mut self.army,
                 &self.grid,
                 i,
-                a.reach,
-                cfg.search_radius,
-                a.damage,
-                a.cooldown,
+                crate::combat::Strike {
+                    reach: a.reach,
+                    search: cfg.search_radius,
+                    damage: a.damage,
+                    cooldown: a.cooldown,
+                    rout_vulnerability: cfg.rout_vulnerability,
+                },
             );
             let Some(blow) = blow else { continue };
             let t = blow.target;
             let victim_team = self.army.team[t] as usize;
             let armour = self.archetypes[victim_team][self.army.kind[t] as usize].armour;
+            let was_running = self.army.routing(t);
             if self.army.wound(t, blow.damage, armour) {
                 killed[victim_team] += 1;
+                if was_running {
+                    self.counters.killed_routing[victim_team] += 1;
+                } else {
+                    self.counters.killed_fighting[victim_team] += 1;
+                }
                 let cell = self.grid.units.cell_of[t] as usize;
                 // Where a man fell, so his neighbours can feel it.
                 self.grid.losses[victim_team][cell] += 1.0;
@@ -318,6 +372,48 @@ impl Battle {
         }
         self.stats.red_killed += killed[0] as f32;
         self.stats.blue_killed += killed[1] as f32;
+    }
+
+    /// Move every man's nerve, and let those who have had enough break.
+    ///
+    /// Runs after the fighting, so the casualties of this tick are already in
+    /// the field a man reads. Ordering matters here: doing it first would mean
+    /// nobody ever felt the blow that just landed beside him.
+    fn steady_or_break(&mut self) {
+        let cfg = self.cfg;
+        for i in 0..self.army.len() {
+            if !self.army.alive(i) {
+                continue;
+            }
+            let team = self.army.team[i] as usize;
+            let a = self.archetypes[team][self.army.kind[i] as usize];
+            let p = crate::morale::pressure_on(&self.army, &self.grid, &cfg, i, a.hp);
+            let m = clamp(self.army.morale[i] + p.delta(&cfg), 0.0, 1.0);
+            self.army.morale[i] = m;
+
+            if self.army.routing(i) {
+                self.army.broken_for[i] = self.army.broken_for[i].saturating_add(1);
+                let long_enough = self.army.broken_for[i] as f32 >= cfg.rally_delay;
+                if long_enough
+                    && crate::morale::may_rally(
+                        &self.grid,
+                        &self.army,
+                        i,
+                        m,
+                        a.nerve,
+                        cfg.rally_margin,
+                    )
+                {
+                    self.army.flags[i] &= !crate::army::ROUTING;
+                    self.army.broken_for[i] = 0;
+                    self.counters.rallied += 1;
+                }
+            } else if m < a.nerve {
+                self.army.flags[i] |= crate::army::ROUTING;
+                self.army.broken_for[i] = 0;
+                self.counters.broke[team] += 1;
+            }
+        }
     }
 
     fn collect_stats(&mut self) {
@@ -350,10 +446,15 @@ impl Battle {
         self.started
     }
 
-    /// Nobody left standing on one side, or the clock ran out.
+    /// Whether the field is settled.
+    ///
+    /// Not "one side annihilated": a battle ends when an army stops holding the
+    /// ground, and men who have broken and are running are no longer contesting
+    /// anything. Waiting for the last of them to be cut down measures the length
+    /// of the pursuit, not the length of the battle.
     pub fn decided(&self) -> bool {
-        let m = self.army.muster();
-        m[0] == 0 || m[1] == 0
+        let holding = [self.army.holding(0), self.army.holding(1)];
+        holding[0] == 0 || holding[1] == 0
     }
 
     pub fn field_size(&self) -> f32 {

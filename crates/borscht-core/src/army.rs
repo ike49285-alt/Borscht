@@ -97,6 +97,13 @@ pub struct Army {
     pub kind: Vec<u8>,
     /// Ticks until this unit can strike again.
     pub cooldown: Vec<u8>,
+    /// Ticks since this man broke, while he is still running.
+    ///
+    /// A separate byte rather than borrowing the attack cooldown, which a
+    /// router never uses: one field with two meanings is how a subtle bug gets
+    /// written a month later. It caps rather than wrapping, since all anyone
+    /// asks of it is whether enough time has passed.
+    pub broken_for: Vec<u8>,
     pub flags: Vec<u8>,
     /// Index of the unit being fought, or `NO_TARGET`.
     ///
@@ -123,6 +130,7 @@ impl Army {
             team: vec![0u8; capacity],
             kind: vec![0u8; capacity],
             cooldown: vec![0u8; capacity],
+            broken_for: vec![0u8; capacity],
             flags: vec![0u8; capacity],
             target: vec![NO_TARGET; capacity],
             len: 0,
@@ -196,6 +204,7 @@ impl Army {
         self.team[i] = team;
         self.kind[i] = kind;
         self.cooldown[i] = 0;
+        self.broken_for[i] = 0;
         self.flags[i] = 0;
         self.target[i] = NO_TARGET;
         self.len += 1;
@@ -245,6 +254,7 @@ impl Army {
                 self.team[i] = self.team[last];
                 self.kind[i] = self.kind[last];
                 self.cooldown[i] = self.cooldown[last];
+                self.broken_for[i] = self.broken_for[last];
                 self.flags[i] = self.flags[last];
             }
             self.len = last;

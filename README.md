@@ -12,11 +12,71 @@ points. The ecology itself is in the git history.
 
 ## Where it is
 
-Stage one: two armies muster, march at each other, and fight. Behaviour is
-hard-coded -- walk toward the enemy strength you can sense, hit whatever comes
-into reach, with a blow from behind landing harder than one from the front.
-There is no morale yet, so lines do not break; there are no commanders, so
-nothing manoeuvres. Those are next, and they are the point.
+Two armies muster, march at each other, fight, and one of them breaks. Behaviour
+is still hard-coded -- walk toward the enemy strength you can sense, keep out of
+your own side's crush, hit whatever comes into reach -- so nothing manoeuvres
+yet. Commanders and doctrine are next.
+
+## Morale is what makes it a battle
+
+Without it two lines stand and hack until one is annihilated, which is not how
+mass engagements are decided. Nerve is a **rate**, not a lookup: it moves a
+little each tick according to a man's circumstances rather than being recomputed
+from them, so it has memory and cannot flicker. Everything it reads is a
+per-cell field the grid already accumulated, so it costs a handful of array
+reads per man and nothing walks a neighbour list.
+
+A man is steadied by getting the better of a fight and by having formed men at
+his shoulder; he is shaken by casualties near him, by his own wounds, and above
+all by friends running past. That last term is the carrier: one broken company
+frightens the next, which is the whole phenomenon. Below his archetype's nerve
+he breaks, stops fighting, and runs. A blow that lands on a man who is running
+does far more damage, because he cannot turn and defend himself.
+
+Rallying needs three things at once, and each was added because leaving it out
+produced a specific wrong behaviour: nerve past a margin above the threshold,
+no enemy in the cell he is standing in, and more formed men than fugitives where
+he has stopped. Men rally on a colour party, not in the middle of a stampede.
+
+The measured shape, at twenty thousand men, five seeds:
+
+| | |
+|---|---|
+| line holds for | 420 – 480 ticks |
+| 10% of survivors running | tick ~430 |
+| half of them | tick ~520 |
+| nine in ten | tick ~580 |
+| cut down fighting | ~50% |
+| cut down running | ~50% |
+
+The collapse accelerates as it spreads, which is what a real one does, and the
+pursuit accounts for about half the dead, which is roughly what history says.
+
+### Four ways this was wrong first
+
+Every one of them came out of the rout trace rather than from looking at it.
+
+**Shock read a raw count, not a share.** The casualty field is a decaying sum,
+so at a decay of 0.92 it settles at twelve and a half times the local death
+rate; one man dying per tick drove the shock term to 0.69 a tick and both armies
+were annihilated in nerve within seconds of contact. What matters is the
+*fraction* of the men around you who are falling: a company of six that loses
+two is shattered, a mass of five hundred that loses two has not noticed.
+
+**A fugitive was rewarded for running.** Local odds were `own / (own + enemy)`,
+which reads 1.0 -- a crushing victory -- when there is no enemy nearby at all. A
+man who had simply run out of contact was therefore being steadied for it. The
+term is gated on the enemy actually being present now.
+
+**A broken man was charged for the other fugitives around him.** A routing mob
+is almost entirely routing, so the panic term pinned his nerve at zero and
+rallying was arithmetically impossible.
+
+**And then rallying became automatic.** Fixing the two above let men re-form in
+the open the instant they were clear, break again seconds later, and repeat
+forever: an army of ten thousand logged three hundred thousand breaks and half a
+million rallies. It takes a delay before a man will re-form at all, and somebody
+formed to re-form *on*.
 
 ## The measured ceiling
 
