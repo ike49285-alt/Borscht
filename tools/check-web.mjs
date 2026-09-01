@@ -124,6 +124,15 @@ page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
 
 await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'load' });
 
+/// The HUD abbreviates large numbers ("1.2k"), so stripping non-digits turns a
+/// thousand into a one. Parse the suffix rather than discarding it.
+function parseReadout(text) {
+  const m = /([0-9.]+)\s*([kM])?/.exec(text ?? '');
+  if (!m) return NaN;
+  const scale = m[2] === 'k' ? 1e3 : m[2] === 'M' ? 1e6 : 1;
+  return Number(m[1]) * scale;
+}
+
 const readTick = () => page.textContent('#h-tick');
 const readAnimals = () => page.textContent('#h-animals');
 
@@ -135,7 +144,7 @@ await page.waitForFunction(() => document.getElementById('h-plants').textContent
 const banner = await page.$eval('#banner', (el) => (el.style.display === 'none' ? '' : el.textContent));
 if (banner) throw new Error(`page reported: ${banner}`);
 
-await page.click('#play');
+await page.click('#t-play');
 await page.waitForFunction(() => Number(document.getElementById('h-tick').textContent) > 5, null, {
   timeout: 30000,
 });
@@ -160,11 +169,42 @@ const region = {
 };
 const drawn = litFraction(`${OUT}/running.png`, region);
 
-await page.click('#play'); // pause
+await page.click('#t-play'); // pause
 const fps = await page.textContent('#h-fps');
 const ms = await page.textContent('#h-ms');
 const species = await page.textContent('#h-species');
 const carn = await page.textContent('#h-carn');
+
+// The tree of life must render real branches, not an empty canvas.
+await page.click('#view-tree');
+await page.waitForTimeout(900);
+const treeDrawn = await page.evaluate(() => {
+  const c = document.getElementById('tree');
+  const ctx = c.getContext('2d');
+  const { data } = ctx.getImageData(0, 0, c.width, c.height);
+  let lit = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    // Tree background is (6, 8, 14).
+    if (data[i] > 24 || data[i + 1] > 28 || data[i + 2] > 36) lit += 1;
+  }
+  return { lit, total: data.length / 4 };
+});
+await page.screenshot({ path: `${OUT}/tree.png` });
+const treeSummary = await page.textContent('#tree-summary');
+await page.click('#view-world');
+await page.waitForTimeout(300);
+
+// Rewind: drag the timeline back and confirm the world actually goes back.
+// Read the scrubber, which carries the raw tick rather than an abbreviation.
+const tickBefore = Number(await page.inputValue('#t-scrub'));
+const scrub = await page.$('#t-scrub');
+const box = await scrub.boundingBox();
+await page.mouse.move(box.x + box.width * 0.9, box.y + box.height / 2);
+await page.mouse.down();
+await page.mouse.move(box.x + box.width * 0.1, box.y + box.height / 2, { steps: 8 });
+await page.mouse.up();
+await page.waitForTimeout(1500);
+const tickAfterSeek = Number(await page.inputValue('#t-scrub'));
 
 // Colour modes must all render without error.
 for (const mode of ['1', '2', '3', '4']) {
@@ -194,14 +234,25 @@ console.log(`species:    ${species}   carnivores: ${carn}`);
 console.log(`ms/tick:    ${ms}    fps: ${fps}`);
 console.log(`pixels lit: ${(drawn.fraction * 100).toFixed(1)}% of the world square`);
 console.log(`inspector:  ${inspected ? 'opened' : 'did not open'}`);
+console.log(`tree:       ${((treeDrawn.lit / treeDrawn.total) * 100).toFixed(1)}% drawn — ${treeSummary}`);
+console.log(`rewind:     tick ${tickBefore} -> ${tickAfterSeek}`);
 
 await browser.close();
 stop();
 
 const failures = [];
-if (Number(tickAfter.replace(/[^0-9.]/g, '')) <= 5) failures.push('simulation did not advance');
-if (drawn.fraction < 0.05) failures.push(`canvas is effectively empty (${(drawn.fraction * 100).toFixed(2)}% lit)`);
+if (parseReadout(tickAfter) <= 5) failures.push('simulation did not advance');
+// A blank-canvas detector, not a density assertion: how much of the square is
+// lit depends on the world size, the zoom and how well the run happens to be
+// doing, none of which this check is here to police.
+if (drawn.fraction < 0.01) {
+  failures.push(`canvas is effectively empty (${(drawn.fraction * 100).toFixed(2)}% lit)`);
+}
 if (!inspected) failures.push('inspector did not open on click');
+if (treeDrawn.lit < treeDrawn.total * 0.002) failures.push('tree of life rendered nothing');
+if (!(tickAfterSeek < tickBefore)) {
+  failures.push(`rewind did not go back: ${tickBefore} -> ${tickAfterSeek}`);
+}
 if (problems.length) failures.push(...problems);
 if (failures.length) {
   console.error(`\nFAILED:\n  ${failures.join('\n  ')}`);

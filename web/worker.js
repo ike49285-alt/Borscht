@@ -26,6 +26,57 @@ const spare = [];
 
 let tickMsAverage = 0;
 
+// ---- rewind ---------------------------------------------------------------
+//
+// Periodic snapshots kept in a ring, so the timeline can be scrubbed backwards.
+// Seeking loads the newest checkpoint at or before the target and re-ticks
+// forward from there; because a snapshot carries the generator state, replaying
+// reproduces exactly the run that was already seen rather than a new one.
+//
+// The ring is bounded by bytes rather than by count: a snapshot scales with the
+// population, so a fixed count would quietly consume a gigabyte in a big world.
+const CHECKPOINT_BUDGET = 96 * 1024 * 1024;
+let checkpointEvery = 250;
+let checkpoints = [];
+let lineageEvery = 12;
+let framesSincelineages = 0;
+
+function checkpoint(force = false) {
+  if (!sim) return;
+  const tick = sim.tick(0);
+  if (!force && checkpoints.length && tick - checkpoints[checkpoints.length - 1].tick < checkpointEvery) {
+    return;
+  }
+  if (checkpoints.length && checkpoints[checkpoints.length - 1].tick === tick) return;
+  checkpoints.push({ tick, bytes: sim.save() });
+  let total = checkpoints.reduce((n, c) => n + c.bytes.length, 0);
+  while (checkpoints.length > 2 && total > CHECKPOINT_BUDGET) {
+    total -= checkpoints.shift().bytes.length;
+  }
+}
+
+function seek(target) {
+  if (!sim || !checkpoints.length) return;
+  let at = checkpoints[0];
+  for (const c of checkpoints) {
+    if (c.tick <= target) at = c;
+    else break;
+  }
+  sim.load(at.bytes);
+  const forward = Math.max(0, Math.min(target - at.tick, 20000));
+  if (forward > 0) sim.tick(forward);
+  // Everything after the seek point is a future that has not happened yet.
+  checkpoints = checkpoints.filter((c) => c.tick <= sim.tick(0));
+  if (!checkpoints.length) checkpoint(true);
+}
+
+function history() {
+  return {
+    oldest: checkpoints.length ? checkpoints[0].tick : 0,
+    checkpoints: checkpoints.map((c) => c.tick),
+  };
+}
+
 function frame() {
   const { count, stride, plants, bytes } = sim.render(colorMode);
   const needed = count * stride;
@@ -40,6 +91,20 @@ function publish(extra = {}) {
   const stats = {};
   const raw = sim.stats();
   for (let i = 0; i < STAT_NAMES.length; i += 1) stats[STAT_NAMES[i]] = raw[i];
+
+  // The tree changes far more slowly than the world does, and sending hundreds
+  // of branches every frame is wasted bandwidth.
+  let tree = null;
+  framesSincelineages += 1;
+  if (framesSincelineages >= lineageEvery || extra.treeNow) {
+    framesSincelineages = 0;
+    tree = {
+      lineages: sim.lineages(2, true),
+      total: sim.lineageTotal(true),
+      dropped: sim.lineageDropped(true),
+    };
+  }
+
   self.postMessage(
     {
       type: 'frame',
@@ -53,6 +118,8 @@ function publish(extra = {}) {
       worldSize: sim.worldSize,
       tickMs: tickMsAverage,
       running,
+      tree,
+      history: history(),
       ...extra,
     },
     [buffer],
@@ -65,6 +132,7 @@ function step() {
   if (running) {
     const start = performance.now();
     sim.tick(ticksPerFrame);
+    checkpoint();
     const elapsed = (performance.now() - start) / ticksPerFrame;
     // Smoothed so the readout is legible rather than jittering every frame.
     tickMsAverage = tickMsAverage === 0 ? elapsed : tickMsAverage * 0.9 + elapsed * 0.1;
@@ -86,6 +154,8 @@ function build(seed, overrides) {
   if (overrides) sim.configure(PARAMS, overrides);
   sim.create(seed);
   tickMsAverage = 0;
+  checkpoints = [];
+  checkpoint(true);
 }
 
 self.onmessage = async (event) => {
@@ -119,7 +189,16 @@ self.onmessage = async (event) => {
       case 'step':
         running = false;
         sim.tick(msg.count ?? 1);
-        publish();
+        checkpoint();
+        publish({ treeNow: true });
+        break;
+      case 'seek':
+        running = false;
+        seek(msg.tick);
+        publish({ treeNow: true });
+        break;
+      case 'checkpointEvery':
+        checkpointEvery = Math.max(25, msg.value | 0);
         break;
       case 'speed':
         ticksPerFrame = Math.max(1, msg.value | 0);
@@ -144,7 +223,9 @@ self.onmessage = async (event) => {
       case 'load':
         running = false;
         sim.load(new Uint8Array(msg.bytes));
-        publish();
+        checkpoints = [];
+        checkpoint(true);
+        publish({ treeNow: true });
         break;
       default:
         break;

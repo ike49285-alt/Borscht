@@ -190,6 +190,38 @@ export class Borscht {
     return out;
   }
 
+  /**
+   * The tree of life: every lineage that ever reached `minPeak` individuals,
+   * including extinct ones. `parent` and `extinctTick` are null where the
+   * lineage is a root or still alive.
+   */
+  lineages(minPeak = 2, animals = true) {
+    const rows = this.#exports.prepare_lineages(minPeak >>> 0, animals ? 1 : 0);
+    if (rows === 0) return [];
+    const data = this.#floats(this.#exports.lineages_ptr(), rows * 6);
+    const out = [];
+    for (let i = 0; i < rows; i += 1) {
+      const o = i * 6;
+      out.push({
+        id: data[o],
+        parent: data[o + 1] < 0 ? null : data[o + 1],
+        birthTick: data[o + 2],
+        extinctTick: data[o + 3] < 0 ? null : data[o + 3],
+        peak: data[o + 4],
+        hue: data[o + 5],
+      });
+    }
+    return out;
+  }
+
+  lineageTotal(animals = true) {
+    return this.#exports.lineage_total(animals ? 1 : 0);
+  }
+
+  lineageDropped(animals = true) {
+    return this.#exports.lineage_dropped(animals ? 1 : 0);
+  }
+
   /** Nearest organism to a world position, or null. */
   inspect(x, y, radius = 12) {
     const kind = this.#exports.inspect(x, y, radius);

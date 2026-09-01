@@ -274,6 +274,199 @@ function showInspector(organism) {
     .join('');
 }
 
+// ---------------------------------------------------------- tree of life --
+//
+// Each lineage is a horizontal segment from the tick it split off to the tick it
+// died out, with a connector back to its parent. Rows are ordered by walking the
+// tree depth-first from the roots, so a lineage sits directly under the one it
+// came from and a radiation reads as a block rather than as scattered lines.
+//
+// Extinct branches are most of the tree and are what makes it a history rather
+// than a snapshot, so they stay in; the min-peak control is what keeps the
+// picture legible.
+
+const treeCanvas = $('tree');
+const treeTip = $('tree-tip');
+let treeData = { lineages: [], total: 0, dropped: 0 };
+let treeLayout = [];
+let treeMinPeak = 3;
+
+function layoutTree(lineages) {
+  const kept = lineages.filter((l) => l.peak >= treeMinPeak);
+  if (!kept.length) return [];
+  const byId = new Map(kept.map((l) => [l.id, l]));
+  const all = new Map(lineages.map((l) => [l.id, l]));
+
+  // A kept lineage whose parent was filtered out attaches to its nearest kept
+  // ancestor, so pruning thins the tree instead of shattering it.
+  const anchor = (l) => {
+    let p = l.parent;
+    const seen = new Set();
+    while (p !== null && p !== undefined && !seen.has(p)) {
+      if (byId.has(p)) return p;
+      seen.add(p);
+      p = all.get(p)?.parent ?? null;
+    }
+    return null;
+  };
+
+  const children = new Map();
+  const roots = [];
+  for (const l of kept) {
+    const a = anchor(l);
+    if (a === null) roots.push(l);
+    else {
+      if (!children.has(a)) children.set(a, []);
+      children.get(a).push(l);
+    }
+  }
+  const byBirth = (a, b) => a.birthTick - b.birthTick || a.id - b.id;
+  roots.sort(byBirth);
+  for (const list of children.values()) list.sort(byBirth);
+
+  const rows = [];
+  const visit = (l, depth) => {
+    rows.push({ ...l, depth, row: rows.length, anchor: anchor(l) });
+    for (const c of children.get(l.id) ?? []) visit(c, depth + 1);
+  };
+  for (const r of roots) visit(r, 0);
+  return rows;
+}
+
+function drawTree(now) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.floor(treeCanvas.clientWidth * dpr));
+  const h = Math.max(1, Math.floor(treeCanvas.clientHeight * dpr));
+  if (treeCanvas.width !== w || treeCanvas.height !== h) {
+    treeCanvas.width = w;
+    treeCanvas.height = h;
+  }
+  const ctx = treeCanvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = w / dpr;
+  const H = h / dpr;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#06080e';
+  ctx.fillRect(0, 0, W, H);
+
+  const rows = treeLayout;
+  if (!rows.length) {
+    ctx.fillStyle = '#8b97ad';
+    ctx.font = '13px ui-monospace, monospace';
+    ctx.fillText('No lineages above the threshold yet.', 20, 30);
+    return;
+  }
+
+  // Bottom padding clears the time bar, which floats over this canvas.
+  const pad = { l: 18, r: 18, t: 34, b: 76 };
+  const tMax = Math.max(now, ...rows.map((r) => r.extinctTick ?? now), 1);
+  const x = (t) => pad.l + (t / tMax) * (W - pad.l - pad.r);
+  const avail = H - pad.t - pad.b;
+  // Rows grow to fill the space when there are few lineages and shrink to a
+  // hairline when there are thousands; the block is centred so a small tree
+  // does not sit in a corner of an empty canvas.
+  const rowH = Math.max(1.2, Math.min(26, avail / rows.length));
+  const top = pad.t + Math.max(0, (avail - rows.length * rowH) / 2);
+  const y = (i) => top + i * rowH + rowH / 2;
+  const index = new Map(rows.map((r, i) => [r.id, i]));
+
+  // Recessive time grid, labelled at the top so it never crosses the branches.
+  ctx.strokeStyle = '#1a2130';
+  ctx.fillStyle = '#5d6a80';
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.lineWidth = 1;
+  const step = Math.max(1, Math.pow(10, Math.floor(Math.log10(tMax / 5))) * (tMax / 5 > 5 * Math.pow(10, Math.floor(Math.log10(tMax / 5))) ? 5 : 1));
+  for (let t = 0; t <= tMax; t += step) {
+    const px = Math.round(x(t)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(px, pad.t - 6);
+    ctx.lineTo(px, H - pad.b + 10);
+    ctx.stroke();
+    ctx.fillText(t >= 1000 ? `${(t / 1000).toFixed(t >= 10000 ? 0 : 1)}k` : String(t), px + 3, pad.t - 10);
+  }
+
+  // Connectors first, so branches sit on top of them.
+  ctx.strokeStyle = '#3d4a63';
+  ctx.lineWidth = 1;
+  for (const r of rows) {
+    if (r.anchor === null || !index.has(r.anchor)) continue;
+    const px = Math.round(x(r.birthTick)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(px, y(index.get(r.anchor)));
+    ctx.lineTo(px, y(r.row));
+    ctx.stroke();
+  }
+
+  for (const r of rows) {
+    const end = r.extinctTick ?? now;
+    const x0 = x(r.birthTick);
+    const x1 = Math.max(x0 + 1.5, x(end));
+    ctx.strokeStyle = `hsl(${(r.hue * 360).toFixed(0)} 72% 60%)`;
+    ctx.lineWidth = Math.max(1.4, Math.min(3.5, rowH * 0.5));
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x0, y(r.row));
+    ctx.lineTo(x1, y(r.row));
+    ctx.stroke();
+    // A living lineage gets an emphasised end; an extinct one just stops.
+    if (r.extinctTick === null) {
+      ctx.fillStyle = '#e6ebf5';
+      ctx.beginPath();
+      ctx.arc(x1, y(r.row), Math.max(1.5, ctx.lineWidth * 0.5), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  ctx.fillStyle = '#8b97ad';
+  ctx.font = '11px ui-monospace, monospace';
+  const living = rows.filter((r) => r.extinctTick === null).length;
+  ctx.fillText(
+    `${rows.length} lineages shown · ${living} living · ${treeData.total} ever recorded` +
+      (treeData.dropped > 0 ? ` · ${treeData.dropped} not recorded` : ''),
+    pad.l,
+    H - pad.b + 8,
+  );
+  treeLayout = rows;
+}
+
+treeCanvas.addEventListener('pointermove', (e) => {
+  if (!treeLayout.length) { treeTip.style.display = 'none'; return; }
+  const rect = treeCanvas.getBoundingClientRect();
+  const pad = { t: 34, b: 76 };
+  const avail = rect.height - pad.t - pad.b;
+  const rowH = Math.max(1.2, Math.min(26, avail / treeLayout.length));
+  const top = pad.t + Math.max(0, (avail - treeLayout.length * rowH) / 2);
+  const i = Math.floor((e.clientY - rect.top - top) / rowH);
+  const r = treeLayout[i];
+  if (!r || e.clientY - rect.top < top) { treeTip.style.display = 'none'; return; }
+  const end = r.extinctTick === null ? 'living' : `died ${Math.round(r.extinctTick)}`;
+  treeTip.textContent = `lineage ${Math.round(r.id)} · born ${Math.round(r.birthTick)} · ${end} · peak ${Math.round(r.peak)}`;
+  treeTip.style.display = 'block';
+  treeTip.style.left = `${Math.min(e.clientX - rect.left + 14, rect.width - treeTip.offsetWidth - 8)}px`;
+  treeTip.style.top = `${e.clientY - rect.top + 14}px`;
+});
+treeCanvas.addEventListener('pointerleave', () => { treeTip.style.display = 'none'; });
+
+let showTree = false;
+function setView(tree) {
+  showTree = tree;
+  treeCanvas.hidden = !tree;
+  canvas.style.visibility = tree ? 'hidden' : 'visible';
+  $('hud').style.display = tree ? 'none' : '';
+  $('tree-card').hidden = !tree;
+  $('view-tree').classList.toggle('on', tree);
+  $('view-world').classList.toggle('on', !tree);
+  $('view-tree').setAttribute('aria-pressed', String(tree));
+  $('view-world').setAttribute('aria-pressed', String(!tree));
+}
+$('view-world').addEventListener('click', () => setView(false));
+$('view-tree').addEventListener('click', () => setView(true));
+$('tree-min').addEventListener('input', (e) => {
+  treeMinPeak = Number(e.target.value);
+  $('tree-min-val').textContent = String(treeMinPeak);
+  treeLayout = layoutTree(treeData.lineages);
+});
+
 // ------------------------------------------------------------------ worker --
 
 let running = false;
@@ -301,6 +494,25 @@ worker.onmessage = (event) => {
       });
       updatePanel(msg.stats, msg.species);
       $('h-ms').textContent = msg.tickMs ? msg.tickMs.toFixed(1) : '–';
+
+      if (msg.tree) {
+        treeData = msg.tree;
+        treeLayout = layoutTree(treeData.lineages);
+        const living = treeData.lineages.filter((l) => l.extinctTick === null).length;
+        $('tree-summary').textContent =
+          `${treeData.total} lineages recorded · ${living} living` +
+          (treeData.dropped > 0 ? ` · ${treeData.dropped} beyond the history limit` : '');
+      }
+
+      latestTick = msg.stats.tick;
+      if (msg.history) oldestTick = msg.history.oldest;
+      if (!scrubbing) {
+        const scrub = $('t-scrub');
+        scrub.min = String(Math.floor(oldestTick));
+        scrub.max = String(Math.ceil(latestTick));
+        scrub.value = String(Math.round(latestTick));
+        $('t-tick').textContent = fmt(latestTick);
+      }
       break;
     }
     case 'inspected':
@@ -348,33 +560,57 @@ function currentSetup() {
   };
 }
 
-$('play').addEventListener('click', () => {
-  running = !running;
-  $('play').textContent = running ? 'Pause' : 'Play';
+let scrubbing = false;
+let latestTick = 0;
+let oldestTick = 0;
+
+function setRunning(next) {
+  running = next;
+  $('t-play').textContent = running ? '❚❚' : '▶';
+  $('t-play').setAttribute('aria-label', running ? 'Pause' : 'Play');
   worker.postMessage({ type: running ? 'play' : 'pause' });
+}
+
+$('t-play').addEventListener('click', () => setRunning(!running));
+
+$('t-step').addEventListener('click', () => {
+  if (running) setRunning(false);
+  worker.postMessage({ type: 'step', count: 1 });
 });
 
-$('step').addEventListener('click', () => {
-  running = false;
-  $('play').textContent = 'Play';
-  worker.postMessage({ type: 'step', count: 1 });
+// Scrubbing pauses: the worker has to load a checkpoint and re-tick forward, and
+// racing that against a running simulation would fight over the same world.
+$('t-scrub').addEventListener('pointerdown', () => {
+  scrubbing = true;
+  if (running) setRunning(false);
+});
+const endScrub = () => {
+  if (!scrubbing) return;
+  scrubbing = false;
+  worker.postMessage({ type: 'seek', tick: Number($('t-scrub').value) });
+};
+$('t-scrub').addEventListener('pointerup', endScrub);
+$('t-scrub').addEventListener('pointercancel', endScrub);
+$('t-scrub').addEventListener('change', endScrub);
+$('t-scrub').addEventListener('input', (e) => {
+  $('t-tick').textContent = fmt(Number(e.target.value));
+});
+
+$('t-speed').addEventListener('input', (e) => {
+  const value = Number(e.target.value);
+  $('t-speed-val').textContent = String(value);
+  worker.postMessage({ type: 'speed', value });
 });
 
 $('reset').addEventListener('click', () => {
   running = false;
-  $('play').textContent = 'Play';
+  setRunning(false);
   history.clear();
   showInspector(null);
   worker.postMessage({ type: 'reset', ...currentSetup() });
 });
 
 $('scale').addEventListener('change', () => $('reset').click());
-
-$('speed').addEventListener('input', (e) => {
-  const value = Number(e.target.value);
-  $('speed-val').textContent = `${value}×`;
-  worker.postMessage({ type: 'speed', value });
-});
 
 $('color').addEventListener('change', (e) => {
   worker.postMessage({ type: 'color', value: Number(e.target.value) });
@@ -385,8 +621,7 @@ $('load').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
-  running = false;
-  $('play').textContent = 'Play';
+  setRunning(false);
   history.clear();
   const bytes = await file.arrayBuffer();
   worker.postMessage({ type: 'load', bytes }, [bytes]);
@@ -439,7 +674,8 @@ function buildParamUI() {
 // ------------------------------------------------------------------- frame --
 
 function loop() {
-  renderer.draw(view);
+  if (showTree) drawTree(latestTick);
+  else renderer.draw(view);
   if (latest) {
     drawChart($('chart-pop'), ['plants', 'animals'], ['#4ade80', '#60a5fa']);
     drawChart($('chart-matter'), ['biomass', 'soil', 'bodies'], ['#4ade80', '#a78bfa', '#fbbf24'], {

@@ -15,11 +15,11 @@ use crate::brain::BRAIN_LEN;
 use crate::config::{Config, PARAMS};
 use crate::genome::{ANIMAL_GENOME_LEN, PLANT_GENOME_LEN};
 use crate::pools::ACTION_COUNT;
-use crate::species::{Record, Registry, MAX_SPECIES};
+use crate::species::{Lineage, Record, Registry, MAX_LINEAGES, MAX_SPECIES};
 use crate::world::World;
 
 const MAGIC: &[u8; 8] = b"BORSCHT\x01";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -175,6 +175,21 @@ fn write_registry<const N: usize>(w: &mut Writer, reg: &Registry<N>) {
         w.u32(r.peak_population);
         w.f32(r.hue);
         w.u8(r.alive as u8);
+        w.u32(r.lineage);
+        w.u32(r.history_at as u32);
+    }
+    // The tree of life is history, not a cache: it cannot be recomputed from
+    // the live population, so a snapshot that dropped it would lose every
+    // branch that had already gone extinct.
+    w.u64(reg.history_dropped);
+    w.u32(reg.history.len() as u32);
+    for l in &reg.history {
+        w.u32(l.id);
+        w.u32(l.parent);
+        w.u32(l.birth_tick);
+        w.u32(l.extinct_tick);
+        w.u32(l.peak_population);
+        w.f32(l.hue);
     }
 }
 
@@ -195,12 +210,32 @@ fn read_registry<const N: usize>(r: &mut Reader) -> Result<Registry<N>, Snapshot
             peak_population: r.u32()?,
             hue: r.f32()?,
             alive: r.u8()? != 0,
+            lineage: r.u32()?,
+            history_at: r.u32()? as usize,
         };
         if !rec.alive {
             free.push(id as u16);
         }
         reg.records[id] = rec;
     }
+    reg.history_dropped = r.u64()?;
+    let count = r.u32()? as usize;
+    if count > MAX_LINEAGES {
+        return Err(SnapshotError::TooLarge);
+    }
+    reg.history.clear();
+    reg.history.reserve(count);
+    for _ in 0..count {
+        reg.history.push(Lineage {
+            id: r.u32()?,
+            parent: r.u32()?,
+            birth_tick: r.u32()?,
+            extinct_tick: r.u32()?,
+            peak_population: r.u32()?,
+            hue: r.f32()?,
+        });
+    }
+
     // The free list is derived rather than stored: it is pure redundancy, and
     // a stored copy that disagreed with the records would hand out a slot that
     // living organisms still point at.
@@ -430,6 +465,30 @@ mod tests {
         restored.tick_many(300);
         assert_eq!(fingerprint(&w), fingerprint(&restored));
         assert_eq!(w.stats, restored.stats);
+    }
+
+    #[test]
+    fn the_tree_of_life_survives_the_trip() {
+        let mut w = World::new(small(), 4);
+        w.tick_many(600);
+        let before = w.animal_species.history.clone();
+        assert!(before.len() > 2, "expected some lineages to have appeared");
+        let restored = load(&save(&w)).unwrap();
+        let after = &restored.animal_species.history;
+        assert_eq!(before.len(), after.len());
+        for (a, b) in before.iter().zip(after.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.parent, b.parent);
+            assert_eq!(a.birth_tick, b.birth_tick);
+            assert_eq!(a.extinct_tick, b.extinct_tick);
+            assert_eq!(a.peak_population, b.peak_population);
+        }
+        // Extinct branches are exactly what the live registry throws away, so
+        // they are the ones worth checking survived.
+        assert!(
+            before.iter().any(|l| l.extinct_tick != u32::MAX),
+            "expected at least one extinct lineage to test against"
+        );
     }
 
     #[test]

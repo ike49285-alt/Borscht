@@ -24,7 +24,8 @@ USAGE:
 
 OPTIONS:
     --population N   total organisms; the world is scaled to hold them at
-                     constant density (default 200000)
+                     constant density. Omit for the default world, which holds
+                     about a hundred thousand.
     --ticks N        ticks to simulate (default 2000)
     --seed N         world seed (default: drawn from system entropy, so runs
                      differ; pass one to repeat a particular run)
@@ -146,8 +147,13 @@ fn parse_args() -> Args {
     args
 }
 
-fn build_config(population: u32, overrides: &[(String, f32)]) -> Config {
-    let mut cfg = Config::for_population(population);
+/// `None` means the default world, which is already about a hundred thousand
+/// organisms; a value rescales it at constant density.
+fn build_config(population: Option<u32>, overrides: &[(String, f32)]) -> Config {
+    let mut cfg = match population {
+        Some(target) => Config::for_population(target),
+        None => Config::default(),
+    };
     for (name, value) in overrides {
         if let Some(id) = Config::param_id(name) {
             cfg.set_param(id, *value);
@@ -239,7 +245,7 @@ fn list_params() {
 
 fn bench(args: &Args) {
     let populations = if args.populations.is_empty() {
-        vec![100_000, 500_000, 1_000_000]
+        vec![25_000, 100_000, 400_000]
     } else {
         args.populations.clone()
     };
@@ -250,7 +256,7 @@ fn bench(args: &Args) {
         "target", "organisms", "ms/tick", "ticks/s", "build ms", "MB"
     );
     for target in populations {
-        let cfg = build_config(target, &args.overrides);
+        let cfg = build_config(Some(target), &args.overrides);
         let build_start = Instant::now();
         let mut world = World::new(cfg, args.seed);
         let build_ms = build_start.elapsed().as_secs_f64() * 1e3;
@@ -337,8 +343,7 @@ fn estimate_memory_mb(world: &World) -> f64 {
 }
 
 fn run(args: &Args) {
-    let population = *args.populations.first().unwrap_or(&200_000);
-    let cfg = build_config(population, &args.overrides);
+    let cfg = build_config(args.populations.first().copied(), &args.overrides);
     let mut world = World::new(cfg, args.seed);
     if !args.quiet {
         println!("seed {}", args.seed);

@@ -40,6 +40,51 @@
   #hud .row { display: flex; justify-content: space-between; gap: 14px; }
   #hud .muted { color: var(--muted); }
 
+  #views {
+    position: absolute; top: 12px; right: 12px; display: flex; gap: 0;
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+    background: rgba(8,11,18,.82); backdrop-filter: blur(8px);
+  }
+  .seg {
+    background: transparent; border: none; border-radius: 0; color: var(--muted);
+    padding: 6px 11px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .seg + .seg { border-left: 1px solid var(--line); }
+  .seg.on { background: var(--accent); color: #05130d; font-weight: 600; }
+  .seg:not(.on):hover { color: var(--ink); background: #ffffff10; }
+
+  #timebar {
+    position: absolute; left: 12px; right: 12px; bottom: 12px;
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(8,11,18,.86); backdrop-filter: blur(8px);
+    border: 1px solid var(--line); border-radius: 10px; padding: 7px 11px;
+  }
+  .tb {
+    background: #1d2432; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 9px; font: inherit; font-size: 13px;
+    cursor: pointer; line-height: 1.1; flex: none;
+  }
+  .tb.primary { background: var(--accent); color: #05130d; border-color: var(--accent); }
+  .tb:hover { filter: brightness(1.1); }
+  #t-scrub { flex: 1; min-width: 60px; accent-color: var(--accent); }
+  .tb-read {
+    font-family: var(--mono); font-size: 12px; color: var(--accent);
+    min-width: 62px; text-align: right; font-variant-numeric: tabular-nums; flex: none;
+  }
+  .tb-speed {
+    display: flex; align-items: center; gap: 5px; color: var(--muted);
+    font-family: var(--mono); font-size: 12px; flex: none;
+  }
+  .tb-speed input { width: 74px; accent-color: var(--accent); }
+  .tb-speed span { min-width: 18px; text-align: right; color: var(--ink); }
+  #tree { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+  #tree-tip {
+    position: absolute; pointer-events: none; display: none; z-index: 5;
+    background: rgba(8,11,18,.94); border: 1px solid var(--line); border-radius: 7px;
+    padding: 6px 9px; font-family: var(--mono); font-size: 11px; color: var(--ink);
+    white-space: nowrap;
+  }
+
   #banner {
     position: absolute; inset: 12px 12px auto 12px; padding: 10px 12px;
     background: #40161a; border: 1px solid var(--warn); border-radius: 10px;
@@ -96,6 +141,18 @@
 <body>
   <div id="stage">
     <canvas id="view"></canvas>
+    <canvas id="tree" hidden></canvas>
+    <div id="views" role="group" aria-label="View">
+      <button id="view-world" class="seg on" aria-pressed="true">World</button>
+      <button id="view-tree" class="seg" aria-pressed="false">Tree of life</button>
+    </div>
+    <div id="timebar">
+      <button id="t-play" class="tb primary" aria-label="Play">▶</button>
+      <button id="t-step" class="tb" aria-label="Step one tick">⏭</button>
+      <input id="t-scrub" type="range" min="0" max="0" value="0" step="1" aria-label="Timeline">
+      <span id="t-tick" class="tb-read">0</span>
+      <label class="tb-speed">×<input id="t-speed" type="range" min="1" max="64" value="1" aria-label="Ticks per frame"><span id="t-speed-val">1</span></label>
+    </div>
     <div id="hud">
       <div class="row"><span class="muted">tick</span><b id="h-tick">0</b></div>
       <div class="row"><span class="muted">plants</span><b id="h-plants">0</b></div>
@@ -105,6 +162,7 @@
       <div class="row"><span class="muted">ms/tick</span><b id="h-ms">–</b></div>
       <div class="row"><span class="muted">fps</span><b id="h-fps">–</b></div>
     </div>
+    <div id="tree-tip"></div>
     <div id="banner"></div>
   </div>
 
@@ -113,12 +171,9 @@
 
     <div class="card">
       <div class="controls">
-        <button id="play" class="primary">Play</button>
-        <button id="step">Step</button>
-        <button id="reset">Reset</button>
+        <button id="reset" class="primary">Reset</button>
       </div>
       <div style="margin-top:9px; display:flex; flex-direction:column; gap:7px">
-        <label>speed <input id="speed" type="range" min="1" max="64" value="1"><span class="val" id="speed-val">1×</span></label>
         <label>colour
           <select id="color" style="flex:1">
             <option value="0">species</option>
@@ -130,15 +185,22 @@
         </label>
         <label>scale
           <select id="scale" style="flex:1">
-            <option value="50000">50k organisms</option>
-            <option value="200000" selected>200k organisms</option>
-            <option value="500000">500k organisms</option>
-            <option value="1000000">1M organisms</option>
+            <option value="25000">25k organisms</option>
+            <option value="100000" selected>100k organisms</option>
+            <option value="250000">250k organisms</option>
+            <option value="600000">600k organisms</option>
           </select>
         </label>
         <label>seed <input id="seed" type="number" value="1" min="0" step="1"></label>
       </div>
-      <div class="hint" style="margin-top:8px">Drag to pan, scroll to zoom, click an organism to inspect it.</div>
+      <div class="hint" style="margin-top:8px">Drag to pan, scroll to zoom, click an organism to inspect it. Drag the timeline to rewind.</div>
+    </div>
+
+    <div class="card" id="tree-card" hidden>
+      <h2>Tree of life</h2>
+      <div class="hint" id="tree-summary">no lineages yet</div>
+      <label style="margin-top:8px">min peak <input id="tree-min" type="range" min="1" max="60" value="3"><span class="val" id="tree-min-val">3</span></label>
+      <div class="hint" style="margin-top:6px">Each line is one lineage, from the tick it split off to the tick it died out. Colour is inherited with drift, so relatives sit near each other in hue.</div>
     </div>
 
     <div class="card">

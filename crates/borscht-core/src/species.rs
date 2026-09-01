@@ -22,6 +22,44 @@ pub const MAX_SPECIES: usize = 2048;
 /// species yet.
 pub const NO_SPECIES: u16 = u16::MAX;
 
+/// How many lineages are remembered for the tree of life.
+///
+/// Slots in the live registry are recycled the moment a species dies, which is
+/// what keeps it bounded -- but it also means the live registry holds no history
+/// at all. A tree of life needs every lineage that ever existed and who it split
+/// from, so that is recorded separately and never reused.
+pub const MAX_LINEAGES: usize = 16_384;
+
+/// Sentinel for a lineage with no recorded parent.
+pub const NO_LINEAGE: u32 = u32::MAX;
+
+/// One branch of the tree of life: a lineage, when it appeared, who it split
+/// from, and how it did.
+#[derive(Clone, Copy, Debug)]
+pub struct Lineage {
+    /// Globally unique and never reused, unlike a registry slot.
+    pub id: u32,
+    pub parent: u32,
+    pub birth_tick: u32,
+    /// `u32::MAX` while the lineage is still alive.
+    pub extinct_tick: u32,
+    pub peak_population: u32,
+    pub hue: f32,
+}
+
+impl Default for Lineage {
+    fn default() -> Self {
+        Lineage {
+            id: NO_LINEAGE,
+            parent: NO_LINEAGE,
+            birth_tick: 0,
+            extinct_tick: u32::MAX,
+            peak_population: 0,
+            hue: 0.0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Record<const N: usize> {
     /// Genome of the individual that founded this species. New members are
@@ -38,6 +76,10 @@ pub struct Record<const N: usize> {
     /// related on screen.
     pub hue: f32,
     pub alive: bool,
+    /// Globally unique lineage id, stable across slot recycling.
+    pub lineage: u32,
+    /// Index into the lineage history, or `usize::MAX` if history was full.
+    pub history_at: usize,
 }
 
 impl<const N: usize> Default for Record<N> {
@@ -51,12 +93,20 @@ impl<const N: usize> Default for Record<N> {
             peak_population: 0,
             hue: 0.0,
             alive: false,
+            lineage: NO_LINEAGE,
+            history_at: usize::MAX,
         }
     }
 }
 
 pub struct Registry<const N: usize> {
     pub records: Vec<Record<N>>,
+    /// Every lineage that ever existed, in order of appearance. Append-only:
+    /// entries are never reused, because a tree whose branches get overwritten
+    /// is not a record of anything.
+    pub history: Vec<Lineage>,
+    /// Lineages that could not be recorded because the history was full.
+    pub history_dropped: u64,
     free: Vec<u16>,
     /// Times a split was wanted but no slot was available. Surfaced in stats so
     /// a saturated registry is visible rather than silently flattening the
@@ -69,6 +119,8 @@ impl<const N: usize> Registry<N> {
     pub fn new() -> Self {
         Registry {
             records: vec![Record::default(); MAX_SPECIES],
+            history: Vec::new(),
+            history_dropped: 0,
             // Reversed so ids are handed out in ascending order, which keeps a
             // fresh world's species ids readable.
             free: (0..MAX_SPECIES as u16).rev().collect(),
@@ -84,18 +136,46 @@ impl<const N: usize> Registry<N> {
 
     fn create(&mut self, founder: [u8; N], parent: u16, hue: f32, tick: u64) -> Option<u16> {
         let id = self.free.pop()?;
+        let lineage = self.total_ever as u32;
         self.total_ever += 1;
+        let birth_tick = tick.min(u32::MAX as u64) as u32;
+        let hue = hue - crate::fastmath::floor(hue);
+
+        // Record the branch before the slot is written, so the parent's lineage
+        // id is still readable.
+        let parent_lineage = self
+            .records
+            .get(parent as usize)
+            .filter(|_| parent != NO_SPECIES)
+            .map_or(NO_LINEAGE, |r| r.lineage);
+        let history_at = if self.history.len() < MAX_LINEAGES {
+            self.history.push(Lineage {
+                id: lineage,
+                parent: parent_lineage,
+                birth_tick,
+                extinct_tick: u32::MAX,
+                peak_population: 1,
+                hue,
+            });
+            self.history.len() - 1
+        } else {
+            self.history_dropped += 1;
+            usize::MAX
+        };
+
         self.records[id as usize] = Record {
+            lineage,
+            history_at,
             founder,
             parent,
-            birth_tick: tick.min(u32::MAX as u64) as u32,
+            birth_tick,
             extinct_tick: u32::MAX,
             // Counted as one member immediately. A slot showing zero population
             // is treated as recyclable, and a species created mid-tick must not
             // look recyclable before the census runs.
             population: 1,
             peak_population: 1,
-            hue: hue - crate::fastmath::floor(hue),
+            hue,
             alive: true,
         };
         Some(id)
@@ -167,10 +247,19 @@ impl<const N: usize> Registry<N> {
             if r.population > r.peak_population {
                 r.peak_population = r.population;
             }
-            if r.population == 0 {
+            let (history_at, peak) = (r.history_at, r.peak_population);
+            let retiring = r.population == 0;
+            if retiring {
                 r.alive = false;
                 r.extinct_tick = tick.min(u32::MAX as u64) as u32;
                 self.free.push(id as u16);
+            }
+            // Mirror into the permanent record, which outlives the slot.
+            if let Some(entry) = self.history.get_mut(history_at) {
+                entry.peak_population = peak;
+                if retiring {
+                    entry.extinct_tick = tick.min(u32::MAX as u64) as u32;
+                }
             }
         }
     }
@@ -376,6 +465,86 @@ mod tests {
             "saturation should be visible in stats"
         );
         assert_eq!(r.live_count(), MAX_SPECIES);
+    }
+
+    /// The whole point of a separate history: a lineage must outlive the
+    /// registry slot it occupied, because the slot is handed to somebody else
+    /// the moment the species dies.
+    #[test]
+    fn lineages_outlive_their_recycled_slots() {
+        let mut r = reg();
+        let mut rng = Rng::new(1, 1);
+        let root = r.found([0; N], 0.0, 0);
+        let child = r.classify(root, &[255; N], 0.1, dist, 5, &mut rng);
+        assert_ne!(child, root);
+        let child_lineage = r.records[child as usize].lineage;
+
+        // Kill the child off; its slot returns to the free list.
+        r.begin_census();
+        r.count(root);
+        r.end_census(20);
+        assert!(!r.records[child as usize].alive);
+
+        // And is handed to something else entirely.
+        let reused = r.found([7; N], 0.3, 30);
+        assert_eq!(reused, child, "expected the slot to be reused");
+        assert_ne!(r.records[reused as usize].lineage, child_lineage);
+
+        // The dead branch is still in the tree, with its parent and its end.
+        let dead = r
+            .history
+            .iter()
+            .find(|l| l.id == child_lineage)
+            .expect("extinct lineage vanished from the history");
+        assert_eq!(dead.parent, r.records[root as usize].lineage);
+        assert_eq!(dead.birth_tick, 5);
+        assert_eq!(dead.extinct_tick, 20);
+    }
+
+    #[test]
+    fn the_history_records_parentage_and_survival() {
+        let mut r = reg();
+        let mut rng = Rng::new(2, 1);
+        let root = r.found([0; N], 0.5, 0);
+        assert_eq!(r.history.len(), 1);
+        assert_eq!(r.history[0].parent, NO_LINEAGE, "a founder has no parent");
+
+        let child = r.classify(root, &[255; N], 0.1, dist, 9, &mut rng);
+        assert_eq!(r.history.len(), 2);
+        assert_eq!(r.history[1].parent, r.history[0].id);
+        // Ids are globally unique and never reused.
+        assert_ne!(r.history[0].id, r.history[1].id);
+
+        r.begin_census();
+        for _ in 0..4 {
+            r.count(root);
+        }
+        r.count(child);
+        r.end_census(10);
+        assert_eq!(r.history[0].peak_population, 4);
+        assert_eq!(r.history[0].extinct_tick, u32::MAX, "still alive");
+    }
+
+    #[test]
+    fn the_history_is_bounded_and_says_when_it_overflows() {
+        let mut r = reg();
+        let mut rng = Rng::new(3, 1);
+        let root = r.found([0; N], 0.0, 0);
+        // Churn: create a species, retire it, repeat, well past the cap.
+        for step in 0..(MAX_LINEAGES + 200) {
+            let genome = [((step * 37) % 256) as u8; N];
+            let id = r.classify(root, &genome, 0.0001, dist, step as u64, &mut rng);
+            if id != root {
+                r.begin_census();
+                r.count(root);
+                r.end_census(step as u64);
+            }
+        }
+        assert_eq!(r.history.len(), MAX_LINEAGES);
+        assert!(
+            r.history_dropped > 0,
+            "overflow should be visible, not silent"
+        );
     }
 
     #[test]

@@ -33,6 +33,8 @@ static mut WORLD: Option<World> = None;
 static mut BYTES: Vec<u8> = Vec::new();
 /// Packed species table, rebuilt on demand.
 static mut SPECIES: Vec<u8> = Vec::new();
+/// Packed lineage table for the tree of life.
+static mut LINEAGES: Vec<u8> = Vec::new();
 /// Packed detail for one inspected organism.
 static mut INSPECT: Vec<f32> = Vec::new();
 
@@ -276,6 +278,88 @@ pub extern "C" fn prepare_species(limit: u32, animals: u32) -> u32 {
 #[allow(static_mut_refs)]
 pub extern "C" fn species_ptr() -> *const u8 {
     unsafe { SPECIES.as_ptr() }
+}
+
+// ------------------------------------------------------------ tree of life --
+
+/// Fields per lineage row: id, parent, birth tick, extinct tick, peak
+/// population, hue.
+pub const LINEAGE_FIELDS: usize = 6;
+
+/// Build the tree of life: every lineage that ever reached `min_peak`
+/// individuals, in order of appearance. Returns the row count.
+///
+/// Extinct branches are included -- they are most of the tree. A lineage whose
+/// parent falls below the threshold keeps its parent id, and the host walks up
+/// to the nearest ancestor it kept.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn prepare_lineages(min_peak: u32, animals: u32) -> u32 {
+    let Some(w) = world() else { return 0 };
+    let history = if animals != 0 {
+        &w.animal_species.history
+    } else {
+        &w.plant_species.history
+    };
+    let out = unsafe { &mut LINEAGES };
+    out.clear();
+    let mut rows = 0u32;
+    for l in history.iter() {
+        if l.peak_population < min_peak {
+            continue;
+        }
+        out.extend_from_slice(&(l.id as f32).to_le_bytes());
+        // f32 cannot hold the "still alive" sentinel exactly, so it goes over
+        // as -1 rather than as a very large number the host has to guess at.
+        let parent = if l.parent == borscht_core::species::NO_LINEAGE {
+            -1.0
+        } else {
+            l.parent as f32
+        };
+        out.extend_from_slice(&parent.to_le_bytes());
+        out.extend_from_slice(&(l.birth_tick as f32).to_le_bytes());
+        let extinct = if l.extinct_tick == u32::MAX {
+            -1.0
+        } else {
+            l.extinct_tick as f32
+        };
+        out.extend_from_slice(&extinct.to_le_bytes());
+        out.extend_from_slice(&(l.peak_population as f32).to_le_bytes());
+        out.extend_from_slice(&l.hue.to_le_bytes());
+        rows += 1;
+    }
+    rows
+}
+
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn lineages_ptr() -> *const u8 {
+    unsafe { LINEAGES.as_ptr() }
+}
+
+/// Total lineages ever recorded, and how many were dropped once the history
+/// filled up, so the host can say the tree is truncated rather than imply it
+/// is complete.
+#[no_mangle]
+pub extern "C" fn lineage_total(animals: u32) -> u32 {
+    world().map_or(0, |w| {
+        if animals != 0 {
+            w.animal_species.history.len() as u32
+        } else {
+            w.plant_species.history.len() as u32
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn lineage_dropped(animals: u32) -> f64 {
+    world().map_or(0.0, |w| {
+        if animals != 0 {
+            w.animal_species.history_dropped as f64
+        } else {
+            w.plant_species.history_dropped as f64
+        }
+    })
 }
 
 // ---------------------------------------------------------------- inspect --
@@ -544,6 +628,44 @@ mod tests {
     }
 
     #[test]
+    fn the_tree_of_life_crosses_the_boundary() {
+        let _guard = lock();
+        fresh();
+        world_tick(200);
+        let rows = prepare_lineages(1, 1);
+        assert!(rows > 0, "no lineages recorded");
+        assert_eq!(
+            rows,
+            lineage_total(1),
+            "min_peak of 1 should keep everything"
+        );
+        let vals = unsafe {
+            std::slice::from_raw_parts(lineages_ptr() as *const f32, rows as usize * LINEAGE_FIELDS)
+        };
+        let mut roots = 0;
+        for row in vals.chunks(LINEAGE_FIELDS) {
+            assert!(row[0] >= 0.0, "lineage id must be real");
+            assert!(row[1] >= -1.0, "parent is an id or -1");
+            if row[1] < 0.0 {
+                roots += 1;
+            }
+            assert!(row[2] >= 0.0, "birth tick");
+            assert!(row[4] >= 1.0, "peak population");
+            assert!((0.0..1.0).contains(&row[5]), "hue out of range");
+        }
+        assert!(roots > 0, "the tree needs at least one root");
+
+        // Filtering keeps a subset, never invents rows.
+        assert!(prepare_lineages(1_000_000, 1) <= rows);
+        assert_eq!(
+            lineage_dropped(1),
+            0.0,
+            "history should not have overflowed yet"
+        );
+        assert!(prepare_lineages(1, 0) > 0, "plants have a tree too");
+    }
+
+    #[test]
     fn inspect_finds_an_organism_and_misses_gracefully() {
         let _guard = lock();
         fresh();
@@ -606,6 +728,8 @@ mod tests {
         assert!(render_ptr().is_null());
         assert!(stats_ptr().is_null());
         assert_eq!(prepare_species(8, 1), 0);
+        assert_eq!(prepare_lineages(1, 1), 0);
+        assert_eq!(lineage_total(1), 0);
         assert_eq!(inspect(0.0, 0.0, 10.0), 0);
         assert_eq!(snapshot_save(), 0);
         assert_eq!(world_size(), 0.0);

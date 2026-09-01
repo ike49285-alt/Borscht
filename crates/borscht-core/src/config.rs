@@ -81,9 +81,14 @@ macro_rules! config_params {
 config_params! {
     // ---- world structure (reset required) ----
     /// Side length of the square, toroidal world in simulation units.
-    world_size: f32 = 2048.0, "world", 128.0, 8192.0;
+    ///
+    /// The defaults describe a world of about a hundred thousand organisms.
+    /// Smaller than that and animal populations start failing to establish for
+    /// reasons that are real but not interesting to watch: at forty thousand
+    /// only one seed in six holds on, against six in six at eighty thousand.
+    world_size: f32 = 648.0, "world", 128.0, 8192.0;
     /// Cells per side of the spatial grid. Must be a power of two.
-    grid_dim: u32 = 256, "world", 32.0, 2048.0;
+    grid_dim: u32 = 64, "world", 32.0, 2048.0;
     /// Side length, in grid cells, of the block within which animals can
     /// actually reach each other and the plants they eat.
     ///
@@ -95,13 +100,13 @@ config_params! {
     /// each still owns its organisms and its soil exclusively.
     interaction_block: u32 = 4, "world", 1.0, 32.0;
     /// Hard cap on live plants. Reaching it simply makes seeding fail.
-    max_plants: u32 = 700_000, "world", 1000.0, 4_000_000.0;
+    max_plants: u32 = 70_000, "world", 1000.0, 4_000_000.0;
     /// Hard cap on live animals.
-    max_animals: u32 = 300_000, "world", 100.0, 2_000_000.0;
+    max_animals: u32 = 30_000, "world", 100.0, 2_000_000.0;
     /// Plants seeded at reset.
-    initial_plants: u32 = 300_000, "world", 100.0, 4_000_000.0;
+    initial_plants: u32 = 30_000, "world", 100.0, 4_000_000.0;
     /// Animals seeded at reset.
-    initial_animals: u32 = 12_000, "world", 10.0, 2_000_000.0;
+    initial_animals: u32 = 1_200, "world", 10.0, 2_000_000.0;
     /// Distinct founding plant populations.
     ///
     /// Plants can self, so unrelated founding stocks are viable on their own and

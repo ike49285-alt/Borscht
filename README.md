@@ -5,8 +5,9 @@ budget, a climate that varies with latitude and season, and no scripted
 behaviour at all. Everything you see — where things live, what they eat, whether
 predators exist — is the outcome of selection on mutable genomes.
 
-It runs in the browser at up to a million organisms, and headless from the
-command line for long experiments.
+The default world holds about a hundred thousand organisms; it scales up to a
+million if you want one. It runs in the browser and headless from the command
+line for long experiments.
 
 ```
 tools/build-web.sh
@@ -151,14 +152,14 @@ borscht params  [--json]
 ```
 
 `--population` scales the world at constant density, so the ecology behaves the
-same at every size and only the map changes. `--out` writes `stats.csv` with 27
+same at every size and only the map changes; omit it for the default world. `--out` writes `stats.csv` with 27
 per-tick measurements plus PNG frames. Any of the 53 parameters can be
 overridden with `--set`; `borscht params` lists them with ranges and
 descriptions.
 
 ```
-borscht run --population 200000 --ticks 20000 --out runs/one --frames 40
-borscht run --population 60000 --ticks 20000 --set temp_stress=2.0 --quiet
+borscht run --ticks 20000 --out runs/one --frames 40
+borscht run --population 400000 --ticks 20000 --set temp_stress=2.0 --quiet
 ```
 
 ## Performance
@@ -166,17 +167,18 @@ borscht run --population 60000 --ticks 20000 --set temp_stress=2.0 --quiet
 Measured on four cores. WebAssembly figures come from running the same module
 the browser runs, under Node.
 
-| organisms | wasm ms/tick | wasm ticks/s |
-|-----------|-------------:|-------------:|
-| 22,000    | 3.2          | 315          |
-| 111,000   | 17.9         | 56           |
-| 225,000   | 38.5         | 26           |
+| organisms | native ms/tick | native ticks/s |
+|-----------|---------------:|---------------:|
+| 5,200     | 0.4            | 2,575          |
+| 21,000    | 1.7            | 597            |
+| 83,000    | 8.2            | 122            |
 
-Cost is linear in population at roughly 170 ns per organism in WebAssembly, so a
-full million is about 170 ms per tick, or six ticks a second. Diploidy and sex
-cost most of that: the genome doubled, the brain widened to take a conspecific
-sense, and mate search walks outward until it finds someone. An earlier clonal
-build ran at 94 ns. Rendering is decoupled from that: the simulation runs in
+Cost is linear in population at roughly 100 ns per organism natively and about
+170 ns in WebAssembly. The default hundred-thousand-organism world runs at a
+comfortable interactive rate; a full million is about 170 ms a tick in the
+browser. Diploidy and sex account for much of the per-organism cost — the genome
+doubled, the brain widened to take a conspecific sense, and mate search walks
+outward until it finds someone. Rendering is decoupled from that: the simulation runs in
 a worker and the page draws at display rate from whatever frame is current, so
 panning and zooming stay smooth no matter how slowly the world is advancing.
 
@@ -186,6 +188,26 @@ animal however crowded the world gets. Brain weights are `i8`, so a million
 animals cost 194 MB of weights instead of 780 MB. And brains run on a stagger,
 each animal thinking every fourth tick on its own offset, while movement
 integrates every tick.
+
+## Watching it
+
+The viewer has two views. **World** draws every organism as a point, coloured by
+species, diet, energy, age or size. **Tree of life** draws the phylogeny: one
+line per lineage from the tick it split off to the tick it died out, with a
+connector back to the lineage it came from. Colour is inherited with drift, so
+relatives sit near each other in hue and a radiation reads as a block.
+
+Extinct branches are most of the tree, and keeping them is what makes it a
+history rather than a snapshot. They also cost something: registry slots are
+recycled the moment a species dies, so lineages are recorded separately in an
+append-only history that outlives the slot.
+
+The timeline **rewinds**. The worker keeps periodic snapshots in a ring bounded
+by bytes rather than by count — a snapshot scales with the population, so a
+fixed count would quietly eat a gigabyte in a large world — and seeking loads
+the newest checkpoint at or before the target and re-ticks forward. Because a
+snapshot carries the generator state, replaying reproduces the run you already
+watched rather than a new one.
 
 ## Small worlds die
 
