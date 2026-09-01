@@ -67,6 +67,23 @@ console.log('after %d ticks:', await tick(), await readout());
 await page.locator('#stage').screenshot({ path: `${OUT}/stage.png` });
 await page.screenshot({ path: `${OUT}/world.png` });
 
+// Zoomed in, which is where individual creatures either read as bodies or do
+// not. The whole-world view cannot answer that: at that scale everything is a
+// pixel whatever it is drawn as.
+await page.mouse.move(700, 500);
+// Each notch is about 1.2x, so a dozen lands near 10x -- a view about twenty
+// world units across, which holds a few dozen organisms. Far more than that and
+// the view is usually empty space between plants.
+const NOTCHES = Number(process.env.ZOOM ?? 12);
+for (let i = 0; i < NOTCHES; i += 1) {
+  await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(30);
+}
+await page.waitForTimeout(900);
+await page.locator('#stage').screenshot({ path: `${OUT}/zoomed.png` });
+for (let i = 0; i < NOTCHES; i += 1) await page.mouse.wheel(0, 120);
+await page.waitForTimeout(600);
+
 await page.click('#view-tree');
 if (process.env.MINPEAK) {
   await page.fill('#tree-min', process.env.MINPEAK);

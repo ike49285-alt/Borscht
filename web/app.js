@@ -557,7 +557,12 @@ worker.onmessage = (event) => {
       break;
     case 'frame': {
       worldSize = msg.worldSize || 1;
-      renderer.upload(new Uint8Array(msg.buffer, 0, msg.count * msg.stride), msg.count, msg.plants);
+      renderer.upload(
+        new Uint8Array(msg.buffer, 0, msg.count * msg.stride),
+        msg.count,
+        msg.plants,
+        msg.worldSize,
+      );
       // Hand the buffer straight back so the worker can reuse it.
       worker.postMessage({ type: 'recycle', buffer: msg.buffer }, [msg.buffer]);
       latest = msg;

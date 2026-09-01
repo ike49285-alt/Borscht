@@ -50,7 +50,18 @@ const CROWDING_HALF: f32 = 0.5;
 const PREY_SEARCH_TRIES: u32 = 4;
 
 /// Bytes per organism in the render buffer: `u16` x, `u16` y, RGBA.
-pub const RENDER_STRIDE: usize = 8;
+pub const RENDER_STRIDE: usize = 12;
+/// Byte offsets within one organism's render record. Named because two
+/// renderers read this layout and a silent disagreement shows up as wrong
+/// colours rather than as an error.
+pub mod render_field {
+    pub const X: usize = 0;
+    pub const Y: usize = 2;
+    pub const HEADING: usize = 4;
+    pub const RADIUS: usize = 6;
+    pub const KIND: usize = 7;
+    pub const COLOR: usize = 8;
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ColorMode {
@@ -1682,12 +1693,19 @@ impl World {
                     color::lerp_rgb((150, 230, 150), (20, 90, 30), t)
                 }
             };
+            // A plant's body is its standing biomass, so a seedling is a speck
+            // and a mature plant is a bush. Square-rooted because biomass is a
+            // volume and what is drawn is its footprint.
+            let radius = crate::fastmath::sqrt(self.plants.biomass[i].max(0.0)) * 0.42;
             Self::write_point(
                 &mut self.render_buf,
                 off,
                 self.plants.x[i],
                 self.plants.y[i],
                 scale,
+                0.0,
+                radius,
+                0,
                 r,
                 g,
                 b,
@@ -1731,12 +1749,19 @@ impl World {
                     color::lerp_rgb((200, 220, 255), (255, 120, 30), t)
                 }
             };
+            // Smaller than the size gene suggests, because the wedge is drawn
+            // twice as long as it is wide: matching the plants' scale directly
+            // made animals dominate a view they should only punctuate.
+            let radius = tables.animal[ag::SIZE][self.animals.gene(i, ag::SIZE) as usize] * 0.32;
             Self::write_point(
                 &mut self.render_buf,
                 off,
                 self.animals.x[i],
                 self.animals.y[i],
                 scale,
+                self.animals.heading[i],
+                radius,
+                1,
                 r,
                 g,
                 b,
@@ -1749,12 +1774,23 @@ impl World {
 
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
+    /// One organism in the interleaved buffer: where it is, which way it faces,
+    /// how big it is, and what colour.
+    ///
+    /// Heading and radius are what let the renderer draw a body rather than a
+    /// dot. Without them every organism is the same featureless point at the
+    /// same size, which is most of why a world of creatures read as a cellular
+    /// automaton.
+    #[allow(clippy::too_many_arguments)]
     fn write_point(
         buf: &mut [u8],
         off: usize,
         x: f32,
         y: f32,
         scale: f32,
+        heading: f32,
+        radius: f32,
+        kind: u8,
         r: u8,
         g: u8,
         b: u8,
@@ -1762,14 +1798,26 @@ impl World {
     ) {
         let qx = clamp(x * scale, 0.0, 65535.0) as u16;
         let qy = clamp(y * scale, 0.0, 65535.0) as u16;
+        // Heading as a fraction of a turn. A byte would be 1.4 degrees, which is
+        // visible as a jitter on a slowly turning animal; two bytes are free
+        // inside the stride.
+        let turns = heading * (1.0 / core::f32::consts::TAU);
+        let qh = ((turns - floor(turns)) * 65535.0) as u16;
+        // Radius in world units, quantised to 1/16 so a small animal still has
+        // distinguishable sizes.
+        let qr = clamp(radius * 16.0, 0.0, 255.0) as u8;
         buf[off] = qx as u8;
         buf[off + 1] = (qx >> 8) as u8;
         buf[off + 2] = qy as u8;
         buf[off + 3] = (qy >> 8) as u8;
-        buf[off + 4] = r;
-        buf[off + 5] = g;
-        buf[off + 6] = b;
-        buf[off + 7] = a;
+        buf[off + 4] = qh as u8;
+        buf[off + 5] = (qh >> 8) as u8;
+        buf[off + 6] = qr;
+        buf[off + 7] = kind;
+        buf[off + 8] = r;
+        buf[off + 9] = g;
+        buf[off + 10] = b;
+        buf[off + 11] = a;
     }
 
     pub fn render_buffer(&self) -> &[u8] {
@@ -2125,15 +2173,31 @@ mod tests {
             assert_eq!(w.render_count(), n);
             // Every point must decode back to a position inside the world.
             let buf = w.render_buffer();
+            let plants = w.plants.len();
             for p in 0..n {
                 let o = p * RENDER_STRIDE;
-                let qx = u16::from_le_bytes([buf[o], buf[o + 1]]) as f32;
+                let qx =
+                    u16::from_le_bytes([buf[o + render_field::X], buf[o + render_field::X + 1]])
+                        as f32;
                 let x = qx / 65535.0 * w.cfg.world_size;
                 assert!(
                     x >= 0.0 && x <= w.cfg.world_size,
-                    "point {p} outside the world"
+                    "organism {p} outside the world"
                 );
-                assert!(buf[o + 7] > 0, "point {p} is fully transparent");
+                assert!(
+                    buf[o + render_field::COLOR + 3] > 0,
+                    "organism {p} is fully transparent"
+                );
+                // A body needs a size, or it draws as nothing at all.
+                assert!(buf[o + render_field::RADIUS] > 0, "organism {p} has no body");
+                // Kind is a tag the renderer branches on: plants first, then
+                // animals, in that order in the buffer.
+                let kind = buf[o + render_field::KIND];
+                assert_eq!(
+                    kind,
+                    u8::from(p >= plants),
+                    "organism {p} has the wrong kind tag"
+                );
             }
         }
     }

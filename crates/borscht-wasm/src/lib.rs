@@ -607,11 +607,13 @@ mod tests {
         world_tick(20);
         let n = prepare_render(0);
         assert_eq!(n, population());
-        assert_eq!(render_stride(), 8);
+        // The host reads the stride from here rather than hard-coding it, so
+        // this asserts the two agree, not what the number happens to be.
+        assert_eq!(render_stride() as usize, RENDER_STRIDE);
         assert_eq!(render_plant_count(), plant_count());
         assert!(!render_ptr().is_null());
         let bytes = unsafe { std::slice::from_raw_parts(render_ptr(), n as usize * RENDER_STRIDE) };
-        assert_eq!(bytes.len(), n as usize * 8);
+        assert_eq!(bytes.len(), n as usize * RENDER_STRIDE);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! happened to be last in the array, which flickers between frames and hides
 //! real density structure.
 
-use borscht_core::world::RENDER_STRIDE;
+use borscht_core::world::{render_field, RENDER_STRIDE};
 use borscht_core::{ColorMode, World};
 
 pub struct Canvas {
@@ -55,8 +55,10 @@ impl Canvas {
 
         for p in 0..count {
             let o = p * RENDER_STRIDE;
-            let qx = u16::from_le_bytes([buf[o], buf[o + 1]]) as u32;
-            let qy = u16::from_le_bytes([buf[o + 2], buf[o + 3]]) as u32;
+            let qx = u16::from_le_bytes([buf[o + render_field::X], buf[o + render_field::X + 1]])
+                as u32;
+            let qy = u16::from_le_bytes([buf[o + render_field::Y], buf[o + render_field::Y + 1]])
+                as u32;
             // Quantised coordinates are already world-relative in [0, 65535].
             let px = (qx as usize * size) >> 16;
             let py = (qy as usize * size) >> 16;
@@ -66,9 +68,10 @@ impl Canvas {
             } else {
                 ANIMAL_WEIGHT
             };
-            self.accum[idx * 3] += buf[o + 4] as f32 * w;
-            self.accum[idx * 3 + 1] += buf[o + 5] as f32 * w;
-            self.accum[idx * 3 + 2] += buf[o + 6] as f32 * w;
+            let c = o + render_field::COLOR;
+            self.accum[idx * 3] += buf[c] as f32 * w;
+            self.accum[idx * 3 + 1] += buf[c + 1] as f32 * w;
+            self.accum[idx * 3 + 2] += buf[c + 2] as f32 * w;
             self.weight[idx] += w;
         }
     }
