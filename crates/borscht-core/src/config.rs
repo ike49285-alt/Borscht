@@ -102,11 +102,38 @@ config_params! {
     initial_plants: u32 = 300_000, "world", 100.0, 4_000_000.0;
     /// Animals seeded at reset.
     initial_animals: u32 = 12_000, "world", 10.0, 2_000_000.0;
-    /// Cluster centres used to label the founding population's species.
+    /// Distinct founding plant populations.
     ///
-    /// Founders are independent random genotypes; this only decides how many
-    /// labels they are sorted into, not how much variation there is.
+    /// Plants can self, so unrelated founding stocks are viable on their own and
+    /// a varied starting flora costs nothing.
     founder_lineages: u32 = 24, "world", 1.0, 512.0;
+    /// Distinct founding animal populations.
+    ///
+    /// Far lower than the plant figure, and for a real reason. Animals need a
+    /// compatible mate, and separate founding stocks are reproductively isolated
+    /// from each other from the first tick. Splitting a propagule across two
+    /// dozen stocks makes two dozen populations of a handful of individuals
+    /// each, every one of them instantly below the density at which it can find
+    /// mates, and the whole thing spirals into fragmentation and dies -- which
+    /// is correct behaviour from an initial condition nobody would mean. A
+    /// colonisation event brings one species, or a few; the rest is supposed to
+    /// happen during the run.
+    /// A few, not one and not dozens. One founding population makes the whole
+    /// run turn on a single random genotype; dozens fragment the propagule into
+    /// groups too sparse to find mates in, since separate stocks are
+    /// reproductively isolated from the first tick.
+    animal_founder_lineages: u32 = 6, "world", 1.0, 128.0;
+    /// Standing genetic variation within each founding population, in gene
+    /// units out of 255.
+    ///
+    /// Founders are a *sample from a source population*, not a set of unrelated
+    /// genotypes. Drawing them independently and uniformly maximises the range
+    /// sampled but does not describe a population at all: two uniform random
+    /// genomes differ by about 0.29 on the distance scale, further apart than
+    /// the mating threshold, so such founders cannot interbreed and every world
+    /// ends immediately. Propagule pressure works through the standing variation
+    /// *within* a source population, which is what this sets.
+    founder_spread: f32 = 26.0, "world", 0.0, 128.0;
     /// Fraction of full reserves that founding animals start with.
     founder_energy: f32 = 0.60, "world", 0.05, 1.0;
     /// How close to its maximum size a founding plant starts. Founders that
@@ -204,7 +231,12 @@ config_params! {
     /// additive surcharges of the same magnitude as basal itself, so an animal
     /// with middling genes paid over two and a half times its basal rate in
     /// organ costs alone and income never cleared upkeep by any margin.
-    metabolism: f32 = 0.045, "animals", 0.0, 1.0;
+    /// Calibrated so that animals can make a living at all. The energy budget
+    /// has no independent units -- only the ratio of income to upkeep is
+    /// meaningful -- so this sets the scale rather than deciding an outcome.
+    /// Sexual reproduction needs a lower figure than clonal did: two parents
+    /// per offspring, plus the possibility of finding no mate.
+    metabolism: f32 = 0.015, "animals", 0.0, 1.0;
     /// Cost of a fully developed sensory system, as a fraction of basal rate.
     vision_upkeep: f32 = 0.25, "animals", 0.0, 3.0;
     /// Cost of maximum weapons and armour, as a fraction of basal rate.
@@ -215,7 +247,7 @@ config_params! {
     move_cost: f32 = 0.085, "animals", 0.0, 2.0;
     /// Plant biomass an animal can ingest per tick, per unit of size, when food
     /// is abundant.
-    graze_rate: f32 = 0.30, "animals", 0.0, 5.0;
+    graze_rate: f32 = 0.60, "animals", 0.0, 5.0;
     /// Fraction of a plant's maximum size that grazers cannot reach.
     ///
     /// Real grazed plants survive precisely because the crown and roots are out
@@ -244,7 +276,7 @@ config_params! {
     /// plants an effective refuge and damps the oscillation.
     graze_half: f32 = 0.35, "animals", 0.001, 20.0;
     /// Energy released per unit of biomass digested.
-    energy_per_biomass: f32 = 7.0, "animals", 0.1, 50.0;
+    energy_per_biomass: f32 = 12.0, "animals", 0.1, 50.0;
     /// How much of a plant's toxicity blocks energy extraction.
     toxicity_defence: f32 = 0.85, "animals", 0.0, 1.0;
     /// Upkeep surcharge for a fully developed digestive system, per gut.
@@ -253,7 +285,9 @@ config_params! {
     /// plants and flesh means paying for both, so a generalist runs at a
     /// standing cost a specialist does not, and specialisation emerges from that
     /// rather than from a curve chosen in advance to produce it.
-    gut_upkeep: f32 = 0.45, "animals", 0.0, 3.0;
+    /// Roughly the share of basal rate the digestive tract accounts for in real
+    /// animals; the earlier 0.45 per gut was not physiological.
+    gut_upkeep: f32 = 0.20, "animals", 0.0, 3.0;
     /// Fraction of a killed animal's energy the predator absorbs.
     predation_efficiency: f32 = 0.85, "animals", 0.0, 1.0;
     /// Energy spent on a failed attack, per unit of size.
@@ -288,6 +322,30 @@ config_params! {
     plant_mortality: f32 = 0.00020, "animals", 0.0, 0.05;
 
     // ---- speciation ----
+    /// Genetic distance beyond which two animals will not breed together.
+    ///
+    /// This is reproductive isolation, and it is what actually makes a species
+    /// a species: a group that interbreeds. The registry's distance threshold
+    /// only decides what a lineage is *labelled*, which is an operational
+    /// convenience rather than the biology.
+    mating_threshold: f32 = 0.22, "speciation", 0.01, 1.0;
+    /// How many cells an animal will search outward for a mate before giving
+    /// up.
+    ///
+    /// Mate finding is not confined to the interaction block. The block exists
+    /// so that feeding writes stay disjoint; finding a mate only *reads* the
+    /// partner, so it can range further, and it must -- at equilibrium density
+    /// a block usually contains nobody else at all, and confining the search to
+    /// it made every animal population fail for want of a mate regardless of
+    /// how healthy it was. The search is still bounded, so mate limitation
+    /// remains a real Allee effect at genuinely low density.
+    mate_search_cells: u32 = 160, "speciation", 1.0, 4096.0;
+    /// Cells sampled for a pollen donor before a plant selfs.
+    ///
+    /// Plants fall back to selfing rather than failing, which is what mixed
+    /// mating systems do. Animals have no such fallback, so mate limitation can
+    /// and does end an animal population.
+    pollen_search_tries: u32 = 4, "plants", 1.0, 32.0;
     /// Genetic distance from a species' founding genome at which a lineage is
     /// recorded as a new species.
     species_threshold: f32 = 0.16, "speciation", 0.01, 1.0;
@@ -355,6 +413,7 @@ impl Config {
         self.initial_plants = self.initial_plants.min(self.max_plants);
         self.initial_animals = self.initial_animals.min(self.max_animals);
         self.founder_lineages = self.founder_lineages.clamp(1, 4096);
+        self.animal_founder_lineages = self.animal_founder_lineages.clamp(1, 4096);
         self.think_interval = self.think_interval.clamp(1, 64);
         self.season_length = self.season_length.max(1);
         self.drag = self.drag.clamp(0.0, 1.0);

@@ -24,7 +24,7 @@ use crate::color;
 use crate::config::Config;
 use crate::env::Env;
 use crate::fastmath::{self, clamp, floor, gaussian, sin, sin_cos, TAU};
-use crate::genome::{self, ag, pg, AnimalGenome, PlantGenome, ANIMAL_GENE_COUNT, PLANT_GENE_COUNT};
+use crate::genome::{self, ag, pg, AnimalGenome, PlantGenome, ANIMAL_GENOME_LEN, PLANT_GENOME_LEN};
 use crate::grid::{wrap, Grid};
 use crate::pools::{AnimalPool, OrganismId, PlantPool};
 use crate::rng::Rng;
@@ -93,6 +93,7 @@ struct Accum {
     animal_energy: f64,
     animal_mass: f64,
     plant_biomass: f64,
+    heterozygosity: f64,
     plant_toxicity: f64,
     plant_growth: f64,
 }
@@ -112,9 +113,22 @@ struct TickCounters {
     plant_births_blocked: u32,
     animal_repro_ready: u32,
     animal_births_blocked_matter: u32,
+    animal_births_blocked_mate: u32,
+    mate_candidates_seen: u32,
+    mate_rejected_distance: u32,
     animal_births_blocked_space: u32,
     disturbances: u32,
     disturbed: u32,
+}
+
+/// Draw a diploid genome from a source population: the centre plus standing
+/// variation, sampled independently for each allele.
+fn sample_population<const N: usize>(centre: &[u8; N], spread: f32, rng: &mut Rng) -> [u8; N] {
+    let mut out = [0u8; N];
+    for (slot, base) in out.iter_mut().zip(centre.iter()) {
+        *slot = clamp(*base as f32 + rng.gauss() * spread, 0.0, 255.0) as u8;
+    }
+    out
 }
 
 pub struct World {
@@ -125,8 +139,8 @@ pub struct World {
     pub env: Env,
     pub plants: PlantPool,
     pub animals: AnimalPool,
-    pub plant_species: Registry<PLANT_GENE_COUNT>,
-    pub animal_species: Registry<ANIMAL_GENE_COUNT>,
+    pub plant_species: Registry<PLANT_GENOME_LEN>,
+    pub animal_species: Registry<ANIMAL_GENOME_LEN>,
     pub stats: Stats,
 
     /// One stream for the whole world.
@@ -220,19 +234,16 @@ impl World {
 
         let mut rng = Rng::new(self.seed, SALT_INIT);
         let lineages = cfg.founder_lineages as usize;
+        let animal_lineages = cfg.animal_founder_lineages as usize;
 
-        // Founding lineages are cluster centres, not templates. Every founder
-        // below is an *independent* random genotype assigned to the nearest
-        // centre, which is what makes propagule size mean something: a larger
-        // founding population samples more of the space, so it is more likely to
-        // contain something viable. Drawing founders as small mutations around a
-        // handful of templates caps the genetic variation at the number of
-        // templates, and establishment success then does not respond to
-        // propagule size at all -- contradicting one of the best-supported
-        // results in invasion biology.
+        // Each founding lineage is a source population: a genotype plus real
+        // standing variation around it. Founders are samples from one, so they
+        // are mutually interbreedable, and a larger propagule samples more of
+        // that variation -- which is how propagule pressure actually raises
+        // establishment success.
         let mut plant_founders: Vec<(PlantGenome, u16)> = Vec::with_capacity(lineages);
         for l in 0..lineages {
-            let mut g = [0u8; PLANT_GENE_COUNT];
+            let mut g = [0u8; genome::PLANT_GENOME_LEN];
             for slot in g.iter_mut() {
                 *slot = rng.below(256) as u8;
             }
@@ -240,18 +251,9 @@ impl World {
             let sp = self.plant_species.found(g, hue, 0);
             plant_founders.push((g, sp));
         }
-        for _ in 0..cfg.initial_plants as usize {
-            let mut g = [0u8; PLANT_GENE_COUNT];
-            for slot in g.iter_mut() {
-                *slot = rng.below(256) as u8;
-            }
-            let sp = plant_founders
-                .iter()
-                .min_by(|a, b| {
-                    genome::plant_distance(&a.0, &g).total_cmp(&genome::plant_distance(&b.0, &g))
-                })
-                .map(|c| c.1)
-                .unwrap_or(0);
+        for i in 0..cfg.initial_plants as usize {
+            let (centre, sp) = plant_founders[i % lineages];
+            let g = sample_population(&centre, cfg.founder_spread, &mut rng);
             let x = rng.range(0.0, world_size);
             let y = rng.range(0.0, world_size);
             let max_size = genome::plant_trait(&g, pg::MAX_SIZE);
@@ -274,32 +276,35 @@ impl World {
         }
 
         // Founding animal lineages, each with its own random brain.
-        let mut animal_founders: Vec<(AnimalGenome, Vec<i8>, u16)> = Vec::with_capacity(lineages);
-        for l in 0..lineages {
-            let mut g = [0u8; ANIMAL_GENE_COUNT];
+        let mut animal_founders: Vec<(AnimalGenome, Vec<i8>, u16)> =
+            Vec::with_capacity(animal_lineages);
+        for l in 0..animal_lineages {
+            let mut g = [0u8; genome::ANIMAL_GENOME_LEN];
             for slot in g.iter_mut() {
                 *slot = rng.below(256) as u8;
             }
             let mut b = vec![0i8; BRAIN_LEN];
             brain::randomize(&mut b, &mut rng);
-            let hue = (l as f32 / lineages as f32 + 0.5) % 1.0;
+            let hue = (l as f32 / animal_lineages as f32 + 0.5) % 1.0;
             let sp = self.animal_species.found(g, hue, 0);
             animal_founders.push((g, b, sp));
         }
-        for _ in 0..cfg.initial_animals as usize {
-            let mut g = [0u8; ANIMAL_GENE_COUNT];
-            for slot in g.iter_mut() {
-                *slot = rng.below(256) as u8;
-            }
+        for i in 0..cfg.initial_animals as usize {
+            let (centre, centre_brain, sp) = &animal_founders[i % animal_lineages];
+            let g = sample_population(centre, cfg.founder_spread, &mut rng);
+            let sp = *sp;
             let mut b = vec![0i8; BRAIN_LEN];
+            // Every founder gets its own brain, drawn independently. Behaviour
+            // is where the founding variation has to be: a source population
+            // whose members all behave alike offers selection nothing to work
+            // on, and if that one behaviour happens not to feed itself, the
+            // whole propagule starves regardless of its genetics.
+            //
+            // Brains are not part of the genetic distance metric, so this costs
+            // nothing in mating compatibility -- founders stay interbreedable
+            // while differing completely in what they do.
+            let _ = centre_brain;
             brain::randomize(&mut b, &mut rng);
-            let sp = animal_founders
-                .iter()
-                .min_by(|a, b| {
-                    genome::animal_distance(&a.0, &g).total_cmp(&genome::animal_distance(&b.0, &g))
-                })
-                .map(|c| c.2)
-                .unwrap_or(0);
             let x = rng.range(0.0, world_size);
             let y = rng.range(0.0, world_size);
             let heading = rng.range(0.0, TAU);
@@ -308,20 +313,34 @@ impl World {
             let energy = cfg.energy_per_size * size * store * cfg.founder_energy;
             let id = self.alloc_id();
             // A body is matter, drawn from where it stands, like every body born
-            // afterwards. Founders start with no *reserve*: they have to eat
-            // before they can build anything.
+            // afterwards. Founders also carry the stores a fed adult would --
+            // one body mass, not the four-fold hoard that was removed as a prop
+            // and not the zero that replaced it. Arriving with nothing means
+            // arriving starving, and it cost the founding cohort its whole
+            // breeding window: by the time it had accumulated enough matter for
+            // a first offspring it had thinned past the density at which mates
+            // can be found.
             let cell = self.grid.cell_of(x, y) as usize;
             let body = cfg.mass_per_size * size;
-            if self.grid.soil[cell] < body {
+            // Half the reserve an animal can hold: a fed adult in breeding
+            // condition. One body mass is not enough -- an offspring costs about
+            // a body mass itself, so a founder carrying exactly that cannot
+            // afford even one child, which is not what being in condition means.
+            let reserve = body * cfg.reserve_capacity * 0.5;
+            // Body and stores are both matter, so both come out of the soil.
+            // Taking only the body would create the reserve from nothing and
+            // break conservation on the first tick.
+            let drawn = body + reserve;
+            if self.grid.soil[cell] < drawn {
                 continue;
             }
             if !self
                 .animals
-                .push(x, y, heading, energy, &g, &b, sp, id, 0.0)
+                .push(x, y, heading, energy, &g, &b, sp, id, reserve)
             {
                 break;
             }
-            self.grid.soil[cell] -= body;
+            self.grid.soil[cell] -= drawn;
             // Spread founders across their lifespans. A cohort born all at once
             // cannot reproduce at all until the maturity age passes -- several
             // hundred ticks during which the population can only shrink.
@@ -615,6 +634,7 @@ impl World {
                             let (plant_here, pgx, pgy) = geom.sample(edible_mass, cx, cy);
                             let (prey_here, rgx, rgy) = geom.sample(prey_mass, cx, cy);
                             let (threat_here, tgx, tgy) = geom.sample(threat_mass, cx, cy);
+                            let (kin_here, kgx, kgy) = geom.sample(animal_count, cx, cy);
                             let (plant_here, pgx, pgy) = (
                                 plant_here * inv_cell_area,
                                 pgx * inv_cell_area,
@@ -661,6 +681,17 @@ impl World {
                             let (tf, tl) = body_frame(tgx, tgy, threat_here);
                             inputs[input::THREAT_GRAD_X] = tf;
                             inputs[input::THREAT_GRAD_Y] = tl;
+                            // Direction of its own kind. Crowding alone is a
+                            // scalar and cannot support anything that requires
+                            // approaching a conspecific -- mate seeking above
+                            // all.
+                            let (kf, kl) = body_frame(
+                                kgx * inv_cell_area,
+                                kgy * inv_cell_area,
+                                kin_here * inv_cell_area,
+                            );
+                            inputs[input::KIN_GRAD_X] = kf;
+                            inputs[input::KIN_GRAD_Y] = kl;
 
                             let crowd_density = crowd * inv_cell_area;
                             inputs[input::CROWDING] =
@@ -878,6 +909,8 @@ impl World {
         let tick = *tick;
         let tables = genome::tables();
         let world_size = grid.geom.world_size;
+        let geom = grid.geom;
+        let pbuckets = &grid.plants;
 
         for &parent in plant_births.iter() {
             let i = parent as usize;
@@ -898,7 +931,32 @@ impl World {
             }
 
             let parent_genome: PlantGenome = plants.genome_of(i).try_into().unwrap();
-            let child = genome::mutate_plant(&parent_genome, cfg.plant_mutation_rate, rng);
+
+            // Look for a pollen donor nearby, and self if none is found. Mixed
+            // mating systems are the norm in plants, and the fallback means a
+            // sparse stand is not sterile -- unlike the animals below, where
+            // mate limitation is allowed to end a population.
+            let mut donor = i;
+            let cell = pbuckets.cell_of[i] as usize;
+            let (cx, cy) = geom.cell_xy(cell as u32);
+            for _ in 0..cfg.pollen_search_tries {
+                let ox = cx as i32 + rng.below(3) as i32 - 1;
+                let oy = cy as i32 + rng.below(3) as i32 - 1;
+                let nearby = pbuckets.cell(geom.cell_at(ox, oy));
+                if nearby.is_empty() {
+                    continue;
+                }
+                let pick = nearby[rng.below(nearby.len() as u32) as usize] as usize;
+                if pick != i && plants.alive[pick] {
+                    donor = pick;
+                    break;
+                }
+            }
+            let donor_genome: PlantGenome = plants.genome_of(donor).try_into().unwrap();
+
+            let ovule = genome::plant_gamete(&parent_genome, cfg.plant_mutation_rate, rng);
+            let pollen = genome::plant_gamete(&donor_genome, cfg.plant_mutation_rate, rng);
+            let child = genome::plant_zygote(&ovule, &pollen);
             let species = plant_species.classify(
                 plants.species[i],
                 &child,
@@ -946,6 +1004,8 @@ impl World {
         let tick = *tick;
         let tables = genome::tables();
         let world_size = grid.geom.world_size;
+        let geom = grid.geom;
+        let abuckets = &grid.animals;
 
         for &parent in animal_births.iter() {
             let i = parent as usize;
@@ -958,29 +1018,100 @@ impl World {
             }
 
             let parent_genome: AnimalGenome = animals.genome_of(i).try_into().unwrap();
-            let rate = tables.animal[ag::MUTATION_RATE][parent_genome[ag::MUTATION_RATE] as usize];
-            let child = genome::mutate_animal(&parent_genome, rate, rng);
+            let rate =
+                tables.animal[ag::MUTATION_RATE][animals.gene(i, ag::MUTATION_RATE) as usize];
+
+            // Find a mate, searching outward from where the animal stands.
+            // Animals are hermaphroditic here -- no sexes are modelled -- so any
+            // sufficiently similar neighbour will do, but there is no selfing
+            // fallback. Failing to find one is mate limitation, a real Allee
+            // effect: below some density a population cannot reproduce even when
+            // every individual is perfectly healthy, and that is one of the ways
+            // real introductions fail.
+            let mut mate = usize::MAX;
+            let mut examined = 0u32;
+            let mut candidates = 0u32;
+            let mut rejected = 0u32;
+            let home = abuckets.cell_of[i];
+            let (hx, hy) = geom.cell_xy(home);
+            let (hx, hy) = (hx as i32, hy as i32);
+            'search: for ring in 0..=(geom.dim as i32 / 2) {
+                // Walk the square ring at Chebyshev distance `ring`. Nearest
+                // first, so an animal mates with a neighbour rather than
+                // something on the far side of the world.
+                let mut dy = -ring;
+                while dy <= ring {
+                    let mut dx = -ring;
+                    while dx <= ring {
+                        // Only the ring itself, not its interior.
+                        if ring > 0 && dx.abs() != ring && dy.abs() != ring {
+                            dx = ring;
+                            continue;
+                        }
+                        if examined >= cfg.mate_search_cells {
+                            break 'search;
+                        }
+                        examined += 1;
+                        let nearby = abuckets.cell(geom.cell_at(hx + dx, hy + dy));
+                        for &candidate in nearby {
+                            let pick = candidate as usize;
+                            if pick == i || !animals.alive[pick] {
+                                continue;
+                            }
+                            candidates += 1;
+                            let other: AnimalGenome = animals.genome_of(pick).try_into().unwrap();
+                            // Reproductive isolation: too far apart genetically
+                            // and they simply do not produce offspring. This,
+                            // rather than the registry's label, is what makes a
+                            // species a species.
+                            if genome::animal_distance(&parent_genome, &other)
+                                <= cfg.mating_threshold
+                            {
+                                mate = pick;
+                                break 'search;
+                            }
+                            rejected += 1;
+                        }
+                        dx += 1;
+                    }
+                    dy += 1;
+                }
+            }
+            if mate == usize::MAX {
+                counters.animal_births_blocked_mate += 1;
+                counters.mate_candidates_seen += candidates;
+                counters.mate_rejected_distance += rejected;
+                continue;
+            }
+
+            let mate_genome: AnimalGenome = animals.genome_of(mate).try_into().unwrap();
+            let egg = genome::animal_gamete(&parent_genome, rate, rng);
+            let sperm = genome::animal_gamete(&mate_genome, rate, rng);
+            let child = genome::animal_zygote(&egg, &sperm);
 
             // A body is built out of matter, drawn from the soil where the
             // parent stands. This is a second, entirely local brake on runaway
             // population: a stripped patch cannot support births at all.
-            let child_size = tables.animal[ag::SIZE][child[ag::SIZE] as usize];
+            // Indexing a diploid genome by the gene constant reads a raw byte,
+            // which after the ploidy change is the wrong locus entirely. Go
+            // through the expression helper.
+            let child_size = genome::animal_trait(&child, ag::SIZE);
             let child_mass = cfg.mass_per_size * child_size;
             if animals.reserve[i] < child_mass {
                 counters.animal_births_blocked_matter += 1;
                 continue;
             }
 
-            let invest =
-                tables.animal[ag::OFFSPRING_INVEST][parent_genome[ag::OFFSPRING_INVEST] as usize];
+            let invest = genome::animal_trait(&parent_genome, ag::OFFSPRING_INVEST);
             let dowry = animals.energy[i] * invest;
             if dowry <= 0.0 {
                 counters.animal_births_blocked_matter += 1;
                 continue;
             }
 
-            brain::mutate_into(
+            brain::recombine_into(
                 animals.brain_of(i),
+                animals.brain_of(mate),
                 scratch_brain,
                 clamp(rate * cfg.brain_mutation_scale, 0.0, 1.0),
                 rng,
@@ -1143,6 +1274,10 @@ impl World {
             accum.mutation_rate += tables.animal[ag::MUTATION_RATE]
                 [self.animals.gene(i, ag::MUTATION_RATE) as usize]
                 as f64;
+            accum.heterozygosity += {
+                let g: AnimalGenome = self.animals.genome_of(i).try_into().unwrap();
+                genome::animal_heterozygosity(&g) as f64
+            };
             accum.temp_opt +=
                 tables.animal[ag::TEMP_OPT][self.animals.gene(i, ag::TEMP_OPT) as usize] as f64;
         }
@@ -1189,6 +1324,10 @@ impl World {
             plant_births_blocked: self.counters.plant_births_blocked as f32,
             animal_repro_ready: self.counters.animal_repro_ready as f32,
             animal_births_blocked_matter: self.counters.animal_births_blocked_matter as f32,
+            animal_births_blocked_mate: self.counters.animal_births_blocked_mate as f32,
+            mate_candidates_seen: self.counters.mate_candidates_seen as f32,
+            mate_rejected_distance: self.counters.mate_rejected_distance as f32,
+            mean_heterozygosity: (a.heterozygosity / adiv) as f32,
             animal_births_blocked_space: self.counters.animal_births_blocked_space as f32,
             mean_size: (a.size / adiv) as f32,
             mean_max_speed: (a.max_speed / adiv) as f32,
@@ -1453,7 +1592,9 @@ mod tests {
         );
         assert_eq!(w.stats.plants, w.plants.len() as f32);
         assert!(w.plant_species.live_count() > 1);
-        assert!(w.animal_species.live_count() > 1);
+        // One founding animal population by default: a colonisation event
+        // brings one species, and the rest is supposed to happen during the run.
+        assert!(w.animal_species.live_count() >= 1);
         for i in 0..w.plants.len() {
             assert!(w.plants.x[i] >= 0.0 && w.plants.x[i] < w.cfg.world_size);
             assert!(w.plants.y[i] >= 0.0 && w.plants.y[i] < w.cfg.world_size);

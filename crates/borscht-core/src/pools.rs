@@ -12,7 +12,7 @@
 //! simulation depends on organism order.
 
 use crate::brain::BRAIN_LEN;
-use crate::genome::{ANIMAL_GENE_COUNT, PLANT_GENE_COUNT};
+use crate::genome::{express, ANIMAL_GENOME_LEN, PLANT_GENOME_LEN, PLOIDY};
 
 /// Per-organism id, used for stable RNG streams and for following an individual
 /// in the inspector. Wraps after 4 billion births, which only costs the
@@ -30,7 +30,7 @@ pub struct PlantPool {
     pub age: Vec<u16>,
     pub species: Vec<u16>,
     pub id: Vec<OrganismId>,
-    /// Flat `capacity * PLANT_GENE_COUNT` genome storage.
+    /// Flat `capacity * PLANT_GENOME_LEN` genome storage.
     pub genome: Vec<u8>,
     pub alive: Vec<bool>,
     len: usize,
@@ -46,7 +46,7 @@ impl PlantPool {
             age: vec![0; capacity],
             species: vec![0; capacity],
             id: vec![0; capacity],
-            genome: vec![0; capacity * PLANT_GENE_COUNT],
+            genome: vec![0; capacity * PLANT_GENOME_LEN],
             alive: vec![false; capacity],
             len: 0,
             capacity,
@@ -75,12 +75,20 @@ impl PlantPool {
 
     #[inline(always)]
     pub fn genome_of(&self, i: usize) -> &[u8] {
-        &self.genome[i * PLANT_GENE_COUNT..(i + 1) * PLANT_GENE_COUNT]
+        &self.genome[i * PLANT_GENOME_LEN..(i + 1) * PLANT_GENOME_LEN]
     }
 
+    /// The expressed value of a locus: the mean of its two alleles.
     #[inline(always)]
     pub fn gene(&self, i: usize, g: usize) -> u8 {
-        self.genome[i * PLANT_GENE_COUNT + g]
+        let at = i * PLANT_GENOME_LEN + g * PLOIDY;
+        express(self.genome[at], self.genome[at + 1])
+    }
+
+    /// One allele of a locus, for reproduction and inspection.
+    #[inline(always)]
+    pub fn allele(&self, i: usize, g: usize, copy: usize) -> u8 {
+        self.genome[i * PLANT_GENOME_LEN + g * PLOIDY + copy]
     }
 
     /// Append a plant. Returns false when the pool is full, which is how the
@@ -90,7 +98,7 @@ impl PlantPool {
         x: f32,
         y: f32,
         biomass: f32,
-        genome: &[u8; PLANT_GENE_COUNT],
+        genome: &[u8; PLANT_GENOME_LEN],
         species: u16,
         id: OrganismId,
     ) -> bool {
@@ -104,7 +112,7 @@ impl PlantPool {
         self.age[i] = 0;
         self.species[i] = species;
         self.id[i] = id;
-        self.genome[i * PLANT_GENE_COUNT..(i + 1) * PLANT_GENE_COUNT].copy_from_slice(genome);
+        self.genome[i * PLANT_GENOME_LEN..(i + 1) * PLANT_GENOME_LEN].copy_from_slice(genome);
         self.alive[i] = true;
         self.len += 1;
         true
@@ -119,8 +127,8 @@ impl PlantPool {
         self.id[to] = self.id[from];
         self.alive[to] = self.alive[from];
         self.genome.copy_within(
-            from * PLANT_GENE_COUNT..(from + 1) * PLANT_GENE_COUNT,
-            to * PLANT_GENE_COUNT,
+            from * PLANT_GENOME_LEN..(from + 1) * PLANT_GENOME_LEN,
+            to * PLANT_GENOME_LEN,
         );
     }
 
@@ -203,7 +211,7 @@ impl AnimalPool {
             age: vec![0; capacity],
             species: vec![0; capacity],
             id: vec![0; capacity],
-            genome: vec![0; capacity * ANIMAL_GENE_COUNT],
+            genome: vec![0; capacity * ANIMAL_GENOME_LEN],
             brain: vec![0; capacity * BRAIN_LEN],
             action: vec![0; capacity * ACTION_COUNT],
             alive: vec![false; capacity],
@@ -234,12 +242,20 @@ impl AnimalPool {
 
     #[inline(always)]
     pub fn genome_of(&self, i: usize) -> &[u8] {
-        &self.genome[i * ANIMAL_GENE_COUNT..(i + 1) * ANIMAL_GENE_COUNT]
+        &self.genome[i * ANIMAL_GENOME_LEN..(i + 1) * ANIMAL_GENOME_LEN]
     }
 
+    /// The expressed value of a locus: the mean of its two alleles.
     #[inline(always)]
     pub fn gene(&self, i: usize, g: usize) -> u8 {
-        self.genome[i * ANIMAL_GENE_COUNT + g]
+        let at = i * ANIMAL_GENOME_LEN + g * PLOIDY;
+        express(self.genome[at], self.genome[at + 1])
+    }
+
+    /// One allele of a locus, for reproduction and inspection.
+    #[inline(always)]
+    pub fn allele(&self, i: usize, g: usize, copy: usize) -> u8 {
+        self.genome[i * ANIMAL_GENOME_LEN + g * PLOIDY + copy]
     }
 
     #[inline(always)]
@@ -267,7 +283,7 @@ impl AnimalPool {
         y: f32,
         heading: f32,
         energy: f32,
-        genome: &[u8; ANIMAL_GENE_COUNT],
+        genome: &[u8; ANIMAL_GENOME_LEN],
         brain: &[i8],
         species: u16,
         id: OrganismId,
@@ -287,7 +303,7 @@ impl AnimalPool {
         self.age[i] = 0;
         self.species[i] = species;
         self.id[i] = id;
-        self.genome[i * ANIMAL_GENE_COUNT..(i + 1) * ANIMAL_GENE_COUNT].copy_from_slice(genome);
+        self.genome[i * ANIMAL_GENOME_LEN..(i + 1) * ANIMAL_GENOME_LEN].copy_from_slice(genome);
         self.brain[i * BRAIN_LEN..(i + 1) * BRAIN_LEN].copy_from_slice(brain);
         self.action[i * ACTION_COUNT..(i + 1) * ACTION_COUNT].fill(0);
         self.alive[i] = true;
@@ -307,8 +323,8 @@ impl AnimalPool {
         self.id[to] = self.id[from];
         self.alive[to] = self.alive[from];
         self.genome.copy_within(
-            from * ANIMAL_GENE_COUNT..(from + 1) * ANIMAL_GENE_COUNT,
-            to * ANIMAL_GENE_COUNT,
+            from * ANIMAL_GENOME_LEN..(from + 1) * ANIMAL_GENOME_LEN,
+            to * ANIMAL_GENOME_LEN,
         );
         self.brain
             .copy_within(from * BRAIN_LEN..(from + 1) * BRAIN_LEN, to * BRAIN_LEN);
@@ -356,12 +372,12 @@ mod tests {
     use super::*;
     use crate::rng::Rng;
 
-    fn plant_genome(v: u8) -> [u8; PLANT_GENE_COUNT] {
-        [v; PLANT_GENE_COUNT]
+    fn plant_genome(v: u8) -> [u8; PLANT_GENOME_LEN] {
+        [v; PLANT_GENOME_LEN]
     }
 
-    fn animal_genome(v: u8) -> [u8; ANIMAL_GENE_COUNT] {
-        [v; ANIMAL_GENE_COUNT]
+    fn animal_genome(v: u8) -> [u8; ANIMAL_GENOME_LEN] {
+        [v; ANIMAL_GENOME_LEN]
     }
 
     #[test]

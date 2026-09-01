@@ -13,7 +13,6 @@
 //! numerical nonsense, selection actually operating -- and the outcomes
 //! themselves are measured and reported, not required.
 
-use borscht_core::genome::ag;
 use borscht_core::{Config, World};
 
 fn world(seed: u64) -> World {
@@ -124,42 +123,51 @@ fn extinction_is_a_valid_state_not_a_crash() {
     assert!((w.total_matter() - initial).abs() < initial * 1e-4);
 }
 
-/// Selection has to be doing something. This is about the *mechanism* working,
-/// not about the population surviving: a world whose animals die out is
-/// skipped rather than counted as a failure.
+/// Evolution has to be doing something, and it has to be doing it through the
+/// diploid machinery.
+///
+/// An earlier version of this test asserted that the spread of a trait narrows,
+/// reasoning that founding genotypes are uniform random so a selected population
+/// must be tighter than they were. That premise stopped being true once founders
+/// became samples from several source populations: the starting spread is
+/// already structured, and mixing lineages can widen it legitimately.
+///
+/// What is checked instead is a robust population-genetic prediction that does
+/// not depend on the founding distribution: heterozygosity falls in a finite
+/// population, because drift removes alleles and nothing here restores them
+/// except mutation. That it falls at all is also evidence the diploid path is
+/// real rather than decorative.
 #[test]
-fn selection_narrows_the_founding_variation() {
-    let spread = |v: &[f32]| {
-        let mean = v.iter().sum::<f32>() / v.len().max(1) as f32;
-        (v.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / v.len().max(1) as f32).sqrt()
-    };
-    let sample = |w: &World, gene: usize| -> Vec<f32> {
-        (0..w.animals.len().min(400))
-            .map(|i| w.animals.gene(i, gene) as f32)
-            .collect()
-    };
-
+fn heterozygosity_declines_and_traits_move() {
     let mut tested = 0;
-    for seed in [1u64, 3, 4, 5] {
+    for seed in [1u64, 2, 3, 4, 5, 6] {
         let mut w = world(seed);
-        let founding = sample(&w, ag::TEMP_OPT);
+        let founding = w.stats;
+        assert!(
+            founding.mean_heterozygosity > 0.5,
+            "seed {seed}: founders should start highly heterozygous, got {}",
+            founding.mean_heterozygosity
+        );
         w.tick_many(TICKS);
         if w.animals.len() < 100 {
-            continue; // nothing left to measure; not a failure of the model
+            continue; // died out; not a failure of the model
         }
         tested += 1;
-        let evolved = sample(&w, ag::TEMP_OPT);
         assert!(
-            spread(&evolved) < spread(&founding),
-            "seed {seed}: founding genotypes are uniform random, so a population \
-             under selection must be narrower than they were: {} -> {}",
-            spread(&founding),
-            spread(&evolved)
+            w.stats.mean_heterozygosity < founding.mean_heterozygosity,
+            "seed {seed}: heterozygosity did not fall under drift: {} -> {}",
+            founding.mean_heterozygosity,
+            w.stats.mean_heterozygosity
         );
+        let moved = (w.stats.mean_size - founding.mean_size).abs() / founding.mean_size.max(1e-3)
+            > 0.05
+            || (w.stats.mean_max_speed - founding.mean_max_speed).abs() > 0.05
+            || (w.stats.mean_diet - founding.mean_diet).abs() > 0.02;
+        assert!(moved, "seed {seed}: no trait moved at all");
     }
     assert!(
         tested > 0,
-        "every world died; cannot say whether selection works"
+        "every world died, so nothing can be said about whether evolution works"
     );
 }
 

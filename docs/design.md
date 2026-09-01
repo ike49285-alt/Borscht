@@ -222,6 +222,44 @@ are strict herbivores now, and their ages are spread across their lifespans
 rather than all starting at zero, which had left several hundred ticks in which
 the population could only shrink.
 
+## Diploidy and sex
+
+Two alleles per locus, stored interleaved so a locus is one cache line.
+Expression is the allele mean; because decoding is linear in the byte, averaging
+the alleles then decoding equals decoding both then averaging, so expression
+costs one add and a shift. Gametes take one allele per locus independently — no
+linkage, which is the right simplification for unlinked quantitative traits.
+
+Mate search walks outward ring by ring from where the animal stands, bounded by a
+cell budget. It deliberately is *not* confined to the interaction block: the block
+exists so feeding writes stay disjoint, and finding a mate only reads the
+partner, so it can range further. It must, too — at equilibrium density a block
+usually holds nobody else, and confining the search to one made every animal
+population fail for want of a mate regardless of how healthy it was.
+
+### Things adding sex broke, and why
+
+**Animals had no directional sense of their own kind.** The sensory inputs
+included crowding as a scalar but no conspecific gradient, so nothing requiring
+an animal to *approach* another could evolve. Harmless under clonal
+reproduction; fatal with sex.
+
+**Indexing a diploid genome by a gene constant reads the wrong locus.** A genome
+is now twice as wide, so `child[ag::SIZE]` is a raw byte in the middle of another
+gene. It survived compilation and every type check, and showed up only as a slow
+matter leak in the conservation test — which is exactly the sort of thing that
+invariant is for.
+
+**Founders arrived starving.** Zero reserve meant the founding cohort spent its
+whole breeding window accumulating matter and thinned past the density at which
+mates can be found. A fed adult in breeding condition carries stores worth more
+than one offspring; anything less is not "in condition".
+
+**Too many founding populations fragment the propagule.** Separate stocks are
+reproductively isolated from the first tick, so two dozen of them means two dozen
+populations each below the density at which mates can be found. One is no better:
+the whole run then turns on a single random genotype. A few is right.
+
 ## The WebAssembly boundary
 
 Raw `extern "C"`, no wasm-bindgen. The interface is entirely numeric, so

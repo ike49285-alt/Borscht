@@ -90,6 +90,16 @@ stats_fields! {
     animal_births_blocked_matter,
     /// Births that failed because the animal pool is full.
     animal_births_blocked_space,
+    /// Births that failed for want of a compatible mate nearby: mate
+    /// limitation, the Allee effect that ends sparse animal populations.
+    animal_births_blocked_mate,
+    /// Candidate partners actually examined during failed mate searches.
+    mate_candidates_seen,
+    /// Candidates rejected because they were too distant genetically.
+    mate_rejected_distance,
+    /// Mean fraction of loci carrying two different alleles. The first thing to
+    /// collapse when a population passes through a bottleneck.
+    mean_heterozygosity,
     /// Population-weighted mean animal body size.
     mean_size,
     /// Mean top speed.

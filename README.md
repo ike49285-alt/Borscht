@@ -18,10 +18,10 @@ python3 -m http.server -d web 8080     # then open http://localhost:8080
 Each organism carries a genome of bytes. Every byte maps onto a trait, mutates
 when it is copied, and — this is the part that matters — **costs something**.
 
-Animals have sixteen genes: body size, top speed, sensory reach, two independent
+Animals have sixteen loci: body size, top speed, sensory reach, two independent
 gut investments, attack, defence, maturity age, offspring investment, mutation
 rate, senescence rate, temperature preference and tolerance, colour, energy
-storage, and breeding threshold. Plants have eight: growth rate, maximum size,
+storage, and breeding threshold — each carrying two alleles. Plants have eight: growth rate, maximum size,
 seed dispersal range, seed investment, toxicity, temperature preference and
 tolerance, and colour.
 
@@ -40,7 +40,7 @@ measured. A wide temperature tolerance lowers the peak, so a generalist never
 beats a specialist on the specialist's home ground.
 
 Animals also carry a small neural network — fourteen senses, ten hidden units,
-four actions — whose weights mutate alongside the genes. It sees local plant,
+three actions — whose weights recombine and mutate alongside the genes. It sees local plant,
 prey and predator density and their gradients, its own energy and age, crowding,
 temperature mismatch, and an internal oscillator; it decides how to turn, how
 hard to move, whether to feed, and whether to breed. Gradients are rotated into
@@ -59,6 +59,28 @@ remove it.
 Nothing dies on a birthday either. Mortality is Gompertz–Makeham: a constant
 hazard plus one rising exponentially with age. Nothing is immortal, so a lineage
 that fails is gone within a few lifetimes.
+
+## Sex
+
+Organisms are diploid. Every locus carries two alleles, expression is their mean
+(additive gene action, the standard model for quantitative traits), and
+reproduction goes through gametes: one allele per locus, assorted independently,
+fused into a zygote. Animal brains recombine by uniform crossover between the
+parents. Heterozygosity is tracked, and it falls over a run — drift removes
+alleles and only mutation puts them back.
+
+Animals must **find a mate**, and there is no selfing fallback: two animals breed
+only if their genetic distance is below a threshold, so reproductive isolation —
+not a label in a registry — is what makes a species a species. Plants outcross
+where they can and self when they cannot, which is what mixed mating systems do.
+
+Sex is expensive, and the model shows it. Clonal reproduction gave 4–5 of 6
+worlds a persistent animal population; with sex it is closer to 2–3 of 6. That is
+not a defect to be tuned away — the two-fold cost of sex and Allee effects in
+small sexual populations are exactly what the literature describes. Adding sex
+also exposed a real gap: animals could sense *crowding* but had no directional
+sense of their own kind, so mate-seeking and breeding aggregation could not
+evolve at all. They now have a conspecific gradient.
 
 ## The environment is not a backdrop
 
@@ -144,15 +166,17 @@ borscht run --population 60000 --ticks 20000 --set temp_stress=2.0 --quiet
 Measured on four cores. WebAssembly figures come from running the same module
 the browser runs, under Node.
 
-| organisms | native ms/tick | wasm ms/tick | wasm ticks/s |
-|-----------|---------------:|-------------:|-------------:|
-| 35,000    | 1.9            | 2.5          | 407          |
-| 177,000   | 10.6           | 15.1         | 66           |
-| 356,000   | 21.9           | 32.7         | 31           |
+| organisms | wasm ms/tick | wasm ticks/s |
+|-----------|-------------:|-------------:|
+| 22,000    | 3.2          | 315          |
+| 111,000   | 17.9         | 56           |
+| 225,000   | 38.5         | 26           |
 
-Cost is linear in population at roughly 52 ns per organism natively and 94 ns in
-WebAssembly, so a full million organisms is about 95 ms per tick in the browser,
-or ten ticks a second. Rendering is decoupled from that: the simulation runs in
+Cost is linear in population at roughly 170 ns per organism in WebAssembly, so a
+full million is about 170 ms per tick, or six ticks a second. Diploidy and sex
+cost most of that: the genome doubled, the brain widened to take a conspecific
+sense, and mate search walks outward until it finds someone. An earlier clonal
+build ran at 94 ns. Rendering is decoupled from that: the simulation runs in
 a worker and the page draws at display rate from whatever frame is current, so
 panning and zooming stay smooth no matter how slowly the world is advancing.
 

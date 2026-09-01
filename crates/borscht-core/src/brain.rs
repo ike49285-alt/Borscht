@@ -12,7 +12,7 @@
 use crate::fastmath::tanh_fast;
 use crate::rng::Rng;
 
-pub const N_IN: usize = 14;
+pub const N_IN: usize = 16;
 pub const N_HID: usize = 10;
 pub const N_OUT: usize = 3;
 
@@ -44,8 +44,18 @@ pub mod input {
     pub const THREAT_GRAD_X: usize = 9;
     pub const THREAT_GRAD_Y: usize = 10;
     pub const CROWDING: usize = 11;
-    pub const TEMP_MISMATCH: usize = 12;
-    pub const OSCILLATOR: usize = 13;
+    /// Direction toward other animals, in the body frame.
+    ///
+    /// Crowding on its own is a scalar: it says how many others are about but
+    /// not which way they lie, so nothing that requires *approaching* a
+    /// conspecific can evolve. With sexual reproduction that is fatal rather
+    /// than merely limiting -- an animal has to find a mate, and a population
+    /// with no way to sense its own kind is left relying on bumping into one
+    /// another by chance, which fails as soon as density drops.
+    pub const KIN_GRAD_X: usize = 12;
+    pub const KIN_GRAD_Y: usize = 13;
+    pub const TEMP_MISMATCH: usize = 14;
+    pub const OSCILLATOR: usize = 15;
 }
 
 /// Output indices, each squashed to `[-1, 1]` by the final tanh.
@@ -108,6 +118,25 @@ pub fn randomize(w: &mut [i8], rng: &mut Rng) {
     }
 }
 
+/// Recombine two brains and mutate the result.
+///
+/// Uniform crossover: each weight is taken from one parent or the other. Real
+/// recombination happens between chromosomes rather than between individual
+/// synapses, but the network has no genetic architecture to respect, and
+/// uniform crossover is the standard choice where there is no linkage to model.
+pub fn recombine_into(a: &[i8], b: &[i8], child: &mut [i8], rate: f32, rng: &mut Rng) {
+    debug_assert_eq!(a.len(), BRAIN_LEN);
+    debug_assert_eq!(b.len(), BRAIN_LEN);
+    debug_assert_eq!(child.len(), BRAIN_LEN);
+    for i in 0..BRAIN_LEN {
+        let mut w = if rng.chance(0.5) { a[i] } else { b[i] };
+        if rng.chance(rate) {
+            w = (w as f32 + rng.gauss() * 12.0).clamp(-127.0, 127.0) as i8;
+        }
+        child[i] = w;
+    }
+}
+
 /// Copy a brain with mutation. `rate` is per weight.
 pub fn mutate_into(parent: &[i8], child: &mut [i8], rate: f32, rng: &mut Rng) {
     debug_assert_eq!(parent.len(), BRAIN_LEN);
@@ -144,7 +173,7 @@ mod tests {
     #[test]
     fn layout_is_the_documented_size() {
         assert_eq!(BRAIN_LEN, 3 * N_HID + N_IN * N_HID + N_HID + N_OUT);
-        assert_eq!(BRAIN_LEN, 183);
+        assert_eq!(BRAIN_LEN, 3 * 10 + 16 * 10 + 10 + 3);
     }
 
     #[test]

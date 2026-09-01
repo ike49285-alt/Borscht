@@ -17,6 +17,19 @@ use std::sync::OnceLock;
 pub const ANIMAL_GENE_COUNT: usize = 16;
 pub const PLANT_GENE_COUNT: usize = 8;
 
+/// Organisms are diploid: two alleles per locus.
+///
+/// Asexual clonal reproduction is honest for some things and wrong for most
+/// animals, and it removes the mechanisms that make evolution in small
+/// populations behave the way it does -- recombination, heterozygosity, and
+/// segregation. Alleles are stored interleaved, `[locus0_a, locus0_b,
+/// locus1_a, ...]`, so reading a locus touches one cache line.
+pub const PLOIDY: usize = 2;
+
+/// Storage width of a diploid genome.
+pub const ANIMAL_GENOME_LEN: usize = ANIMAL_GENE_COUNT * PLOIDY;
+pub const PLANT_GENOME_LEN: usize = PLANT_GENE_COUNT * PLOIDY;
+
 /// Animal gene indices.
 pub mod ag {
     /// Body size. Raises storage, attack and defence; raises metabolism as
@@ -216,17 +229,97 @@ pub fn tables() -> &'static GeneTables {
     TABLES.get_or_init(GeneTables::build)
 }
 
-pub type AnimalGenome = [u8; ANIMAL_GENE_COUNT];
-pub type PlantGenome = [u8; PLANT_GENE_COUNT];
+pub type AnimalGenome = [u8; ANIMAL_GENOME_LEN];
+pub type PlantGenome = [u8; PLANT_GENOME_LEN];
+/// One haploid set: what a gamete carries.
+pub type AnimalGamete = [u8; ANIMAL_GENE_COUNT];
+pub type PlantGamete = [u8; PLANT_GENE_COUNT];
+
+/// The expressed value of a locus: the mean of its two alleles.
+///
+/// Gene action is additive, the standard model for quantitative traits. Because
+/// decoding is linear in the byte, averaging the alleles and then decoding gives
+/// exactly the same answer as decoding both and averaging, so expression costs
+/// one add and one shift.
+#[inline(always)]
+pub fn express(a: u8, b: u8) -> u8 {
+    ((a as u16 + b as u16) >> 1) as u8
+}
 
 #[inline(always)]
 pub fn animal_trait(genome: &AnimalGenome, gene: usize) -> f32 {
-    tables().animal[gene][genome[gene] as usize]
+    let i = gene * PLOIDY;
+    tables().animal[gene][express(genome[i], genome[i + 1]) as usize]
 }
 
 #[inline(always)]
 pub fn plant_trait(genome: &PlantGenome, gene: usize) -> f32 {
-    tables().plant[gene][genome[gene] as usize]
+    let i = gene * PLOIDY;
+    tables().plant[gene][express(genome[i], genome[i + 1]) as usize]
+}
+
+/// Produce a gamete: one allele per locus, chosen independently.
+///
+/// Independent assortment across loci. There is no linkage, which is the right
+/// simplification for unlinked quantitative traits and removes any need for a
+/// chromosome map.
+pub fn animal_gamete(genome: &AnimalGenome, rate: f32, rng: &mut Rng) -> AnimalGamete {
+    let mut out = [0u8; ANIMAL_GENE_COUNT];
+    for (locus, slot) in out.iter_mut().enumerate() {
+        let i = locus * PLOIDY + rng.below(PLOIDY as u32) as usize;
+        let mut allele = genome[i];
+        if rng.chance(rate) {
+            allele = mutate_byte(allele, rng);
+        }
+        *slot = allele;
+    }
+    out
+}
+
+pub fn plant_gamete(genome: &PlantGenome, rate: f32, rng: &mut Rng) -> PlantGamete {
+    let mut out = [0u8; PLANT_GENE_COUNT];
+    for (locus, slot) in out.iter_mut().enumerate() {
+        let i = locus * PLOIDY + rng.below(PLOIDY as u32) as usize;
+        let mut allele = genome[i];
+        if rng.chance(rate) {
+            allele = mutate_byte(allele, rng);
+        }
+        *slot = allele;
+    }
+    out
+}
+
+/// Fuse two gametes into a zygote.
+pub fn animal_zygote(a: &AnimalGamete, b: &AnimalGamete) -> AnimalGenome {
+    let mut out = [0u8; ANIMAL_GENOME_LEN];
+    for locus in 0..ANIMAL_GENE_COUNT {
+        out[locus * PLOIDY] = a[locus];
+        out[locus * PLOIDY + 1] = b[locus];
+    }
+    out
+}
+
+pub fn plant_zygote(a: &PlantGamete, b: &PlantGamete) -> PlantGenome {
+    let mut out = [0u8; PLANT_GENOME_LEN];
+    for locus in 0..PLANT_GENE_COUNT {
+        out[locus * PLOIDY] = a[locus];
+        out[locus * PLOIDY + 1] = b[locus];
+    }
+    out
+}
+
+/// Fraction of loci carrying two different alleles.
+///
+/// The standard measure of genetic diversity within an individual, and the one
+/// that collapses first when a population goes through a bottleneck.
+pub fn animal_heterozygosity(genome: &AnimalGenome) -> f32 {
+    let mut het = 0;
+    for locus in 0..ANIMAL_GENE_COUNT {
+        if genome[locus * PLOIDY] != genome[locus * PLOIDY + 1] {
+            het += 1;
+        }
+    }
+    het as f32 / ANIMAL_GENE_COUNT as f32
 }
 
 /// How far a single mutation can shift a gene, in byte units out of 255.
@@ -277,7 +370,11 @@ pub fn animal_distance(a: &AnimalGenome, b: &AnimalGenome) -> f32 {
     let mut acc = 0.0f32;
     let mut norm = 0.0f32;
     for (i, spec) in ANIMAL_GENES.iter().enumerate() {
-        let d = (a[i] as f32 - b[i] as f32) * (1.0 / 255.0);
+        // Compared on expressed values: what selection and mate choice act on
+        // is the phenotype, not which allele happens to sit on which copy.
+        let ea = express(a[i * PLOIDY], a[i * PLOIDY + 1]) as f32;
+        let eb = express(b[i * PLOIDY], b[i * PLOIDY + 1]) as f32;
+        let d = (ea - eb) * (1.0 / 255.0);
         acc += spec.species_weight * d * d;
         norm += spec.species_weight;
     }
@@ -288,7 +385,9 @@ pub fn plant_distance(a: &PlantGenome, b: &PlantGenome) -> f32 {
     let mut acc = 0.0f32;
     let mut norm = 0.0f32;
     for (i, spec) in PLANT_GENES.iter().enumerate() {
-        let d = (a[i] as f32 - b[i] as f32) * (1.0 / 255.0);
+        let ea = express(a[i * PLOIDY], a[i * PLOIDY + 1]) as f32;
+        let eb = express(b[i * PLOIDY], b[i * PLOIDY + 1]) as f32;
+        let d = (ea - eb) * (1.0 / 255.0);
         acc += spec.species_weight * d * d;
         norm += spec.species_weight;
     }
@@ -317,8 +416,8 @@ mod tests {
     #[test]
     fn traits_decode_across_full_range() {
         for (gi, spec) in ANIMAL_GENES.iter().enumerate() {
-            let mut lo_genome = [0u8; ANIMAL_GENE_COUNT];
-            let mut hi_genome = [255u8; ANIMAL_GENE_COUNT];
+            let mut lo_genome = [0u8; ANIMAL_GENOME_LEN];
+            let mut hi_genome = [255u8; ANIMAL_GENOME_LEN];
             lo_genome[gi] = 0;
             hi_genome[gi] = 255;
             assert!(
@@ -333,8 +432,8 @@ mod tests {
             );
         }
         for (gi, spec) in PLANT_GENES.iter().enumerate() {
-            let lo_genome = [0u8; PLANT_GENE_COUNT];
-            let hi_genome = [255u8; PLANT_GENE_COUNT];
+            let lo_genome = [0u8; PLANT_GENOME_LEN];
+            let hi_genome = [255u8; PLANT_GENOME_LEN];
             assert!(
                 (plant_trait(&lo_genome, gi) - spec.lo).abs() < 1e-5,
                 "{}",
@@ -389,7 +488,7 @@ mod tests {
     #[test]
     fn mutation_stays_in_bounds() {
         let mut rng = Rng::new(7, 1);
-        let mut genome = [128u8; ANIMAL_GENE_COUNT];
+        let mut genome = [128u8; ANIMAL_GENOME_LEN];
         for _ in 0..200_000 {
             genome = mutate_animal(&genome, 0.5, &mut rng);
             for (gi, spec) in ANIMAL_GENES.iter().enumerate() {
@@ -409,7 +508,7 @@ mod tests {
         let mut rng = Rng::new(3, 2);
         let mut at_edge = 0;
         for _ in 0..20_000 {
-            let mut genome = [250u8; ANIMAL_GENE_COUNT];
+            let mut genome = [250u8; ANIMAL_GENOME_LEN];
             for _ in 0..20 {
                 genome = mutate_animal(&genome, 1.0, &mut rng);
             }
@@ -426,26 +525,121 @@ mod tests {
     #[test]
     fn zero_rate_is_a_faithful_copy() {
         let mut rng = Rng::new(1, 1);
-        let parent = [17u8; ANIMAL_GENE_COUNT];
+        let parent = [17u8; ANIMAL_GENOME_LEN];
         assert_eq!(mutate_animal(&parent, 0.0, &mut rng), parent);
     }
 
     #[test]
     fn distance_is_zero_for_clones_and_one_for_opposites() {
-        let a = [0u8; ANIMAL_GENE_COUNT];
-        let b = [255u8; ANIMAL_GENE_COUNT];
+        let a = [0u8; ANIMAL_GENOME_LEN];
+        let b = [255u8; ANIMAL_GENOME_LEN];
         assert_eq!(animal_distance(&a, &a), 0.0);
         assert!((animal_distance(&a, &b) - 1.0).abs() < 1e-5);
-        assert!(animal_distance(&a, &b) > animal_distance(&a, &[128u8; ANIMAL_GENE_COUNT]));
+        assert!(animal_distance(&a, &b) > animal_distance(&a, &[128u8; ANIMAL_GENOME_LEN]));
     }
 
     /// Hue drift alone must not be read as speciation.
     #[test]
     fn neutral_genes_do_not_drive_speciation() {
-        let a = [128u8; ANIMAL_GENE_COUNT];
+        let a = [128u8; ANIMAL_GENOME_LEN];
         let mut b = a;
-        b[ag::HUE] = 255;
+        b[ag::HUE * PLOIDY] = 255;
+        b[ag::HUE * PLOIDY + 1] = 255;
         assert_eq!(animal_distance(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn expression_is_the_mean_of_the_alleles() {
+        assert_eq!(express(0, 0), 0);
+        assert_eq!(express(255, 255), 255);
+        assert_eq!(express(0, 254), 127);
+        // Averaging alleles then decoding must equal decoding then averaging,
+        // which is what makes expression one add and a shift.
+        let t = tables();
+        for (a, b) in [(10u8, 200u8), (0, 255), (77, 78)] {
+            let direct = (t.animal[ag::SIZE][a as usize] + t.animal[ag::SIZE][b as usize]) * 0.5;
+            let expressed = t.animal[ag::SIZE][express(a, b) as usize];
+            assert!(
+                (direct - expressed).abs() < 0.02,
+                "{a},{b}: {direct} vs {expressed}"
+            );
+        }
+    }
+
+    #[test]
+    fn gametes_carry_one_allele_per_locus_from_the_parent() {
+        let mut rng = Rng::new(5, 1);
+        let mut parent = [0u8; ANIMAL_GENOME_LEN];
+        for locus in 0..ANIMAL_GENE_COUNT {
+            parent[locus * PLOIDY] = 10;
+            parent[locus * PLOIDY + 1] = 200;
+        }
+        let mut saw_low = false;
+        let mut saw_high = false;
+        for _ in 0..200 {
+            let g = animal_gamete(&parent, 0.0, &mut rng);
+            for allele in g {
+                assert!(
+                    allele == 10 || allele == 200,
+                    "gamete invented an allele: {allele}"
+                );
+                saw_low |= allele == 10;
+                saw_high |= allele == 200;
+            }
+        }
+        assert!(saw_low && saw_high, "assortment is not independent");
+    }
+
+    #[test]
+    fn a_zygote_carries_one_set_from_each_parent() {
+        let a = [7u8; ANIMAL_GENE_COUNT];
+        let b = [200u8; ANIMAL_GENE_COUNT];
+        let child = animal_zygote(&a, &b);
+        for locus in 0..ANIMAL_GENE_COUNT {
+            assert_eq!(child[locus * PLOIDY], 7);
+            assert_eq!(child[locus * PLOIDY + 1], 200);
+        }
+        // Fully heterozygous, and expressed halfway between the parents.
+        assert!((animal_heterozygosity(&child) - 1.0).abs() < 1e-6);
+        assert_eq!(express(7, 200), 103);
+    }
+
+    #[test]
+    fn heterozygosity_measures_allelic_difference() {
+        let identical = [42u8; ANIMAL_GENOME_LEN];
+        assert_eq!(animal_heterozygosity(&identical), 0.0);
+        let mut half = identical;
+        for locus in 0..ANIMAL_GENE_COUNT / 2 {
+            half[locus * PLOIDY + 1] = 200;
+        }
+        assert!((animal_heterozygosity(&half) - 0.5).abs() < 1e-6);
+    }
+
+    /// Selfing a heterozygote must segregate: some offspring homozygous, some
+    /// not. This is the mechanism inbreeding depression would act through.
+    #[test]
+    fn selfing_a_heterozygote_segregates() {
+        let mut rng = Rng::new(8, 2);
+        let mut parent = [0u8; ANIMAL_GENOME_LEN];
+        for locus in 0..ANIMAL_GENE_COUNT {
+            parent[locus * PLOIDY] = 30;
+            parent[locus * PLOIDY + 1] = 220;
+        }
+        let mut homozygous = 0;
+        let trials = 400;
+        for _ in 0..trials {
+            let a = animal_gamete(&parent, 0.0, &mut rng);
+            let b = animal_gamete(&parent, 0.0, &mut rng);
+            let child = animal_zygote(&a, &b);
+            if animal_heterozygosity(&child) < 0.5 {
+                homozygous += 1;
+            }
+        }
+        assert!(homozygous > 0, "selfing never produced a homozygote");
+        assert!(
+            homozygous < trials,
+            "selfing never preserved heterozygosity"
+        );
     }
 
     #[test]

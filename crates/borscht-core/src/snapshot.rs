@@ -13,13 +13,13 @@
 
 use crate::brain::BRAIN_LEN;
 use crate::config::{Config, PARAMS};
-use crate::genome::{ANIMAL_GENE_COUNT, PLANT_GENE_COUNT};
+use crate::genome::{ANIMAL_GENOME_LEN, PLANT_GENOME_LEN};
 use crate::pools::ACTION_COUNT;
 use crate::species::{Record, Registry, MAX_SPECIES};
 use crate::world::World;
 
 const MAGIC: &[u8; 8] = b"BORSCHT\x01";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -243,7 +243,7 @@ pub fn save(world: &World) -> Vec<u8> {
     w.u16s(&world.plants.age[..np]);
     w.u16s(&world.plants.species[..np]);
     w.u32s(&world.plants.id[..np]);
-    w.bytes(&world.plants.genome[..np * PLANT_GENE_COUNT]);
+    w.bytes(&world.plants.genome[..np * PLANT_GENOME_LEN]);
 
     let na = world.animals.len();
     w.u32(na as u32);
@@ -256,7 +256,7 @@ pub fn save(world: &World) -> Vec<u8> {
     w.u16s(&world.animals.age[..na]);
     w.u16s(&world.animals.species[..na]);
     w.u32s(&world.animals.id[..na]);
-    w.bytes(&world.animals.genome[..na * ANIMAL_GENE_COUNT]);
+    w.bytes(&world.animals.genome[..na * ANIMAL_GENOME_LEN]);
     // i8 and u8 have the same representation; brains are raw bytes on the wire.
     w.bytes(unsafe {
         std::slice::from_raw_parts(world.animals.brain.as_ptr() as *const u8, na * BRAIN_LEN)
@@ -331,7 +331,7 @@ pub fn load(bytes: &[u8]) -> Result<World, SnapshotError> {
     r.u16s(&mut world.plants.age[..np])?;
     r.u16s(&mut world.plants.species[..np])?;
     r.u32s(&mut world.plants.id[..np])?;
-    world.plants.genome[..np * PLANT_GENE_COUNT].copy_from_slice(r.take(np * PLANT_GENE_COUNT)?);
+    world.plants.genome[..np * PLANT_GENOME_LEN].copy_from_slice(r.take(np * PLANT_GENOME_LEN)?);
     world.plants.alive[..np].fill(true);
 
     let na = r.u32()? as usize;
@@ -348,7 +348,7 @@ pub fn load(bytes: &[u8]) -> Result<World, SnapshotError> {
     r.u16s(&mut world.animals.age[..na])?;
     r.u16s(&mut world.animals.species[..na])?;
     r.u32s(&mut world.animals.id[..na])?;
-    world.animals.genome[..na * ANIMAL_GENE_COUNT].copy_from_slice(r.take(na * ANIMAL_GENE_COUNT)?);
+    world.animals.genome[..na * ANIMAL_GENOME_LEN].copy_from_slice(r.take(na * ANIMAL_GENOME_LEN)?);
     let brains = r.take(na * BRAIN_LEN)?;
     for (slot, byte) in world.animals.brain[..na * BRAIN_LEN].iter_mut().zip(brains) {
         *slot = *byte as i8;
