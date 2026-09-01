@@ -2,13 +2,13 @@
 //
 // The engine is a factory rather than a module bound to `self`, because it has
 // two homes. In the multi-file app it runs in a Worker: a tick at a large
-// population takes long enough that running it on the UI thread would drop the
+// muster takes long enough that running it on the UI thread would drop the
 // frame rate to the tick rate and make panning feel broken. In the single-file
 // build it runs on the main thread, because that build has no second file to
-// load a worker from -- and at the sizes the viewer now offers, a tick is a
-// fraction of a frame, so there is nothing to decouple.
+// load a worker from.
 //
-// The two differ in exactly two things, which is why they are the two arguments:
+// The two differ in exactly two things, which is why they are the two
+// arguments:
 //
 // * `post` delivers a message outward. In a worker that is `self.postMessage`
 //   with a transfer list; in-page it is a direct call and the transfer list is
@@ -38,59 +38,6 @@ export function createEngine({ post, schedule }) {
 
   let tickMsAverage = 0;
 
-  // ---- rewind -------------------------------------------------------------
-  //
-  // Periodic snapshots kept in a ring, so the timeline can be scrubbed
-  // backwards. Seeking loads the newest checkpoint at or before the target and
-  // re-ticks forward from there; because a snapshot carries the generator
-  // state, replaying reproduces exactly the run that was already seen rather
-  // than a new one.
-  //
-  // The ring is bounded by bytes rather than by count: a snapshot scales with
-  // the population, so a fixed count would quietly consume a gigabyte in a big
-  // world.
-  const CHECKPOINT_BUDGET = 96 * 1024 * 1024;
-  let checkpointEvery = 250;
-  let checkpoints = [];
-  const lineageEvery = 12;
-  let framesSincelineages = 0;
-
-  function checkpoint(force = false) {
-    if (!sim) return;
-    const tick = sim.tick(0);
-    if (!force && checkpoints.length && tick - checkpoints[checkpoints.length - 1].tick < checkpointEvery) {
-      return;
-    }
-    if (checkpoints.length && checkpoints[checkpoints.length - 1].tick === tick) return;
-    checkpoints.push({ tick, bytes: sim.save() });
-    let total = checkpoints.reduce((n, c) => n + c.bytes.length, 0);
-    while (checkpoints.length > 2 && total > CHECKPOINT_BUDGET) {
-      total -= checkpoints.shift().bytes.length;
-    }
-  }
-
-  function seek(target) {
-    if (!sim || !checkpoints.length) return;
-    let at = checkpoints[0];
-    for (const c of checkpoints) {
-      if (c.tick <= target) at = c;
-      else break;
-    }
-    sim.load(at.bytes);
-    const forward = Math.max(0, Math.min(target - at.tick, 20000));
-    if (forward > 0) sim.tick(forward);
-    // Everything after the seek point is a future that has not happened yet.
-    checkpoints = checkpoints.filter((c) => c.tick <= sim.tick(0));
-    if (!checkpoints.length) checkpoint(true);
-  }
-
-  function history() {
-    return {
-      oldest: checkpoints.length ? checkpoints[0].tick : 0,
-      checkpoints: checkpoints.map((c) => c.tick),
-    };
-  }
-
   function frame() {
     const { count, stride, plants, bytes } = sim.render(colorMode);
     const needed = count * stride;
@@ -106,19 +53,6 @@ export function createEngine({ post, schedule }) {
     const raw = sim.stats();
     for (let i = 0; i < STAT_NAMES.length; i += 1) stats[STAT_NAMES[i]] = raw[i];
 
-    // The tree changes far more slowly than the world does, and sending
-    // hundreds of branches every frame is wasted bandwidth.
-    let tree = null;
-    framesSincelineages += 1;
-    if (framesSincelineages >= lineageEvery || extra.treeNow) {
-      framesSincelineages = 0;
-      tree = {
-        lineages: sim.lineages(2, true),
-        total: sim.lineageTotal(true),
-        dropped: sim.lineageDropped(true),
-      };
-    }
-
     post(
       {
         type: 'frame',
@@ -127,13 +61,12 @@ export function createEngine({ post, schedule }) {
         stride,
         plants,
         stats,
-        species: sim.species(24, true),
-        plantSpecies: sim.species(12, false),
+        red: sim.teamCount(0),
+        blue: sim.teamCount(1),
+        decided: sim.decided,
         worldSize: sim.worldSize,
         tickMs: tickMsAverage,
         running,
-        tree,
-        history: history(),
         ...extra,
       },
       [buffer],
@@ -146,7 +79,6 @@ export function createEngine({ post, schedule }) {
     if (running) {
       const start = performance.now();
       sim.tick(ticksPerFrame);
-      checkpoint();
       const elapsed = (performance.now() - start) / ticksPerFrame;
       // Smoothed so the readout is legible rather than jittering every frame.
       tickMsAverage = tickMsAverage === 0 ? elapsed : tickMsAverage * 0.9 + elapsed * 0.1;
@@ -166,8 +98,6 @@ export function createEngine({ post, schedule }) {
     if (overrides) sim.configure(PARAMS, overrides);
     sim.create(seed);
     tickMsAverage = 0;
-    checkpoints = [];
-    checkpoint(true);
   }
 
   // Messages that arrived before there was a world to apply them to.
@@ -221,16 +151,7 @@ export function createEngine({ post, schedule }) {
         case 'step':
           running = false;
           sim.tick(msg.count ?? 1);
-          checkpoint();
-          publish({ treeNow: true });
-          break;
-        case 'seek':
-          running = false;
-          seek(msg.tick);
-          publish({ treeNow: true });
-          break;
-        case 'checkpointEvery':
-          checkpointEvery = Math.max(25, msg.value | 0);
+          publish();
           break;
         case 'speed':
           ticksPerFrame = Math.max(1, msg.value | 0);
@@ -242,29 +163,12 @@ export function createEngine({ post, schedule }) {
         case 'param':
           sim.setParam(msg.id, msg.value);
           break;
-        case 'matter':
-          // An intervention, not a parameter: it can kill, so the checkpoint
-          // ring and the tree both have to see the world as it is afterwards.
-          sim.setMatter(msg.value);
-          checkpoint(true);
-          publish({ treeNow: true });
-          break;
         case 'recycle':
           // Frame buffers come back after the host uploads them.
           if (spare.length < 3) spare.push(msg.buffer);
           break;
         case 'inspect':
           post({ type: 'inspected', organism: sim.inspect(msg.x, msg.y, msg.radius) });
-          break;
-        case 'save':
-          post({ type: 'saved', bytes: sim.save() });
-          break;
-        case 'load':
-          running = false;
-          sim.load(new Uint8Array(msg.bytes));
-          checkpoints = [];
-          checkpoint(true);
-          publish({ treeNow: true });
           break;
         default:
           break;

@@ -155,8 +155,8 @@
     <canvas id="view"></canvas>
     <canvas id="tree" hidden></canvas>
     <div id="views" role="group" aria-label="View">
-      <button id="view-world" class="seg on" aria-pressed="true">World</button>
-      <button id="view-tree" class="seg" aria-pressed="false">Tree of life</button>
+      <button id="view-world" class="seg on" aria-pressed="true">Field</button>
+      <button id="view-tree" class="seg" aria-pressed="false">Order of battle</button>
     </div>
     <div id="timebar">
       <button id="t-play" class="tb primary" aria-label="Play">▶</button>
@@ -167,10 +167,10 @@
     </div>
     <div id="hud">
       <div class="row"><span class="muted">tick</span><b id="h-tick">0</b></div>
-      <div class="row"><span class="muted">plants</span><b id="h-plants">0</b></div>
-      <div class="row"><span class="muted">animals</span><b id="h-animals">0</b></div>
-      <div class="row"><span class="muted">species</span><b id="h-species">0</b></div>
-      <div class="row"><span class="muted">carnivores</span><b id="h-carn">0%</b></div>
+      <div class="row"><span class="muted">red</span><b id="h-plants">0</b></div>
+      <div class="row"><span class="muted">blue</span><b id="h-animals">0</b></div>
+      <div class="row"><span class="muted">holding</span><b id="h-species">0</b></div>
+      <div class="row"><span class="muted">routing</span><b id="h-carn">0%</b></div>
       <div class="row"><span class="muted">ms/tick</span><b id="h-ms">–</b></div>
       <div class="row"><span class="muted">fps</span><b id="h-fps">–</b></div>
     </div>
@@ -179,7 +179,7 @@
   </div>
 
   <div id="panel">
-    <h1>Borscht <span>plants and animals, evolving</span></h1>
+    <h1>Borscht <span>mass battle, two armies</span></h1>
 
     <div class="card">
       <div class="controls">
@@ -188,58 +188,55 @@
       <div style="margin-top:9px; display:flex; flex-direction:column; gap:7px">
         <label>colour
           <select id="color" style="flex:1">
-            <option value="0">species</option>
-            <option value="1">diet</option>
-            <option value="2">energy</option>
-            <option value="3">age</option>
-            <option value="4">size</option>
+            <option value="0">side</option>
+            <option value="1">unit type</option>
+            <option value="2">health</option>
+            <option value="3">nerve</option>
           </select>
         </label>
         <label>scale
           <select id="scale" style="flex:1">
-            <option value="5000">5k organisms</option>
-            <option value="10000">10k organisms</option>
-            <option value="15000" selected>15k organisms</option>
-            <option value="25000">25k organisms</option>
+            <option value="20000">20k men</option>
+            <option value="100000" selected>100k men</option>
+            <option value="250000">250k men</option>
+            <option value="500000">500k men</option>
+            <option value="1000000">1M men (a slideshow)</option>
           </select>
         </label>
         <label>seed <input id="seed" type="number" value="1" min="0" step="1"></label>
-        <label>biomass <input id="matter" type="range" min="0.1" max="3" step="0.05" value="1"><span class="val" id="matter-val">1.00&times;</span></label>
+        
       </div>
-      <div class="hint" style="margin-top:8px">Biomass adds or removes matter, as a multiple of what the world was founded with. Taking it out strips the soil first &mdash; that is where the dead are &mdash; then thins the plants, then starves and kills animals.</div>
-      <div class="hint" style="margin-top:8px">Drag to pan, scroll to zoom, click an organism to inspect it. Drag the timeline to rewind.</div>
+      
+      <div class="hint" style="margin-top:8px">Drag to pan, scroll or pinch to zoom, click a man to inspect him.</div>
     </div>
 
     <div class="card" id="tree-card" hidden>
-      <h2>Tree of life</h2>
-      <div class="hint" id="tree-summary">no lineages yet</div>
-      <label style="margin-top:8px">min peak <input id="tree-min" type="range" min="1" max="30" value="3"><span class="val" id="tree-min-val">3</span></label>
-      <div class="hint" style="margin-top:6px">Each line is one lineage, from the tick it split off to the tick it died out. Colour is inherited with drift, so relatives sit near each other in hue.</div>
+      <h2>Order of battle</h2>
+      <div class="hint" id="tree-summary">no engagement yet</div>
+    </div>
     </div>
 
     <div class="card">
-      <h2>Populations</h2>
+      <h2>Strength</h2>
       <canvas id="chart-pop" class="chart"></canvas>
       <div class="legend">
-        <div class="item"><i class="swatch" style="background:#4ade80"></i>plants<span style="flex:1"></span><span id="c-plants">0</span></div>
-        <div class="item"><i class="swatch" style="background:#60a5fa"></i>animals<span style="flex:1"></span><span id="c-animals">0</span></div>
+        <div class="item"><i class="swatch" style="background:#eb4e46"></i>red<span style="flex:1"></span><span id="c-plants">0</span></div>
+        <div class="item"><i class="swatch" style="background:#4e96f5"></i>blue<span style="flex:1"></span><span id="c-animals">0</span></div>
       </div>
     </div>
 
     <div class="card">
-      <h2>Matter</h2>
+      <h2>Still fighting</h2>
       <canvas id="chart-matter" class="chart"></canvas>
       <div class="legend">
-        <div class="item"><i class="swatch" style="background:#4ade80"></i>biomass<span style="flex:1"></span><span id="c-biomass">0</span></div>
-        <div class="item"><i class="swatch" style="background:#a78bfa"></i>soil<span style="flex:1"></span><span id="c-soil">0</span></div>
-        <div class="item"><i class="swatch" style="background:#fbbf24"></i>bodies<span style="flex:1"></span><span id="c-bodies">0</span></div>
+        <div class="item"><i class="swatch" style="background:#eb4e46"></i>red holding<span style="flex:1"></span><span id="c-biomass">0</span></div>
+        <div class="item"><i class="swatch" style="background:#4e96f5"></i>blue holding<span style="flex:1"></span><span id="c-soil">0</span></div>
+        <div class="item"><i class="swatch" style="background:#facc15"></i>routing<span style="flex:1"></span><span id="c-bodies">0</span></div>
+      </div>
       </div>
     </div>
 
-    <div class="card">
-      <h2>Animal species</h2>
-      <div class="legend" id="species-list"></div>
-    </div>
+    
 
     <div class="card">
       <h2>Evolved traits</h2>

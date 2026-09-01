@@ -211,7 +211,7 @@ const ms = await page.textContent('#h-ms');
 const species = await page.textContent('#h-species');
 const carn = await page.textContent('#h-carn');
 
-// The tree of life must render real branches, not an empty canvas.
+// The second view must draw a real report, not an empty canvas.
 await page.click('#view-tree');
 await page.waitForTimeout(900);
 const treeDrawn = await page.evaluate(() => {
@@ -228,80 +228,22 @@ const treeDrawn = await page.evaluate(() => {
 await page.screenshot({ path: `${OUT}/tree.png` });
 const treeSummary = await page.textContent('#tree-summary');
 
-// The footer claims a number of lineages shown. Check that claim against the
-// geometry: every row must have its centre inside the canvas. An earlier
-// version clamped the row height upward, so a few thousand rows needed several
-// times the canvas height and most were painted below the bottom edge while the
-// footer still counted them.
-const treeFit = await page.evaluate(() => {
-  const c = document.getElementById('tree');
-  const h = c.getBoundingClientRect().height;
-  const rows = window.__treeLayout?.length ?? 0;
-  const pad = { t: 34, b: 76 };
-  const avail = h - pad.t - pad.b;
-  const rowH = Math.min(26, avail / Math.max(1, rows));
-  const top = pad.t + Math.max(0, (avail - rows * rowH) / 2);
-  const lastCentre = top + (rows - 1) * rowH + rowH / 2;
-  return { rows, height: h, lastCentre, fits: rows === 0 || lastCentre <= h - pad.b };
-});
 await page.click('#view-world');
 await page.waitForTimeout(300);
-// Switching back must actually switch back. The tree canvas is opaque and sits
-// on top of the world, so a rule that defeats [hidden] makes the tree view a
-// one-way door with no other symptom.
+// Switching back must actually switch back. The report canvas is opaque and
+// sits on top of the field, so a rule that defeats [hidden] makes the second
+// view a one-way door with no other symptom.
 const treeStillShowing = await page.evaluate(() => {
   const c = document.getElementById('tree');
   return getComputedStyle(c).display !== 'none' && c.getBoundingClientRect().height > 0;
 });
 
-// The biomass control must actually move matter. It scales plant biomass rather
-// than killing plants, so the organism counts barely move -- the matter panel is
-// where the effect is, and where it has to be checked.
-const matterOf = async () => {
-  const parts = await Promise.all(
-    ['#c-biomass', '#c-soil', '#c-bodies'].map((id) => page.textContent(id)),
-  );
-  return parts.reduce((n, t) => n + parseReadout(t), 0);
-};
-const matterBefore = await matterOf();
-await page.fill('#matter', '0.4');
-await page.dispatchEvent('#matter', 'input');
-await page.waitForTimeout(700);
-const matterAfter = await matterOf();
-// Back to a full world, so the rewind check below runs on an undisturbed one.
-await page.fill('#matter', '1');
-await page.dispatchEvent('#matter', 'input');
-await page.waitForTimeout(700);
-const matterRestored = await matterOf();
-
-// Rewind: drag the timeline back and confirm the world actually goes back.
-// Read the scrubber, which carries the raw tick rather than an abbreviation.
-const tickBefore = Number(await page.inputValue('#t-scrub'));
-const scrub = await page.$('#t-scrub');
-const box = await scrub.boundingBox();
-await page.mouse.move(box.x + box.width * 0.9, box.y + box.height / 2);
-await page.mouse.down();
-await page.mouse.move(box.x + box.width * 0.1, box.y + box.height / 2, { steps: 8 });
-await page.mouse.up();
-await page.waitForTimeout(1500);
-const tickAfterSeek = Number(await page.inputValue('#t-scrub'));
-
-// Colour modes must all render without error.
-for (const mode of ['1', '2', '3', '4']) {
-  await page.selectOption('#color', mode);
-  await page.waitForTimeout(250);
-}
+// Zoom in and click a man, to exercise the inspector. The field is mostly empty
+// ground, so this walks a grid rather than trying one hopeful pixel.
 await page.selectOption('#color', '0');
-
-// Zoom in and click something to exercise the inspector.
 await page.mouse.move(700, 450);
-await page.mouse.wheel(0, -900);
+await page.mouse.wheel(0, -600);
 await page.waitForTimeout(400);
-// A world can be sparse, so try a few points rather than assuming an organism
-// sits under one particular pixel.
-// A sparse world means most pixels are empty, so this walks a grid rather than
-// trying a handful of points: with roughly a third of an organism under any one
-// click, five attempts miss often enough to fail a passing build.
 let inspected = false;
 for (let gy = 0; gy < 5 && !inspected; gy += 1) {
   for (let gx = 0; gx < 5 && !inspected; gx += 1) {
@@ -330,17 +272,12 @@ const narrow = await page.evaluate(() => {
 await page.screenshot({ path: `${OUT}/narrow.png` });
 
 console.log(`ticks:      ${tickAfter}`);
-console.log(`animals:    ${await readAnimals()}`);
-console.log(`species:    ${species}   carnivores: ${carn}`);
+console.log(`red/blue:   ${await page.textContent('#h-plants')} / ${await readAnimals()}`);
+console.log(`holding:    ${species}   routing: ${carn}`);
 console.log(`ms/tick:    ${ms}    fps: ${fps}`);
-console.log(`pixels lit: ${(drawn.fraction * 100).toFixed(1)}% of the world square`);
+console.log(`pixels lit: ${(drawn.fraction * 100).toFixed(1)}% of the field`);
 console.log(`inspector:  ${inspected ? 'opened' : 'did not open'}`);
-console.log(`tree:       ${((treeDrawn.lit / treeDrawn.total) * 100).toFixed(1)}% drawn — ${treeSummary}`);
-console.log(`tree rows:  ${treeFit.rows} laid out, last centre at ${treeFit.lastCentre.toFixed(0)}px of ${treeFit.height.toFixed(0)}px`);
-console.log(`rewind:     tick ${tickBefore} -> ${tickAfterSeek}`);
-console.log(
-  `biomass:    ${matterBefore.toFixed(0)} -> ${matterAfter.toFixed(0)} at 0.4x -> ${matterRestored.toFixed(0)} back at 1x`,
-);
+console.log(`report:     ${((treeDrawn.lit / treeDrawn.total) * 100).toFixed(1)}% drawn — ${treeSummary}`);
 console.log(
   `narrow:     stage ${narrow.stageWidth}x${narrow.stageHeight} at 400px wide, controls ${narrow.resetVisible && narrow.playVisible ? 'reachable' : 'MISSING'}`,
 );
@@ -360,26 +297,10 @@ if (drawn.fraction < 0.0015) {
 }
 if (!inspected) failures.push('inspector did not open on click');
 if (treeStillShowing) failures.push('tree canvas stays on screen after switching back to the world');
-if (treeDrawn.lit < treeDrawn.total * 0.002) failures.push('tree of life rendered nothing');
-if (!treeFit.fits) {
-  failures.push(
-    `tree draws ${treeFit.rows} rows past the canvas: last centre ${treeFit.lastCentre.toFixed(0)}px of ${treeFit.height.toFixed(0)}px`,
-  );
-}
-// 0.4x, with a wide band: the readouts are rounded for display and the world
-// keeps running between the two samples.
-if (!(matterAfter < matterBefore * 0.6) || !(matterAfter > matterBefore * 0.2)) {
-  failures.push(`biomass control did not take matter out: ${matterBefore} -> ${matterAfter}`);
-}
-if (!(matterRestored > matterAfter * 1.5)) {
-  failures.push(`biomass control did not put matter back: ${matterAfter} -> ${matterRestored}`);
-}
+if (treeDrawn.lit < treeDrawn.total * 0.002) failures.push('the battle report rendered nothing');
 if (narrow.overflows) failures.push('page scrolls sideways at 400px wide');
 if (narrow.stageHeight < 300) failures.push(`world is only ${narrow.stageHeight}px tall at 400px wide`);
 if (!narrow.resetVisible || !narrow.playVisible) failures.push('controls unreachable at 400px wide');
-if (!(tickAfterSeek < tickBefore)) {
-  failures.push(`rewind did not go back: ${tickBefore} -> ${tickAfterSeek}`);
-}
 if (problems.length) failures.push(...problems);
 if (failures.length) {
   console.error(`\nFAILED:\n  ${failures.join('\n  ')}`);

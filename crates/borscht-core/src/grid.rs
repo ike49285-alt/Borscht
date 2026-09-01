@@ -1,50 +1,42 @@
-//! Toroidal spatial index and the per-cell fields animals sense through.
+//! Spatial index and the per-cell fields units fight and steer by.
 //!
-//! Organisms are bucketed into grid cells by counting sort every tick. The
-//! buckets are used for the interactions that need real bodies (grazing,
-//! predation), but *sensing* deliberately does not walk them.
+//! Units are bucketed into grid cells by counting sort every tick. The buckets
+//! are used for the interactions that need real bodies -- picking a target,
+//! landing a blow -- but *steering* deliberately does not walk them.
 //!
-//! At the target density a 3x3 neighbourhood holds on the order of 30 organisms,
-//! so per-animal neighbour scans would cost tens of millions of distance
-//! computations per tick and put a million organisms out of reach. Instead the
-//! grid build accumulates a handful of scalar fields per cell, and an animal
-//! senses by sampling those fields and their gradients: a fixed ~27 array reads
-//! regardless of how crowded the world gets.
+//! A million units in contact would put per-unit neighbour scans out of reach:
+//! tens of millions of distance computations a tick just to decide which way to
+//! face. Instead the grid build accumulates a few scalar fields per cell -- how
+//! much of each side is here, and how hard they are dying -- and a unit steers
+//! by sampling those fields and their gradients. That is a fixed handful of
+//! array reads however dense the melee gets, which is the whole reason the
+//! scale is reachable at all.
+//!
+//! The index masks cell coordinates, so a position outside the field is
+//! harmless rather than an out-of-bounds read. Distances, though, are plain
+//! Euclidean: a battlefield has edges, and a torus would let a unit on the left
+//! flank pick a target on the right.
 
-use crate::fastmath::floor;
-
-/// Wrap a coordinate into `[0, size)`.
+/// Hold a coordinate inside the field.
+///
+/// The battlefield has edges rather than wrapping. A routing unit runs until it
+/// hits the boundary and stops there, which is what a real rout does when it
+/// meets a river or a ridge -- and far better than reappearing behind the enemy
+/// line, which is what a torus would do.
 #[inline(always)]
-pub fn wrap(v: f32, size: f32) -> f32 {
-    let w = v - size * floor(v / size);
-    // Guard the case where `v` is a hair below a multiple of `size` and the
-    // division rounds up, which would otherwise return exactly `size`.
-    if !(0.0..size).contains(&w) {
+pub fn clamp_field(v: f32, size: f32) -> f32 {
+    if v.is_nan() {
         0.0
     } else {
-        w
+        v.clamp(0.0, size - 1e-3)
     }
 }
 
-/// Shortest signed displacement from `a` to `b` on a circle of circumference
-/// `size`. Going the long way round is never the right answer on a torus.
+/// Squared distance between two points on the field.
 #[inline(always)]
-pub fn wrap_delta(a: f32, b: f32, size: f32) -> f32 {
-    let half = size * 0.5;
-    let mut d = b - a;
-    if d > half {
-        d -= size;
-    } else if d < -half {
-        d += size;
-    }
-    d
-}
-
-/// Squared toroidal distance.
-#[inline(always)]
-pub fn wrap_dist_sq(ax: f32, ay: f32, bx: f32, by: f32, size: f32) -> f32 {
-    let dx = wrap_delta(ax, bx, size);
-    let dy = wrap_delta(ay, by, size);
+pub fn dist_sq(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let dx = bx - ax;
+    let dy = by - ay;
     dx * dx + dy * dy
 }
 
@@ -162,35 +154,44 @@ impl GridGeom {
     }
 }
 
-/// Spatial index plus the sensory fields derived from it.
+/// How many sides a battle has.
+///
+/// Two, and the code says so rather than pretending to generality it does not
+/// have: per-team fields are fixed-size arrays, and target selection is "the
+/// other one". Widening this later means revisiting both, which is honest work
+/// rather than a constant nobody may change.
+pub const TEAMS: usize = 2;
+
+/// The other side.
+#[inline(always)]
+pub fn foe(team: u8) -> usize {
+    (team as usize) ^ 1
+}
+
+/// Spatial index plus the per-cell fields steering and morale read.
 pub struct Grid {
     pub geom: GridGeom,
-
-    pub plants: Buckets,
-    pub animals: Buckets,
-
-    /// Total plant biomass per cell, used for shading.
-    pub plant_mass: Vec<f32>,
-    /// Plant biomass per cell that grazers can actually reach, i.e. total less
-    /// each plant's refuge.
+    /// Every unit, both sides, bucketed by cell.
     ///
-    /// Kept apart from `plant_mass` because a herbivore's food signal and a
-    /// plant's shade competitor are different quantities. Driving the grazing
-    /// response off total biomass makes a fully cropped stand still read as
-    /// abundant, so intake never falls off before the food is gone and the
-    /// population overshoots and crashes.
-    pub edible_mass: Vec<f32>,
-    /// Animal body mass weighted by how herbivorous it is: what a predator
-    /// hunts.
-    pub prey_mass: Vec<f32>,
-    /// Animal body mass weighted by how carnivorous it is: what everything
-    /// else avoids.
-    pub threat_mass: Vec<f32>,
-    /// Live animals per cell, for crowding.
-    pub animal_count: Vec<f32>,
-    /// Free matter available for plant growth and for building new bodies.
-    pub soil: Vec<f32>,
-    soil_scratch: Vec<f32>,
+    /// One index rather than one per side: cell contents stay contiguous, and
+    /// the handful of places that care about sides filter on the team byte,
+    /// which is already in cache next to the position that put it here.
+    pub units: Buckets,
+
+    /// Fighting strength present per cell, per side. Strength rather than head
+    /// count because a wounded unit should pull less weight in the decision to
+    /// advance than a fresh one.
+    pub strength: [Vec<f32>; TEAMS],
+    /// Head count per cell, per side.
+    pub count: [Vec<f32>; TEAMS],
+    /// Units killed in this cell recently, per side, decaying over a few ticks.
+    ///
+    /// This is what makes a collapse spread: morale reads the field, so a unit
+    /// feels the men dying around it without anyone walking a neighbour list.
+    pub losses: [Vec<f32>; TEAMS],
+    /// Routing units per cell, per side. Panic is contagious, and this is the
+    /// carrier.
+    pub routing: [Vec<f32>; TEAMS],
 }
 
 impl Grid {
@@ -199,27 +200,22 @@ impl Grid {
             dim.is_power_of_two(),
             "grid dimension must be a power of two"
         );
-        assert!(dim >= 4, "grid must be at least 4 cells on a side");
         let cells = (dim as usize) * (dim as usize);
-        let cell_size = world_size / dim as f32;
+        let zeros = || core::array::from_fn(|_| vec![0.0f32; cells]);
         Grid {
             geom: GridGeom {
                 dim,
                 mask: dim - 1,
                 shift: dim.trailing_zeros(),
-                cell_size,
-                inv_cell_size: 1.0 / cell_size,
+                cell_size: world_size / dim as f32,
+                inv_cell_size: dim as f32 / world_size,
                 world_size,
             },
-            plants: Buckets::default(),
-            animals: Buckets::default(),
-            plant_mass: vec![0.0; cells],
-            edible_mass: vec![0.0; cells],
-            prey_mass: vec![0.0; cells],
-            threat_mass: vec![0.0; cells],
-            animal_count: vec![0.0; cells],
-            soil: vec![0.0; cells],
-            soil_scratch: vec![0.0; cells],
+            units: Buckets::default(),
+            strength: zeros(),
+            count: zeros(),
+            losses: zeros(),
+            routing: zeros(),
         }
     }
 
@@ -258,203 +254,109 @@ impl Grid {
         self.geom.sample(field, cx, cy)
     }
 
-    pub fn rebuild_plants(&mut self, xs: &[f32], ys: &[f32], count: usize) {
+    /// Re-bucket every unit by its cell.
+    pub fn rebuild(&mut self, xs: &[f32], ys: &[f32], count: usize) {
         let geom = self.geom;
-        self.plants
+        self.units
             .rebuild(geom.cells(), count, |i| geom.cell_of(xs[i], ys[i]));
     }
 
-    pub fn rebuild_animals(&mut self, xs: &[f32], ys: &[f32], count: usize) {
-        let geom = self.geom;
-        self.animals
-            .rebuild(geom.cells(), count, |i| geom.cell_of(xs[i], ys[i]));
-    }
-
-    pub fn clear_fields(&mut self) {
-        self.plant_mass.fill(0.0);
-        self.edible_mass.fill(0.0);
-        self.prey_mass.fill(0.0);
-        self.threat_mass.fill(0.0);
-        self.animal_count.fill(0.0);
-    }
-
-    /// Spread surplus nutrient to the four neighbours.
+    /// Clear the fields that are rebuilt from scratch every tick.
     ///
-    /// Without this, a patch stripped bare by a herd stays bare forever and the
-    /// world slowly fills with permanent dead zones.
-    pub fn diffuse_soil(&mut self, rate: f32) {
-        if rate <= 0.0 {
-            return;
+    /// Losses are *not* cleared: they decay, because a unit should still feel
+    /// the men who fell beside it a moment ago. Clearing them every tick would
+    /// mean morale only ever saw the casualties of the current instant, which
+    /// is far too short a memory for a line to break over.
+    pub fn clear_fields(&mut self) {
+        for t in 0..TEAMS {
+            self.strength[t].fill(0.0);
+            self.count[t].fill(0.0);
+            self.routing[t].fill(0.0);
         }
-        let geom = self.geom;
-        let dim = geom.dim as i32;
-        self.soil_scratch.copy_from_slice(&self.soil);
-        let src = &self.soil_scratch;
-        for cy in 0..dim {
-            for cx in 0..dim {
-                let c = geom.cell_at(cx, cy);
-                let here = src[c];
-                let sum = src[geom.cell_at(cx + 1, cy)]
-                    + src[geom.cell_at(cx - 1, cy)]
-                    + src[geom.cell_at(cx, cy + 1)]
-                    + src[geom.cell_at(cx, cy - 1)];
-                self.soil[c] = here + rate * (sum * 0.25 - here);
+    }
+
+    /// Fade the casualty field toward zero.
+    pub fn decay_losses(&mut self, keep: f32) {
+        for t in 0..TEAMS {
+            for v in self.losses[t].iter_mut() {
+                *v *= keep;
             }
         }
     }
 
-    pub fn total_soil(&self) -> f64 {
-        self.soil.iter().map(|&v| v as f64).sum()
+    /// Total strength on a side, for the outcome readout.
+    pub fn total_strength(&self, team: usize) -> f64 {
+        self.strength[team].iter().map(|&v| v as f64).sum()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::Rng;
 
-    #[test]
-    fn wrap_keeps_coordinates_in_range() {
-        let size = 100.0f32;
-        let mut rng = Rng::new(1, 1);
-        for _ in 0..100_000 {
-            let v = rng.range(-1000.0, 1000.0);
-            let w = wrap(v, size);
-            assert!((0.0..size).contains(&w), "wrap({v}) = {w}");
-        }
-        assert_eq!(wrap(0.0, size), 0.0);
-        assert_eq!(wrap(100.0, size), 0.0);
-        assert!((wrap(-1.0, size) - 99.0).abs() < 1e-3);
-        assert!((wrap(250.0, size) - 50.0).abs() < 1e-3);
+    fn grid() -> Grid {
+        Grid::new(16, 160.0)
     }
 
     #[test]
-    fn wrap_delta_takes_the_short_way() {
-        let size = 100.0f32;
-        assert!((wrap_delta(1.0, 99.0, size) - -2.0).abs() < 1e-4);
-        assert!((wrap_delta(99.0, 1.0, size) - 2.0).abs() < 1e-4);
-        assert!((wrap_delta(10.0, 20.0, size) - 10.0).abs() < 1e-4);
-        for &(a, b) in &[(0.0f32, 50.0f32), (50.0, 0.0), (25.0, 75.0)] {
-            assert!(wrap_delta(a, b, size).abs() <= size * 0.5 + 1e-4);
-        }
-    }
-
-    /// The bucket index must agree exactly with a brute-force grouping, because
-    /// every interaction in the sim trusts it.
-    #[test]
-    fn buckets_match_brute_force() {
-        let dim = 16u32;
-        let world = 64.0f32;
-        let mut grid = Grid::new(dim, world);
-        let mut rng = Rng::new(5, 1);
-        let n = 5000;
-        let xs: Vec<f32> = (0..n).map(|_| rng.range(0.0, world)).collect();
-        let ys: Vec<f32> = (0..n).map(|_| rng.range(0.0, world)).collect();
-        grid.rebuild_plants(&xs, &ys, n);
-
-        let mut expected: Vec<Vec<u32>> = vec![Vec::new(); grid.cells()];
-        for i in 0..n {
-            expected[grid.cell_of(xs[i], ys[i]) as usize].push(i as u32);
-        }
-        let mut total = 0;
-        for (c, want) in expected.iter().enumerate() {
-            let mut got = grid.plants.cell(c).to_vec();
-            got.sort_unstable();
-            let mut want = want.clone();
-            want.sort_unstable();
-            assert_eq!(got, want, "cell {c}");
-            total += got.len();
-        }
-        assert_eq!(total, n, "every organism must land in exactly one cell");
-    }
-
-    #[test]
-    fn rebuild_handles_an_empty_population() {
-        let mut grid = Grid::new(8, 32.0);
-        grid.rebuild_animals(&[], &[], 0);
-        assert!(grid.animals.items.is_empty());
-        for c in 0..grid.cells() {
-            assert!(grid.animals.cell(c).is_empty());
+    fn cells_round_trip_through_coordinates() {
+        let g = grid();
+        for (x, y) in [(0.0, 0.0), (15.9, 0.1), (80.0, 80.0), (159.9, 159.9)] {
+            let c = g.cell_of(x, y);
+            let (cx, cy) = g.cell_xy(c);
+            assert_eq!(g.cell_at(cx as i32, cy as i32), c as usize);
         }
     }
 
     #[test]
-    fn cell_lookup_wraps_on_both_axes() {
-        let grid = Grid::new(16, 64.0);
-        assert_eq!(grid.cell_at(-1, 0), grid.cell_at(15, 0));
-        assert_eq!(grid.cell_at(16, 0), grid.cell_at(0, 0));
-        assert_eq!(grid.cell_at(0, -1), grid.cell_at(0, 15));
-        assert_eq!(grid.cell_at(0, 16), grid.cell_at(0, 0));
-    }
-
-    #[test]
-    fn cell_of_and_cell_xy_round_trip() {
-        let grid = Grid::new(32, 128.0);
-        for &(x, y) in &[(0.0f32, 0.0f32), (127.9, 127.9), (63.0, 12.0), (4.0, 100.0)] {
-            let c = grid.cell_of(x, y);
-            let (cx, cy) = grid.cell_xy(c);
-            assert_eq!(grid.cell_at(cx as i32, cy as i32), c as usize);
-        }
-    }
-
-    #[test]
-    fn gradient_points_uphill() {
-        let mut grid = Grid::new(16, 64.0);
-        // Ramp increasing in +x.
-        for cy in 0..16 {
-            for cx in 0..16 {
-                let c = grid.cell_at(cx, cy);
-                grid.plant_mass[c] = cx as f32;
+    fn buckets_hold_every_unit_exactly_once() {
+        let mut g = grid();
+        let xs: Vec<f32> = (0..500).map(|i| (i as f32 * 7.3) % 160.0).collect();
+        let ys: Vec<f32> = (0..500).map(|i| (i as f32 * 11.7) % 160.0).collect();
+        g.rebuild(&xs, &ys, xs.len());
+        let mut seen = vec![0u32; xs.len()];
+        for c in 0..g.cells() {
+            for &i in g.units.cell(c) {
+                seen[i as usize] += 1;
+                // And it is in the cell its position says it should be.
+                assert_eq!(g.cell_of(xs[i as usize], ys[i as usize]) as usize, c);
             }
         }
-        let field = grid.plant_mass.clone();
-        let (here, gx, gy) = grid.sample(&field, 8, 8);
-        assert_eq!(here, 8.0);
-        assert!(gx > 0.0, "gradient should point toward higher values");
-        assert!(gy.abs() < 1e-6);
-    }
-
-    #[test]
-    fn diffusion_conserves_total_matter() {
-        let mut grid = Grid::new(32, 128.0);
-        let mut rng = Rng::new(2, 3);
-        for s in grid.soil.iter_mut() {
-            *s = rng.range(0.0, 10.0);
-        }
-        let before = grid.total_soil();
-        for _ in 0..200 {
-            grid.diffuse_soil(0.2);
-        }
-        let after = grid.total_soil();
         assert!(
-            (after - before).abs() < before * 1e-4,
-            "soil diffusion leaked matter: {before} -> {after}"
+            seen.iter().all(|&n| n == 1),
+            "a unit was lost or duplicated"
         );
     }
 
     #[test]
-    fn diffusion_evens_out_a_spike() {
-        let mut grid = Grid::new(16, 64.0);
-        let centre = grid.cell_at(8, 8);
-        grid.soil[centre] = 100.0;
-        for _ in 0..300 {
-            grid.diffuse_soil(0.2);
-        }
-        let mean = (grid.total_soil() / grid.cells() as f64) as f32;
-        for &s in &grid.soil {
-            assert!(
-                (s - mean).abs() < mean * 0.5,
-                "still spiky: {s} vs mean {mean}"
-            );
-        }
+    fn the_other_side_is_the_other_side() {
+        assert_eq!(foe(0), 1);
+        assert_eq!(foe(1), 0);
     }
 
     #[test]
-    fn zero_rate_diffusion_is_a_no_op() {
-        let mut grid = Grid::new(8, 32.0);
-        grid.soil[3] = 5.0;
-        let before = grid.soil.clone();
-        grid.diffuse_soil(0.0);
-        assert_eq!(grid.soil, before);
+    fn losses_decay_rather_than_clearing() {
+        let mut g = grid();
+        g.losses[0][5] = 1.0;
+        g.clear_fields();
+        assert_eq!(g.losses[0][5], 1.0, "clearing must not wipe the memory");
+        g.decay_losses(0.5);
+        assert_eq!(g.losses[0][5], 0.5);
+    }
+
+    #[test]
+    fn distance_does_not_wrap_around_the_field() {
+        // A unit on the left flank must not find a target on the right one.
+        let far = dist_sq(1.0, 80.0, 159.0, 80.0);
+        assert!(far > (150.0f32).powi(2), "distance wrapped: {far}");
+    }
+
+    #[test]
+    fn the_field_has_edges() {
+        let size = 160.0;
+        assert_eq!(clamp_field(-5.0, size), 0.0);
+        assert!(clamp_field(1e9, size) < size);
+        assert_eq!(clamp_field(80.0, size), 80.0);
+        assert_eq!(clamp_field(f32::NAN, size), 0.0);
     }
 }

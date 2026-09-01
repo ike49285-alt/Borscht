@@ -9,30 +9,31 @@ import { PARAMS, STAT_NAMES } from '../web/params.js';
 
 const wasmPath = new URL('../target/wasm32-unknown-unknown/release/borscht_wasm.wasm', import.meta.url);
 const targets = process.argv.slice(2).map(Number).filter(Boolean);
-const populations = targets.length ? targets : [10_000, 25_000, 60_000];
+const populations = targets.length ? targets : [20_000, 100_000, 500_000, 1_000_000];
 const TICKS = Number(process.env.TICKS ?? 60);
 
 const wasm = await readFile(wasmPath);
 console.log(`module: ${(wasm.length / 1024).toFixed(0)} KiB\n`);
 console.log(
-  ['target', 'organisms', 'ms/tick', 'ticks/s', 'render ms', 'MB'].map((h) => h.padStart(11)).join(''),
+  ['target', 'on field', 'ms/tick', 'ticks/s', 'render ms', 'MB'].map((h) => h.padStart(11)).join(''),
 );
 
-// Density is held constant as the world is scaled, matching Config::for_population.
+// Density is held constant as the field is scaled, matching Config::for_muster.
 const defaults = Object.fromEntries(PARAMS.map((p) => [p.name, p.value]));
-const baseTotal = defaults.max_plants + defaults.max_animals;
+const baseTotal = defaults.units_per_side * 2;
 
 for (const target of populations) {
   const borscht = await Borscht.load(wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.length));
   const scale = target / baseTotal;
   borscht.resetParams();
+  const root = Math.sqrt(scale);
+  const want = defaults.grid_dim * root;
+  const lo = Math.max(1, Math.pow(2, Math.floor(Math.log2(Math.max(want, 1)))));
   borscht.configure(PARAMS, {
-    max_plants: Math.round(defaults.max_plants * scale),
-    max_animals: Math.round(defaults.max_animals * scale),
-    initial_plants: Math.round(defaults.initial_plants * scale),
-    initial_animals: Math.round(defaults.initial_animals * scale),
-    world_size: defaults.world_size * Math.sqrt(scale),
-    grid_dim: Math.max(32, Math.round(defaults.grid_dim * Math.sqrt(scale))),
+    units_per_side: Math.max(1, Math.round(defaults.units_per_side * scale)),
+    max_units: Math.round(target * 1.05) + 16,
+    field_size: defaults.field_size * root,
+    grid_dim: Math.min(4096, Math.max(8, want >= lo * Math.SQRT2 ? lo * 2 : lo)),
   });
   borscht.create(1);
 
@@ -59,7 +60,7 @@ for (const target of populations) {
       .map((c) => c.padStart(11))
       .join(''),
   );
-  if (!Number.isFinite(stats.total_matter) || stats.total_matter <= 0) {
-    throw new Error('world did not initialise');
+  if (!Number.isFinite(stats.red) || stats.red + stats.blue <= 0) {
+    throw new Error('the armies did not muster');
   }
 }

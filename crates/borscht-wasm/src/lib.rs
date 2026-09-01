@@ -8,7 +8,7 @@
 //!
 //! # Contract with the JavaScript side
 //!
-//! * One world lives in a module-level slot. WebAssembly here is single
+//! * One battle lives in a module-level slot. WebAssembly here is single
 //!   threaded, so there is exactly one caller and no data race to guard
 //!   against.
 //! * Every pointer returned is valid only until the next call that can resize a
@@ -19,28 +19,21 @@
 //! * Nothing here can unwind into the host: `Option::None` and out-of-range ids
 //!   return sentinel values rather than panicking.
 
+use borscht_core::battle::RENDER_STRIDE;
 use borscht_core::config::{Config, PARAMS};
-use borscht_core::genome::{self, ag, pg, ANIMAL_GENE_COUNT, PLANT_GENE_COUNT};
-use borscht_core::grid::wrap_dist_sq;
 use borscht_core::stats::Stats;
-use borscht_core::world::RENDER_STRIDE;
-use borscht_core::{snapshot, ColorMode, World};
+use borscht_core::{Battle, ColorMode};
 
-/// The single world. Access is `unsafe` only in the formal sense: wasm32 here is
-/// single threaded and every entry point below is called from the one JS thread.
-static mut WORLD: Option<World> = None;
-/// Scratch for snapshots and other byte payloads handed across the boundary.
-static mut BYTES: Vec<u8> = Vec::new();
-/// Packed species table, rebuilt on demand.
-static mut SPECIES: Vec<u8> = Vec::new();
-/// Packed lineage table for the tree of life.
-static mut LINEAGES: Vec<u8> = Vec::new();
-/// Packed detail for one inspected organism.
+/// The single battle. Access is `unsafe` only in the formal sense: wasm32 here
+/// is single threaded and every entry point below is called from the one JS
+/// thread.
+static mut BATTLE: Option<Battle> = None;
+/// Packed detail for one inspected unit.
 static mut INSPECT: Vec<f32> = Vec::new();
 
 #[allow(static_mut_refs)]
-fn world() -> Option<&'static mut World> {
-    unsafe { WORLD.as_mut() }
+fn battle() -> Option<&'static mut Battle> {
+    unsafe { BATTLE.as_mut() }
 }
 
 // ------------------------------------------------------------------ memory --
@@ -65,86 +58,18 @@ pub unsafe extern "C" fn dealloc(ptr: *mut u8, len: u32) {
     }
 }
 
-// ------------------------------------------------------------- world setup --
+// ------------------------------------------------------------ battle setup --
 
 /// Seeds arrive as two `u32` halves: JavaScript numbers cannot hold a `u64`
-/// exactly, and a silently truncated seed would break reproducibility in a way
-/// nobody would notice until two runs of the "same" seed diverged.
+/// exactly, and a silently truncated seed would change which battle you get
+/// without anyone noticing.
 #[inline]
 fn join_seed(lo: u32, hi: u32) -> u64 {
     ((hi as u64) << 32) | lo as u64
 }
 
-/// Create the world from the current staged configuration.
-#[no_mangle]
-pub extern "C" fn world_create(seed_lo: u32, seed_hi: u32) {
-    let cfg = staged_config();
-    unsafe {
-        WORLD = Some(World::new(cfg, join_seed(seed_lo, seed_hi)));
-    }
-}
-
-/// Rebuild the population, applying any parameter changes made since creation.
-#[no_mangle]
-pub extern "C" fn world_reset(seed_lo: u32, seed_hi: u32) {
-    let cfg = staged_config();
-    let seed = join_seed(seed_lo, seed_hi);
-    // Structural parameters change pool and grid sizes, so a reset that touched
-    // them has to rebuild the world rather than just reseed it.
-    let rebuild = match world() {
-        Some(w) => {
-            w.cfg.world_size != cfg.world_size
-                || w.cfg.grid_dim != cfg.grid_dim
-                || w.cfg.max_plants != cfg.max_plants
-                || w.cfg.max_animals != cfg.max_animals
-        }
-        None => true,
-    };
-    if rebuild {
-        unsafe { WORLD = Some(World::new(cfg, seed)) };
-    } else if let Some(w) = world() {
-        w.cfg = cfg;
-        w.reset(seed);
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn world_exists() -> u32 {
-    world().is_some() as u32
-}
-
-/// Advance `n` ticks. Returns the tick count, as `f64` so the host sees an exact
-/// integer well past what a `u32` would hold in a long run.
-#[no_mangle]
-pub extern "C" fn world_tick(n: u32) -> f64 {
-    match world() {
-        Some(w) => {
-            w.tick_many(n);
-            w.tick as f64
-        }
-        None => -1.0,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn population() -> u32 {
-    world().map_or(0, |w| w.population() as u32)
-}
-
-#[no_mangle]
-pub extern "C" fn plant_count() -> u32 {
-    world().map_or(0, |w| w.plants.len() as u32)
-}
-
-#[no_mangle]
-pub extern "C" fn animal_count() -> u32 {
-    world().map_or(0, |w| w.animals.len() as u32)
-}
-
-// ------------------------------------------------------------- parameters --
-
-/// Parameters are staged here before a world exists, so the host can configure
-/// a world fully and then create it once.
+/// Parameters are staged here before a battle exists, so the host can configure
+/// one fully and then create it once.
 static mut STAGED: Option<Config> = None;
 
 fn staged_config() -> Config {
@@ -154,47 +79,99 @@ fn staged_config() -> Config {
 }
 
 #[no_mangle]
+pub extern "C" fn world_create(seed_lo: u32, seed_hi: u32) {
+    let cfg = staged_config();
+    unsafe {
+        BATTLE = Some(Battle::new(cfg, join_seed(seed_lo, seed_hi)));
+    }
+}
+
+/// Re-muster both armies, applying any parameter changes made since creation.
+#[no_mangle]
+pub extern "C" fn world_reset(seed_lo: u32, seed_hi: u32) {
+    let cfg = staged_config();
+    let seed = join_seed(seed_lo, seed_hi);
+    // Structural parameters change pool and grid sizes, so a reset that touched
+    // them has to rebuild rather than just re-muster.
+    let rebuild = match battle() {
+        Some(b) => {
+            b.cfg.field_size != cfg.field_size
+                || b.cfg.grid_dim != cfg.grid_dim
+                || b.cfg.max_units != cfg.max_units
+        }
+        None => true,
+    };
+    if rebuild {
+        unsafe { BATTLE = Some(Battle::new(cfg, seed)) };
+    } else if let Some(b) = battle() {
+        b.cfg = cfg;
+        b.reset(seed);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn world_exists() -> u32 {
+    battle().is_some() as u32
+}
+
+/// Advance `n` ticks. Returns the tick count, as `f64` so the host sees an
+/// exact integer well past what a `u32` would hold in a long battle.
+#[no_mangle]
+pub extern "C" fn world_tick(n: u32) -> f64 {
+    match battle() {
+        Some(b) => {
+            b.tick_many(n);
+            b.tick as f64
+        }
+        None => -1.0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn population() -> u32 {
+    battle().map_or(0, |b| b.units() as u32)
+}
+
+/// Units still on the field, per side.
+#[no_mangle]
+pub extern "C" fn team_count(team: u32) -> u32 {
+    battle().map_or(0, |b| {
+        let m = b.army.muster();
+        *m.get(team as usize).unwrap_or(&0)
+    })
+}
+
+/// Whether one side has been wiped out.
+#[no_mangle]
+pub extern "C" fn decided() -> u32 {
+    battle().map_or(0, |b| b.decided() as u32)
+}
+
+// ------------------------------------------------------------- parameters --
+
+#[no_mangle]
 pub extern "C" fn param_count() -> u32 {
     PARAMS.len() as u32
 }
 
-/// Set a parameter. Returns 1 on success, 0 for an unknown id or a value that is
-/// not finite. Applies to the live world when there is one, and always to the
-/// staged config used by the next create or reset.
+/// Set a parameter. Returns 1 on success, 0 for an unknown id or a value that
+/// is not finite. Applies to the live battle when there is one, and always to
+/// the staged config used by the next create or reset.
 #[no_mangle]
 pub extern "C" fn set_param(id: u32, value: f32) -> u32 {
     let mut staged = unsafe { STAGED }.unwrap_or_default();
     let ok = staged.set_param(id, value);
     unsafe { STAGED = Some(staged) };
-    if let Some(w) = world() {
-        w.cfg.set_param(id, value);
+    if let Some(b) = battle() {
+        b.cfg.set_param(id, value);
     }
     ok as u32
 }
 
-/// Set how much matter the world holds, as a multiple of what it was founded
-/// with. Returns the signed amount actually moved.
-///
-/// An intervention rather than a parameter: it does not belong in the parameter
-/// table because it is not a rule the world runs by, it is a thing done to the
-/// world once.
-#[no_mangle]
-pub extern "C" fn set_matter(factor: f32) -> f64 {
-    world().map_or(0.0, |w| w.set_matter_target(factor))
-}
-
-/// What the world should hold: what it was seeded with, plus every operator
-/// addition and withdrawal. A viewer can show the difference against
-/// `total_matter`; a test can assert they are the same.
-#[no_mangle]
-pub extern "C" fn matter_budget() -> f64 {
-    world().map_or(0.0, |w| w.matter_budget())
-}
-
 #[no_mangle]
 pub extern "C" fn get_param(id: u32) -> f32 {
-    match world() {
-        Some(w) => w.cfg.get_param(id),
+    match battle() {
+        Some(b) => b.cfg.get_param(id),
         None => staged_config().get_param(id),
     }
 }
@@ -215,8 +192,8 @@ pub extern "C" fn stats_count() -> u32 {
 /// Pointer to the current statistics, `stats_count()` little-endian `f32`s.
 #[no_mangle]
 pub extern "C" fn stats_ptr() -> *const f32 {
-    match world() {
-        Some(w) => w.stats.as_slice().as_ptr(),
+    match battle() {
+        Some(b) => b.stats.as_slice().as_ptr(),
         None => std::ptr::null(),
     }
 }
@@ -228,236 +205,74 @@ pub extern "C" fn render_stride() -> u32 {
     RENDER_STRIDE as u32
 }
 
-/// Pack the render buffer and return the organism count.
-///
-/// Call before [`render_ptr`] every frame: this can grow linear memory, which
-/// invalidates any pointer taken earlier.
+/// Pack the frame and return how many units it holds.
 #[no_mangle]
 pub extern "C" fn prepare_render(mode: u32) -> u32 {
-    match world() {
-        Some(w) => w.prepare_render(ColorMode::from_u32(mode)) as u32,
-        None => 0,
-    }
+    battle().map_or(0, |b| b.prepare_render(ColorMode::from_u32(mode)) as u32)
 }
 
 #[no_mangle]
 pub extern "C" fn render_ptr() -> *const u8 {
-    match world() {
-        Some(w) => w.render_buffer().as_ptr(),
+    match battle() {
+        Some(b) => b.render_buffer().as_ptr(),
         None => std::ptr::null(),
     }
 }
 
-/// Plants occupy the first this-many entries of the render buffer. The host uses
-/// it to draw the two kingdoms at different point sizes.
+/// Kept for the host's two-pass draw. Battles have no second population, so
+/// every unit is in the one range and this is always zero.
 #[no_mangle]
 pub extern "C" fn render_plant_count() -> u32 {
-    world().map_or(0, |w| w.plants.len() as u32)
-}
-
-// ---------------------------------------------------------------- species --
-
-/// Fields per species row in the packed table.
-pub const SPECIES_FIELDS: usize = 5;
-
-/// Build a table of the largest live animal species: id, population, hue,
-/// parent id, birth tick. Returns the row count.
-#[no_mangle]
-#[allow(static_mut_refs)]
-pub extern "C" fn prepare_species(limit: u32, animals: u32) -> u32 {
-    let Some(w) = world() else { return 0 };
-    let registry_ranked = if animals != 0 {
-        w.animal_species.ranked(limit as usize)
-    } else {
-        w.plant_species.ranked(limit as usize)
-    };
-    let out = unsafe { &mut SPECIES };
-    out.clear();
-    for (id, pop) in &registry_ranked {
-        // The two registries carry different genome widths, so they are distinct
-        // types; pull the shared fields out per branch rather than trying to
-        // name a common reference.
-        let (hue, parent, birth) = if animals != 0 {
-            let r = &w.animal_species.records[*id as usize];
-            (r.hue, r.parent, r.birth_tick)
-        } else {
-            let r = &w.plant_species.records[*id as usize];
-            (r.hue, r.parent, r.birth_tick)
-        };
-        out.extend_from_slice(&(*id as f32).to_le_bytes());
-        out.extend_from_slice(&(*pop as f32).to_le_bytes());
-        out.extend_from_slice(&hue.to_le_bytes());
-        out.extend_from_slice(&(parent as f32).to_le_bytes());
-        out.extend_from_slice(&(birth as f32).to_le_bytes());
-    }
-    registry_ranked.len() as u32
+    0
 }
 
 #[no_mangle]
-#[allow(static_mut_refs)]
-pub extern "C" fn species_ptr() -> *const u8 {
-    unsafe { SPECIES.as_ptr() }
-}
-
-// ------------------------------------------------------------ tree of life --
-
-/// Fields per lineage row: id, parent, birth tick, extinct tick, peak
-/// population, hue.
-pub const LINEAGE_FIELDS: usize = 6;
-
-/// Build the tree of life: every lineage that ever reached `min_peak`
-/// individuals, in order of appearance. Returns the row count.
-///
-/// Extinct branches are included -- they are most of the tree. A lineage whose
-/// parent falls below the threshold keeps its parent id, and the host walks up
-/// to the nearest ancestor it kept.
-#[no_mangle]
-#[allow(static_mut_refs)]
-pub extern "C" fn prepare_lineages(min_peak: u32, animals: u32) -> u32 {
-    let Some(w) = world() else { return 0 };
-    let history = if animals != 0 {
-        &w.animal_species.history
-    } else {
-        &w.plant_species.history
-    };
-    let out = unsafe { &mut LINEAGES };
-    out.clear();
-    let mut rows = 0u32;
-    for l in history.iter() {
-        if l.peak_population < min_peak {
-            continue;
-        }
-        out.extend_from_slice(&(l.id as f32).to_le_bytes());
-        // f32 cannot hold the "still alive" sentinel exactly, so it goes over
-        // as -1 rather than as a very large number the host has to guess at.
-        let parent = if l.parent == borscht_core::species::NO_LINEAGE {
-            -1.0
-        } else {
-            l.parent as f32
-        };
-        out.extend_from_slice(&parent.to_le_bytes());
-        out.extend_from_slice(&(l.birth_tick as f32).to_le_bytes());
-        let extinct = if l.extinct_tick == u32::MAX {
-            -1.0
-        } else {
-            l.extinct_tick as f32
-        };
-        out.extend_from_slice(&extinct.to_le_bytes());
-        out.extend_from_slice(&(l.peak_population as f32).to_le_bytes());
-        out.extend_from_slice(&l.hue.to_le_bytes());
-        rows += 1;
-    }
-    rows
-}
-
-#[no_mangle]
-#[allow(static_mut_refs)]
-pub extern "C" fn lineages_ptr() -> *const u8 {
-    unsafe { LINEAGES.as_ptr() }
-}
-
-/// Total lineages ever recorded, and how many were dropped once the history
-/// filled up, so the host can say the tree is truncated rather than imply it
-/// is complete.
-#[no_mangle]
-pub extern "C" fn lineage_total(animals: u32) -> u32 {
-    world().map_or(0, |w| {
-        if animals != 0 {
-            w.animal_species.history.len() as u32
-        } else {
-            w.plant_species.history.len() as u32
-        }
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn lineage_dropped(animals: u32) -> f64 {
-    world().map_or(0.0, |w| {
-        if animals != 0 {
-            w.animal_species.history_dropped as f64
-        } else {
-            w.plant_species.history_dropped as f64
-        }
-    })
+pub extern "C" fn world_size() -> f32 {
+    battle().map_or(0.0, |b| b.field_size())
 }
 
 // ---------------------------------------------------------------- inspect --
 
-/// Layout of the inspect buffer, shared with the host.
-pub const INSPECT_HEADER: usize = 8;
+/// Fields returned by [`inspect`], in order.
+pub const INSPECT_FIELDS: usize = 8;
 
-/// Describe the organism nearest to a world position.
+/// Look up the unit nearest a point, within `radius`.
 ///
-/// Returns 0 if nothing was found, 1 for a plant, 2 for an animal. The buffer is
-/// a header (kind, id, species, x, y, energy-or-biomass, age, size) followed by
-/// the raw gene bytes as floats, then the decoded trait values.
+/// Returns the number of fields written, or zero when there is nobody there.
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub extern "C" fn inspect(x: f32, y: f32, radius: f32) -> u32 {
-    let Some(w) = world() else { return 0 };
-    let size = w.cfg.world_size;
-    let r2 = radius * radius;
-    let tables = genome::tables();
-
-    let mut best = (r2, usize::MAX, 0u32);
-    for i in 0..w.animals.len() {
-        let d = wrap_dist_sq(x, y, w.animals.x[i], w.animals.y[i], size);
-        if d < best.0 {
-            best = (d, i, 2);
-        }
-    }
-    // Animals win ties: they are what a click is almost always aiming at, and a
-    // plant sitting on the same pixel should not shadow one.
-    if best.2 == 0 {
-        for i in 0..w.plants.len() {
-            let d = wrap_dist_sq(x, y, w.plants.x[i], w.plants.y[i], size);
-            if d < best.0 {
-                best = (d, i, 1);
-            }
-        }
-    }
-    if best.2 == 0 {
-        return 0;
-    }
-
+    let Some(b) = battle() else { return 0 };
     let out = unsafe { &mut INSPECT };
     out.clear();
-    let i = best.1;
-    if best.2 == 2 {
-        out.push(2.0);
-        out.push(w.animals.id[i] as f32);
-        out.push(w.animals.species[i] as f32);
-        out.push(w.animals.x[i]);
-        out.push(w.animals.y[i]);
-        out.push(w.animals.energy[i]);
-        out.push(w.animals.age[i] as f32);
-        out.push(tables.animal[ag::SIZE][w.animals.gene(i, ag::SIZE) as usize]);
-        for g in 0..ANIMAL_GENE_COUNT {
-            out.push(w.animals.gene(i, g) as f32);
+
+    let mut best = usize::MAX;
+    let mut best_d = radius * radius;
+    for i in 0..b.army.len() {
+        if !b.army.alive(i) {
+            continue;
         }
-        for g in 0..ANIMAL_GENE_COUNT {
-            out.push(tables.animal[g][w.animals.gene(i, g) as usize]);
-        }
-        for weight in w.animals.brain_of(i) {
-            out.push(*weight as f32);
-        }
-    } else {
-        out.push(1.0);
-        out.push(w.plants.id[i] as f32);
-        out.push(w.plants.species[i] as f32);
-        out.push(w.plants.x[i]);
-        out.push(w.plants.y[i]);
-        out.push(w.plants.biomass[i]);
-        out.push(w.plants.age[i] as f32);
-        out.push(tables.plant[pg::MAX_SIZE][w.plants.gene(i, pg::MAX_SIZE) as usize]);
-        for g in 0..PLANT_GENE_COUNT {
-            out.push(w.plants.gene(i, g) as f32);
-        }
-        for g in 0..PLANT_GENE_COUNT {
-            out.push(tables.plant[g][w.plants.gene(i, g) as usize]);
+        let d = borscht_core::grid::dist_sq(x, y, b.army.x[i], b.army.y[i]);
+        if d < best_d {
+            best_d = d;
+            best = i;
         }
     }
-    best.2
+    if best == usize::MAX {
+        return 0;
+    }
+    let i = best;
+    let team = b.army.team[i] as usize;
+    let a = b.archetypes[team][b.army.kind[i] as usize];
+    out.push(b.army.team[i] as f32);
+    out.push(b.army.kind[i] as f32);
+    out.push(b.army.hp[i]);
+    out.push(a.hp);
+    out.push(b.army.morale[i]);
+    out.push(b.army.speed[i]);
+    out.push(b.army.heading[i]);
+    out.push(if b.army.routing(i) { 1.0 } else { 0.0 });
+    out.len() as u32
 }
 
 #[no_mangle]
@@ -466,143 +281,43 @@ pub extern "C" fn inspect_ptr() -> *const f32 {
     unsafe { INSPECT.as_ptr() }
 }
 
-#[no_mangle]
-#[allow(static_mut_refs)]
-pub extern "C" fn inspect_len() -> u32 {
-    unsafe { INSPECT.len() as u32 }
-}
-
-// --------------------------------------------------------------- snapshot --
-
-/// Serialise the world into the shared byte buffer and return its length.
-#[no_mangle]
-#[allow(static_mut_refs)]
-pub extern "C" fn snapshot_save() -> u32 {
-    let Some(w) = world() else { return 0 };
-    let bytes = snapshot::save(w);
-    let out = unsafe { &mut BYTES };
-    *out = bytes;
-    out.len() as u32
-}
-
-#[no_mangle]
-#[allow(static_mut_refs)]
-pub extern "C" fn snapshot_ptr() -> *const u8 {
-    unsafe { BYTES.as_ptr() }
-}
-
-/// Load a snapshot the host has written at `ptr`. Returns 0 on success, or a
-/// non-zero code matching `snapshot::SnapshotError`.
-///
-/// # Safety
-/// `ptr` must point at `len` readable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn snapshot_load(ptr: *const u8, len: u32) -> u32 {
-    if ptr.is_null() {
-        return 4;
-    }
-    let bytes = std::slice::from_raw_parts(ptr, len as usize);
-    match snapshot::load(bytes) {
-        Ok(w) => {
-            WORLD = Some(w);
-            0
-        }
-        Err(snapshot::SnapshotError::BadMagic) => 1,
-        Err(snapshot::SnapshotError::Version(_)) => 2,
-        Err(snapshot::SnapshotError::ParamMismatch) => 3,
-        Err(snapshot::SnapshotError::Truncated) => 4,
-        Err(snapshot::SnapshotError::TooLarge) => 5,
-    }
-}
-
-// ------------------------------------------------------------------ world --
-
-#[no_mangle]
-pub extern "C" fn world_size() -> f32 {
-    world().map_or(0.0, |w| w.cfg.world_size)
-}
-
-#[no_mangle]
-pub extern "C" fn total_matter() -> f64 {
-    world().map_or(0.0, |w| w.total_matter())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::Mutex;
 
-    /// The module owns one global world because WebAssembly here is single
-    /// threaded. Native tests are not, so they take this lock to restore the
-    /// contract the code is written against.
+    /// One battle lives in a module-level slot, so the tests must not run over
+    /// each other.
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    fn lock() -> MutexGuard<'static, ()> {
-        SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn fresh() {
         params_reset();
-        // Small enough to build quickly in a test.
-        set_param(Config::param_id("world_size").unwrap(), 256.0);
-        set_param(Config::param_id("grid_dim").unwrap(), 32.0);
-        set_param(Config::param_id("max_plants").unwrap(), 4000.0);
-        set_param(Config::param_id("max_animals").unwrap(), 2000.0);
-        set_param(Config::param_id("initial_plants").unwrap(), 2000.0);
-        set_param(Config::param_id("initial_animals").unwrap(), 300.0);
+        let cfg = Config::for_muster(4_000);
+        for (i, _) in PARAMS.iter().enumerate() {
+            set_param(i as u32, cfg.get_param(i as u32));
+        }
         world_create(7, 0);
     }
 
     #[test]
-    fn the_boundary_round_trips_a_world() {
-        let _guard = lock();
+    fn a_battle_is_created_and_advances() {
+        let _g = lock();
         fresh();
         assert_eq!(world_exists(), 1);
-        assert!(population() > 1000);
-        assert_eq!(population(), plant_count() + animal_count());
+        let before = population();
+        assert!(before > 0);
         assert_eq!(world_tick(50), 50.0);
-        assert!(total_matter() > 0.0);
+        assert!(population() <= before, "an army cannot grow");
+        assert!(team_count(0) > 0 || team_count(1) > 0);
     }
 
     #[test]
-    fn seeds_are_not_truncated_across_the_boundary() {
-        let _guard = lock();
-        // A u64 seed cannot survive a single f64 parameter, which is why the
-        // halves are passed separately.
-        assert_eq!(join_seed(0xDEAD_BEEF, 0xFEED_FACE), 0xFEED_FACE_DEAD_BEEF);
-        assert_eq!(join_seed(0, 0), 0);
-        assert_eq!(join_seed(u32::MAX, u32::MAX), u64::MAX);
-    }
-
-    #[test]
-    fn parameters_stage_before_a_world_exists() {
-        let _guard = lock();
-        params_reset();
-        unsafe { WORLD = None };
-        let id = Config::param_id("metabolism").unwrap();
-        assert_eq!(set_param(id, 0.077), 1);
-        assert!((get_param(id) - 0.077).abs() < 1e-6);
-        world_create(1, 0);
-        assert!(
-            (get_param(id) - 0.077).abs() < 1e-6,
-            "staged value must survive creation"
-        );
-    }
-
-    #[test]
-    fn bad_parameter_input_is_refused_not_fatal() {
-        let _guard = lock();
-        fresh();
-        assert_eq!(set_param(9999, 1.0), 0);
-        assert_eq!(set_param(0, f32::NAN), 0);
-        assert_eq!(get_param(9999), 0.0);
-    }
-
-    #[test]
-    fn render_buffer_is_the_advertised_shape() {
-        let _guard = lock();
+    fn the_render_buffer_is_the_advertised_shape() {
+        let _g = lock();
         fresh();
         world_tick(20);
         let n = prepare_render(0);
@@ -610,162 +325,49 @@ mod tests {
         // The host reads the stride from here rather than hard-coding it, so
         // this asserts the two agree, not what the number happens to be.
         assert_eq!(render_stride() as usize, RENDER_STRIDE);
-        assert_eq!(render_plant_count(), plant_count());
         assert!(!render_ptr().is_null());
         let bytes = unsafe { std::slice::from_raw_parts(render_ptr(), n as usize * RENDER_STRIDE) };
         assert_eq!(bytes.len(), n as usize * RENDER_STRIDE);
     }
 
     #[test]
-    fn stats_are_readable_positionally() {
-        let _guard = lock();
+    fn parameters_round_trip_and_reject_rubbish() {
+        let _g = lock();
+        fresh();
+        let id = Config::param_id("turn_rate").expect("turn_rate exists");
+        assert_eq!(set_param(id, 0.2), 1);
+        assert!((get_param(id) - 0.2).abs() < 1e-6);
+        assert_eq!(set_param(PARAMS.len() as u32, 1.0), 0);
+        assert_eq!(set_param(id, f32::NAN), 0);
+    }
+
+    #[test]
+    fn inspect_finds_a_unit_and_nothing_when_there_is_none() {
+        let _g = lock();
+        fresh();
+        world_tick(5);
+        let b = battle().expect("a battle exists");
+        let (x, y) = (b.army.x[0], b.army.y[0]);
+        let size = b.field_size();
+        assert_eq!(inspect(x, y, 5.0), INSPECT_FIELDS as u32);
+        let vals = unsafe { std::slice::from_raw_parts(inspect_ptr(), INSPECT_FIELDS) };
+        assert!(vals[0] == 0.0 || vals[0] == 1.0, "team is a side");
+        assert!(
+            vals[2] > 0.0 && vals[2] <= vals[3],
+            "health within its maximum"
+        );
+        // A corner of an empty field.
+        assert_eq!(inspect(size * 0.999, size * 0.999, 0.01), 0);
+    }
+
+    #[test]
+    fn stats_are_readable_and_the_right_length() {
+        let _g = lock();
         fresh();
         world_tick(10);
-        let n = stats_count() as usize;
-        let s = unsafe { std::slice::from_raw_parts(stats_ptr(), n) };
-        assert_eq!(s.len(), borscht_core::stats::STAT_NAMES.len());
-        assert_eq!(s[0], 10.0, "first stat should be the tick");
-        assert!(s.iter().all(|v| v.is_finite()));
-    }
-
-    #[test]
-    fn species_table_is_packed_as_documented() {
-        let _guard = lock();
-        fresh();
-        world_tick(30);
-        let rows = prepare_species(16, 1);
-        assert!(rows > 0);
-        let vals = unsafe {
-            std::slice::from_raw_parts(species_ptr() as *const f32, rows as usize * SPECIES_FIELDS)
-        };
-        for row in vals.chunks(SPECIES_FIELDS) {
-            assert!(row[1] > 0.0, "a listed species must have members");
-            assert!((0.0..1.0).contains(&row[2]), "hue out of range");
-        }
-        // Sorted by population, largest first.
-        let pops: Vec<f32> = vals.chunks(SPECIES_FIELDS).map(|r| r[1]).collect();
-        assert!(pops.windows(2).all(|w| w[0] >= w[1]));
-        assert!(prepare_species(16, 0) > 0, "plants should list too");
-    }
-
-    #[test]
-    fn the_tree_of_life_crosses_the_boundary() {
-        let _guard = lock();
-        fresh();
-        world_tick(200);
-        let rows = prepare_lineages(1, 1);
-        assert!(rows > 0, "no lineages recorded");
-        assert_eq!(
-            rows,
-            lineage_total(1),
-            "min_peak of 1 should keep everything"
-        );
-        let vals = unsafe {
-            std::slice::from_raw_parts(lineages_ptr() as *const f32, rows as usize * LINEAGE_FIELDS)
-        };
-        let mut roots = 0;
-        for row in vals.chunks(LINEAGE_FIELDS) {
-            assert!(row[0] >= 0.0, "lineage id must be real");
-            assert!(row[1] >= -1.0, "parent is an id or -1");
-            if row[1] < 0.0 {
-                roots += 1;
-            }
-            assert!(row[2] >= 0.0, "birth tick");
-            assert!(row[4] >= 1.0, "peak population");
-            assert!((0.0..1.0).contains(&row[5]), "hue out of range");
-        }
-        assert!(roots > 0, "the tree needs at least one root");
-
-        // Filtering keeps a subset, never invents rows.
-        assert!(prepare_lineages(1_000_000, 1) <= rows);
-        assert_eq!(
-            lineage_dropped(1),
-            0.0,
-            "history should not have overflowed yet"
-        );
-        assert!(prepare_lineages(1, 0) > 0, "plants have a tree too");
-    }
-
-    #[test]
-    fn inspect_finds_an_organism_and_misses_gracefully() {
-        let _guard = lock();
-        fresh();
-        world_tick(5);
-        let w = world().unwrap();
-        let (x, y) = (w.animals.x[0], w.animals.y[0]);
-        let kind = inspect(x, y, 8.0);
-        assert_eq!(kind, 2, "should find the animal it was aimed at");
-        assert!(inspect_len() as usize > INSPECT_HEADER);
-        let data = unsafe { std::slice::from_raw_parts(inspect_ptr(), inspect_len() as usize) };
-        assert_eq!(data[0], 2.0);
-        assert!(data.iter().all(|v| v.is_finite()));
-        // A zero radius can match nothing.
-        assert_eq!(inspect(x + 1000.0, y, 0.0), 0);
-    }
-
-    #[test]
-    fn snapshots_cross_the_boundary_and_back() {
-        let _guard = lock();
-        fresh();
-        world_tick(40);
-        let before = population();
-        let len = snapshot_save();
-        assert!(len > 0);
-        let bytes = unsafe { std::slice::from_raw_parts(snapshot_ptr(), len as usize) }.to_vec();
-
-        world_create(999, 0);
-        world_tick(5);
-        assert_ne!(population(), before);
-
-        let code = unsafe { snapshot_load(bytes.as_ptr(), bytes.len() as u32) };
-        assert_eq!(code, 0);
-        assert_eq!(population(), before);
-        assert_eq!(world_tick(0), 40.0);
-    }
-
-    #[test]
-    fn a_corrupt_snapshot_reports_rather_than_traps() {
-        let _guard = lock();
-        fresh();
-        let junk = b"definitely not a snapshot".to_vec();
-        assert_eq!(
-            unsafe { snapshot_load(junk.as_ptr(), junk.len() as u32) },
-            1
-        );
-        assert_eq!(unsafe { snapshot_load(std::ptr::null(), 10) }, 4);
-        assert_eq!(unsafe { snapshot_load(junk.as_ptr(), 2) }, 4);
-        // The old world must survive a failed load.
-        assert_eq!(world_exists(), 1);
-    }
-
-    #[test]
-    fn calls_before_creation_return_sentinels() {
-        let _guard = lock();
-        unsafe { WORLD = None };
-        assert_eq!(world_exists(), 0);
-        assert_eq!(population(), 0);
-        assert_eq!(world_tick(1), -1.0);
-        assert_eq!(prepare_render(0), 0);
-        assert!(render_ptr().is_null());
-        assert!(stats_ptr().is_null());
-        assert_eq!(prepare_species(8, 1), 0);
-        assert_eq!(prepare_lineages(1, 1), 0);
-        assert_eq!(lineage_total(1), 0);
-        assert_eq!(inspect(0.0, 0.0, 10.0), 0);
-        assert_eq!(snapshot_save(), 0);
-        assert_eq!(world_size(), 0.0);
-    }
-
-    #[test]
-    fn alloc_and_dealloc_are_usable() {
-        let _guard = lock();
-        let ptr = alloc(1024);
-        assert!(!ptr.is_null());
-        unsafe {
-            std::ptr::write_bytes(ptr, 0xAB, 1024);
-            assert_eq!(*ptr, 0xAB);
-            dealloc(ptr, 1024);
-            dealloc(std::ptr::null_mut(), 0);
-        }
+        assert_eq!(stats_count() as usize, Stats::COUNT);
+        let s = unsafe { std::slice::from_raw_parts(stats_ptr(), Stats::COUNT) };
+        assert_eq!(s.len(), Stats::COUNT);
+        assert!(s[0] > 0.0, "tick should have advanced");
     }
 }

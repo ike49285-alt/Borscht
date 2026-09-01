@@ -2,7 +2,7 @@
 // the simulation worker. It never touches WebAssembly directly.
 
 import { Renderer } from './renderer.js';
-import { PARAMS, ANIMAL_GENES, PLANT_GENES } from './params.js';
+import { PARAMS } from './params.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('view');
@@ -41,9 +41,6 @@ let worldSize = 1;
 // needs the table to compute the initial scale, and waiting for it created an
 // ordering bug where a reset arrived before the module had finished loading.
 const params = PARAMS;
-
-// Set by the snapshot region below, and left null in builds that drop it.
-let saveSnapshot = null;
 
 // -------------------------------------------------------------------- input --
 
@@ -234,163 +231,50 @@ const fmt = (v) => {
   return String(Math.round(v));
 };
 
-const TRAITS = [
-  ['mean_size', 'size', (v) => v.toFixed(2)],
-  ['mean_max_speed', 'speed', (v) => v.toFixed(2)],
-  ['mean_diet', 'carnivory', (v) => v.toFixed(3)],
-  ['mean_vision', 'vision', (v) => v.toFixed(2)],
-  ['mean_lifespan', 'lifespan', (v) => fmt(v)],
-  ['mean_mutation_rate', 'mutation', (v) => v.toFixed(4)],
-  ['mean_temp_opt', 'temp pref', (v) => v.toFixed(2)],
-  ['mean_plant_toxicity', 'plant toxin', (v) => v.toFixed(3)],
-  ['mean_plant_growth', 'plant growth', (v) => v.toFixed(3)],
-  ['kills', 'kills/tick', (v) => v.toFixed(0)],
-  ['productivity', 'productivity', (v) => v.toFixed(2)],
-  ['drought_fraction', 'in drought', (v) => `${(v * 100).toFixed(0)}%`],
-  ['temp_anomaly', 'temp anomaly', (v) => v.toFixed(2)],
-  ['disturbances', 'disturbances', (v) => v.toFixed(0)],
-];
-
-function updatePanel(stats, species) {
-  $('h-tick').textContent = fmt(stats.tick);
-  $('h-plants').textContent = fmt(stats.plants);
-  $('h-animals').textContent = fmt(stats.animals);
-  $('h-species').textContent = `${stats.animal_species | 0} / ${stats.plant_species | 0}`;
-  $('h-carn').textContent = `${(stats.carnivore_fraction * 100).toFixed(1)}%`;
-
-  $('c-plants').textContent = fmt(stats.plants);
-  $('c-animals').textContent = fmt(stats.animals);
-  $('c-biomass').textContent = fmt(stats.plant_biomass);
-  $('c-soil').textContent = fmt(stats.soil);
-  $('c-bodies').textContent = fmt(stats.animal_mass);
-
-  $('traits').innerHTML = TRAITS.map(
-    ([key, label, format]) =>
-      `<tr><td class="k">${label}</td><td>${Number.isFinite(stats[key]) ? format(stats[key]) : '–'}</td></tr>`,
-  ).join('');
-
-  const total = species.reduce((a, s) => a + s.population, 0) || 1;
-  $('species-list').innerHTML = species
-    .slice(0, 12)
-    .map((s) => {
-      const color = `hsl(${(s.hue * 360).toFixed(0)} 75% 62%)`;
-      const share = (s.population / total) * 100;
-      return `<div class="item">
-        <i class="swatch" style="background:${color}"></i>
-        <span style="width:34px">#${s.id}</span>
-        <span class="bar"><i style="width:${share.toFixed(1)}%;background:${color}"></i></span>
-        <span style="width:46px;text-align:right">${fmt(s.population)}</span>
-      </div>`;
-    })
-    .join('') || '<div class="item" style="color:var(--muted)">no species yet</div>';
+function updatePanel(stats, red, blue) {
+  $('h-tick').textContent = fmt(stats.tick ?? 0);
+  $('h-plants').textContent = fmt(red);
+  $('h-animals').textContent = fmt(blue);
+  $('h-species').textContent = fmt((stats.red_holding ?? 0) + (stats.blue_holding ?? 0));
+  const alive = red + blue;
+  const routing = alive - ((stats.red_holding ?? 0) + (stats.blue_holding ?? 0));
+  $('h-carn').textContent = alive > 0 ? `${((routing / alive) * 100).toFixed(1)}%` : '0%';
+  $('c-plants').textContent = fmt(red);
+  $('c-animals').textContent = fmt(blue);
+  $('c-biomass').textContent = fmt(stats.red_holding ?? 0);
+  $('c-soil').textContent = fmt(stats.blue_holding ?? 0);
+  $('c-bodies').textContent = fmt(routing);
 }
 
-// Generated from the Rust gene definitions, not written out here: the
-// inspector labels traits positionally, so a hand-maintained list mislabels
-// every gene the moment one is renamed or reordered.
-const GENE_NAMES = {
-  animal: ANIMAL_GENES.map((n) => n.replace(/_/g, ' ')),
-  plant: PLANT_GENES.map((n) => n.replace(/_/g, ' ')),
-};
+/// What `inspect` returns, in order, matching INSPECT_FIELDS in the wasm crate.
+const INSPECT_FIELDS = ['side', 'type', 'health', 'max health', 'nerve', 'speed', 'facing', 'routing'];
 
-function showInspector(organism) {
-  const box = $('inspector');
-  if (!organism) {
-    box.style.display = 'none';
+function showInspector(unit) {
+  const card = $('inspector');
+  const table = $('inspect-table');
+  if (!unit || !unit.length) {
+    card.style.display = 'none';
     return;
   }
-  box.style.display = 'block';
-  const names = GENE_NAMES[organism.kind];
-  const rows = [
-    ['kind', organism.kind],
-    ['id', organism.id],
-    ['species', `#${organism.species}`],
-    [organism.kind === 'animal' ? 'energy' : 'biomass', organism.level.toFixed(1)],
-    ['age', Math.round(organism.age)],
-    ...names.map((n, i) => [n, organism.traits[i].toFixed(3)]),
-  ];
-  $('inspect-table').innerHTML = rows
-    .map(([k, v]) => `<tr><td class="k">${k}</td><td>${v}</td></tr>`)
-    .join('');
+  const rows = INSPECT_FIELDS.map((name, i) => {
+    let v = unit[i];
+    if (name === 'side') v = v === 0 ? 'red' : 'blue';
+    else if (name === 'routing') v = v > 0.5 ? 'yes' : 'no';
+    else if (name === 'type') v = `#${Math.round(v)}`;
+    else v = Number(v).toFixed(2);
+    return `<tr><td class="k">${name}</td><td>${v}</td></tr>`;
+  });
+  table.innerHTML = rows.join('');
+  card.style.display = 'block';
 }
 
-// ---------------------------------------------------------- tree of life --
-//
-// Each lineage is a horizontal segment from the tick it split off to the tick it
-// died out, with a connector back to its parent. Rows are ordered by walking the
-// tree depth-first from the roots, so a lineage sits directly under the one it
-// came from and a radiation reads as a block rather than as scattered lines.
-//
-// Extinct branches are most of the tree and are what makes it a history rather
-// than a snapshot, so they stay in; the min-peak control is what keeps the
-// picture legible.
-
+// The second view. Where the ecology had a phylogeny, a battle has an order of
+// battle: who is left, who is still fighting, and how the strength of the two
+// sides has moved against each other over the engagement.
 const treeCanvas = $('tree');
 const treeTip = $('tree-tip');
-let treeData = { lineages: [], total: 0, dropped: 0 };
-let treeLayout = [];
-let treeMinPeak = 3;
 
-function layoutTree(lineages) {
-  const kept = lineages.filter((l) => l.peak >= treeMinPeak);
-  if (!kept.length) return [];
-  const byId = new Map(kept.map((l) => [l.id, l]));
-  const all = new Map(lineages.map((l) => [l.id, l]));
-
-  // A kept lineage whose parent was filtered out attaches to its nearest kept
-  // ancestor, so pruning thins the tree instead of shattering it.
-  const anchor = (l) => {
-    let p = l.parent;
-    const seen = new Set();
-    while (p !== null && p !== undefined && !seen.has(p)) {
-      if (byId.has(p)) return p;
-      seen.add(p);
-      p = all.get(p)?.parent ?? null;
-    }
-    return null;
-  };
-
-  const children = new Map();
-  const roots = [];
-  for (const l of kept) {
-    const a = anchor(l);
-    if (a === null) roots.push(l);
-    else {
-      if (!children.has(a)) children.set(a, []);
-      children.get(a).push(l);
-    }
-  }
-  const byBirth = (a, b) => a.birthTick - b.birthTick || a.id - b.id;
-  roots.sort(byBirth);
-  for (const list of children.values()) list.sort(byBirth);
-
-  const rows = [];
-  const visit = (l, depth) => {
-    rows.push({ ...l, depth, row: rows.length, anchor: anchor(l) });
-    for (const c of children.get(l.id) ?? []) visit(c, depth + 1);
-  };
-  for (const r of roots) visit(r, 0);
-  return rows;
-}
-
-// Bottom padding clears the time bar, which floats over this canvas.
-const TREE_PAD = { l: 18, r: 18, t: 34, b: 76 };
-
-// Row geometry, computed once and used by both the draw and the hover test.
-//
-// The row height is *not* clamped upward. It used to have a 1.2px floor, which
-// meant a few thousand rows needed several times the height of the canvas and
-// everything past the first few hundred was painted below the bottom edge --
-// while the footer still reported them all as shown. Letting rows go to a
-// hairline keeps every one of them on the canvas by construction.
-function treeRows(H, count) {
-  const avail = H - TREE_PAD.t - TREE_PAD.b;
-  const rowH = Math.min(26, avail / Math.max(1, count));
-  const top = TREE_PAD.t + Math.max(0, (avail - count * rowH) / 2);
-  return { rowH, top, y: (i) => top + i * rowH + rowH / 2 };
-}
-
-function drawTree(now) {
+function drawReport() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = Math.max(1, Math.floor(treeCanvas.clientWidth * dpr));
   const h = Math.max(1, Math.floor(treeCanvas.clientHeight * dpr));
@@ -406,109 +290,65 @@ function drawTree(now) {
   ctx.fillStyle = '#06080e';
   ctx.fillRect(0, 0, W, H);
 
-  const rows = treeLayout;
-  if (!rows.length) {
+  const red = history.series.get('red') ?? [];
+  const blue = history.series.get('blue') ?? [];
+  const n = Math.max(red.length, blue.length);
+  if (n < 2) {
     ctx.fillStyle = '#8b97ad';
     ctx.font = '13px ui-monospace, monospace';
-    ctx.fillText('No lineages above the threshold yet.', 20, 30);
+    ctx.fillText('The armies have not yet met.', 24, 34);
     return;
   }
 
-  const pad = TREE_PAD;
-  const tMax = Math.max(now, ...rows.map((r) => r.extinctTick ?? now), 1);
-  const x = (t) => pad.l + (t / tMax) * (W - pad.l - pad.r);
-  // Rows grow to fill the space when there are few lineages and shrink to a
-  // hairline when there are thousands; the block is centred so a small tree
-  // does not sit in a corner of an empty canvas.
-  const { rowH, y } = treeRows(H, rows.length);
-  const index = new Map(rows.map((r, i) => [r.id, i]));
+  const pad = { l: 56, r: 24, t: 40, b: 84 };
+  const peak = Math.max(...red, ...blue, 1);
+  const x = (i) => pad.l + (i / (n - 1)) * (W - pad.l - pad.r);
+  const y = (v) => H - pad.b - (v / peak) * (H - pad.t - pad.b);
 
-  // Recessive time grid, labelled at the top so it never crosses the branches.
+  // A baseline and a scale, so the numbers are readable rather than decorative.
   ctx.strokeStyle = '#1a2130';
   ctx.fillStyle = '#5d6a80';
   ctx.font = '10px ui-monospace, monospace';
-  ctx.lineWidth = 1;
-  const step = Math.max(1, Math.pow(10, Math.floor(Math.log10(tMax / 5))) * (tMax / 5 > 5 * Math.pow(10, Math.floor(Math.log10(tMax / 5))) ? 5 : 1));
-  for (let t = 0; t <= tMax; t += step) {
-    const px = Math.round(x(t)) + 0.5;
+  for (let g = 0; g <= 4; g += 1) {
+    const v = (peak * g) / 4;
+    const py = Math.round(y(v)) + 0.5;
     ctx.beginPath();
-    ctx.moveTo(px, pad.t - 6);
-    ctx.lineTo(px, H - pad.b + 4);
+    ctx.moveTo(pad.l, py);
+    ctx.lineTo(W - pad.r, py);
     ctx.stroke();
-    ctx.fillText(t >= 1000 ? `${(t / 1000).toFixed(t >= 10000 ? 0 : 1)}k` : String(t), px + 3, pad.t - 10);
+    ctx.fillText(fmt(v), 8, py + 3);
   }
 
-  // Connectors first, so branches sit on top of them. Opaque, they merge into a
-  // solid block once there are thousands of them spanning hundreds of pixels
-  // each; fading with the row height keeps them legible on a small tree and
-  // turns them into texture on a large one.
-  ctx.strokeStyle = `rgba(61, 74, 99, ${Math.max(0.15, Math.min(0.7, rowH * 0.35)).toFixed(3)})`;
-  ctx.lineWidth = 1;
-  for (const r of rows) {
-    if (r.anchor === null || !index.has(r.anchor)) continue;
-    const px = Math.round(x(r.birthTick)) + 0.5;
+  const line = (series, colour) => {
     ctx.beginPath();
-    ctx.moveTo(px, y(index.get(r.anchor)));
-    ctx.lineTo(px, y(r.row));
-    ctx.stroke();
-  }
-
-  for (const r of rows) {
-    const end = r.extinctTick ?? now;
-    const x0 = x(r.birthTick);
-    const x1 = Math.max(x0 + 1.5, x(end));
-    ctx.strokeStyle = `hsl(${(r.hue * 360).toFixed(0)} 72% 60%)`;
-    ctx.lineWidth = Math.max(0.6, Math.min(3.5, rowH * 0.8));
-    // Below a pixel a row cannot have its own line, so overlapping rows shade
-    // rather than saturate and the density is readable.
-    ctx.globalAlpha = rowH < 1 ? Math.max(0.25, rowH) : 1;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(x0, y(r.row));
-    ctx.lineTo(x1, y(r.row));
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-    // A living lineage gets an emphasised end; an extinct one just stops. At
-    // hairline heights thousands of dots become a block of their own, so they
-    // only appear once a row is tall enough to own one.
-    if (r.extinctTick === null && rowH >= 2) {
-      ctx.fillStyle = '#e6ebf5';
-      ctx.beginPath();
-      ctx.arc(x1, y(r.row), Math.max(1.5, ctx.lineWidth * 0.5), 0, Math.PI * 2);
-      ctx.fill();
+    for (let i = 0; i < series.length; i += 1) {
+      const px = x(i + (n - series.length));
+      const py = y(series[i]);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
     }
-  }
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  };
+  line(red, '#eb4e46');
+  line(blue, '#4e96f5');
 
+  const lastRed = red[red.length - 1] ?? 0;
+  const lastBlue = blue[blue.length - 1] ?? 0;
+  ctx.font = '13px ui-monospace, monospace';
+  ctx.fillStyle = '#eb4e46';
+  ctx.fillText(`red  ${fmt(lastRed)}`, pad.l, 26);
+  ctx.fillStyle = '#4e96f5';
+  ctx.fillText(`blue ${fmt(lastBlue)}`, pad.l + 140, 26);
   ctx.fillStyle = '#8b97ad';
   ctx.font = '11px ui-monospace, monospace';
-  const living = rows.filter((r) => r.extinctTick === null).length;
   ctx.fillText(
-    `${rows.length} lineages shown · ${living} living · ${treeData.total} ever recorded` +
-      (treeData.dropped > 0 ? ` · ${treeData.dropped} not recorded` : ''),
+    'Men still on the field. The gap between the lines is the battle.',
     pad.l,
-    H - pad.b + 22,
+    H - pad.b + 24,
   );
-  treeLayout = rows;
-  // Exposed so the browser check can test the drawn geometry rather than
-  // trusting the footer's count.
-  window.__treeLayout = rows;
 }
-
-treeCanvas.addEventListener('pointermove', (e) => {
-  if (!treeLayout.length) { treeTip.style.display = 'none'; return; }
-  const rect = treeCanvas.getBoundingClientRect();
-  // Same geometry the draw used, or the tooltip names the wrong lineage.
-  const { rowH, top } = treeRows(rect.height, treeLayout.length);
-  const i = Math.floor((e.clientY - rect.top - top) / rowH);
-  const r = treeLayout[i];
-  if (!r || e.clientY - rect.top < top) { treeTip.style.display = 'none'; return; }
-  const end = r.extinctTick === null ? 'living' : `died ${Math.round(r.extinctTick)}`;
-  treeTip.textContent = `lineage ${Math.round(r.id)} · born ${Math.round(r.birthTick)} · ${end} · peak ${Math.round(r.peak)}`;
-  treeTip.style.display = 'block';
-  treeTip.style.left = `${Math.min(e.clientX - rect.left + 14, rect.width - treeTip.offsetWidth - 8)}px`;
-  treeTip.style.top = `${e.clientY - rect.top + 14}px`;
-});
-treeCanvas.addEventListener('pointerleave', () => { treeTip.style.display = 'none'; });
 
 let showTree = false;
 function setView(tree) {
@@ -522,27 +362,8 @@ function setView(tree) {
   $('view-tree').setAttribute('aria-pressed', String(tree));
   $('view-world').setAttribute('aria-pressed', String(!tree));
 }
-const matterSlider = $('matter');
-function showMatter() {
-  $('matter-val').textContent = `${Number(matterSlider.value).toFixed(2)}\u00d7`;
-}
-matterSlider.addEventListener('input', () => {
-  showMatter();
-  worker.postMessage({ type: 'matter', value: Number(matterSlider.value) });
-});
-
 $('view-world').addEventListener('click', () => setView(false));
 $('view-tree').addEventListener('click', () => setView(true));
-// A big tree needs thinning by hundreds, a small one by ones, so the slider is
-// linear where the detail is and geometric where it is not.
-function minPeakFor(step) {
-  return step <= 10 ? step : Math.round(10 * Math.pow(50, (step - 10) / 20));
-}
-$('tree-min').addEventListener('input', (e) => {
-  treeMinPeak = minPeakFor(Number(e.target.value));
-  $('tree-min-val').textContent = String(treeMinPeak);
-  treeLayout = layoutTree(treeData.lineages);
-});
 
 // ------------------------------------------------------------------ worker --
 
@@ -567,47 +388,33 @@ worker.onmessage = (event) => {
       // Hand the buffer straight back so the worker can reuse it.
       worker.postMessage({ type: 'recycle', buffer: msg.buffer }, [msg.buffer]);
       latest = msg;
-      // The engine stops itself on a seek or a reset, and starts itself when
-      // the page is built to autoplay. The button follows it rather than the
-      // other way round, so the two cannot disagree.
-      if (typeof msg.running === 'boolean' && msg.running !== running && !scrubbing) {
+      // The engine stops itself when a battle is decided, and starts itself
+      // when the page is built to autoplay. The button follows it rather than
+      // the other way round, so the two cannot disagree.
+      if (typeof msg.running === 'boolean' && msg.running !== running) {
         showRunning(msg.running);
       }
       history.push({
-        plants: msg.stats.plants,
-        animals: msg.stats.animals,
-        biomass: msg.stats.plant_biomass,
-        soil: msg.stats.soil,
-        bodies: msg.stats.animal_mass,
+        red: msg.red,
+        blue: msg.blue,
+        red_holding: msg.stats.red_holding,
+        blue_holding: msg.stats.blue_holding,
       });
-      updatePanel(msg.stats, msg.species);
+      updatePanel(msg.stats, msg.red, msg.blue);
       $('h-ms').textContent = msg.tickMs ? msg.tickMs.toFixed(1) : '–';
 
-      if (msg.tree) {
-        treeData = msg.tree;
-        treeLayout = layoutTree(treeData.lineages);
-        const living = treeData.lineages.filter((l) => l.extinctTick === null).length;
-        $('tree-summary').textContent =
-          `${treeData.total} lineages recorded · ${living} living` +
-          (treeData.dropped > 0 ? ` · ${treeData.dropped} beyond the history limit` : '');
-      }
-
       latestTick = msg.stats.tick;
-      if (msg.history) oldestTick = msg.history.oldest;
-      if (!scrubbing) {
-        const scrub = $('t-scrub');
-        scrub.min = String(Math.floor(oldestTick));
-        scrub.max = String(Math.ceil(latestTick));
-        scrub.value = String(Math.round(latestTick));
-        $('t-tick').textContent = fmt(latestTick);
+      $('t-tick').textContent = fmt(latestTick);
+      if (msg.decided && running) {
+        // The field is settled; there is nothing left to simulate.
+        setRunning(false);
+        $('tree-summary').textContent =
+          msg.red > msg.blue ? 'red holds the field' : msg.blue > msg.red ? 'blue holds the field' : 'mutual annihilation';
       }
       break;
     }
     case 'inspected':
       showInspector(msg.organism);
-      break;
-    case 'saved':
-      saveSnapshot?.(msg.bytes);
       break;
     case 'error':
       fail(msg.message);
@@ -617,26 +424,25 @@ worker.onmessage = (event) => {
   }
 };
 
-// Density is held constant as the world is scaled, so the ecology behaves the
-// same at every setting and only the size of the map changes.
+// Density is held constant as the field is scaled, so the fighting behaves the
+// same at every setting and only the size of the map changes. Mirrors
+// Config::for_muster.
 function scaleOverrides(target) {
   const byName = Object.fromEntries(params.map((p) => [p.name, p.value]));
-  const base = byName.max_plants + byName.max_animals;
+  const base = byName.units_per_side * 2;
   const scale = target / base;
   const root = Math.sqrt(scale);
   // Nearest power of two, not the next one up. Cell size is what every per-cell
-  // budget is denominated in -- how far mate search reaches, whether a cell has
-  // anybody in it -- so rounding up would change the ecology at some scales and
-  // not others. Mirrors Config::for_population.
+  // budget is denominated in -- whether a cell holds anybody, how many bodies
+  // target selection has to scan -- so rounding up would change the combat at
+  // some scales and not others.
   const want = byName.grid_dim * root;
   const lo = Math.max(1, Math.pow(2, Math.floor(Math.log2(Math.max(want, 1)))));
   const grid = Math.min(4096, Math.max(8, want >= lo * Math.SQRT2 ? lo * 2 : lo));
   return {
-    max_plants: Math.round(byName.max_plants * scale),
-    max_animals: Math.round(byName.max_animals * scale),
-    initial_plants: Math.round(byName.initial_plants * scale),
-    initial_animals: Math.round(byName.initial_animals * scale),
-    world_size: byName.world_size * root,
+    units_per_side: Math.max(1, Math.round(byName.units_per_side * scale)),
+    max_units: Math.round(target * 1.05) + 16,
+    field_size: byName.field_size * root,
     grid_dim: grid,
   };
 }
@@ -648,20 +454,25 @@ function currentSetup() {
   };
 }
 
-let scrubbing = false;
 let latestTick = 0;
-let oldestTick = 0;
 
 /** Paint the play button to match whatever the engine is actually doing. */
 function showRunning(next) {
   running = next;
-  $('t-play').textContent = running ? '❚❚' : '▶';
+  $('t-play').textContent = running ? '\u275a\u275a' : '\u25b6';
   $('t-play').setAttribute('aria-label', running ? 'Pause' : 'Play');
 }
 
 function setRunning(next) {
   showRunning(next);
   worker.postMessage({ type: running ? 'play' : 'pause' });
+}
+
+/** Send the speed control's current position to the engine, and label it. */
+function applySpeed() {
+  const value = Number($('t-speed').value);
+  $('t-speed-val').textContent = String(value);
+  worker.postMessage({ type: 'speed', value });
 }
 
 $('t-play').addEventListener('click', () => setRunning(!running));
@@ -671,30 +482,6 @@ $('t-step').addEventListener('click', () => {
   worker.postMessage({ type: 'step', count: 1 });
 });
 
-// Scrubbing pauses: the worker has to load a checkpoint and re-tick forward, and
-// racing that against a running simulation would fight over the same world.
-$('t-scrub').addEventListener('pointerdown', () => {
-  scrubbing = true;
-  if (running) setRunning(false);
-});
-const endScrub = () => {
-  if (!scrubbing) return;
-  scrubbing = false;
-  worker.postMessage({ type: 'seek', tick: Number($('t-scrub').value) });
-};
-$('t-scrub').addEventListener('pointerup', endScrub);
-$('t-scrub').addEventListener('pointercancel', endScrub);
-$('t-scrub').addEventListener('change', endScrub);
-$('t-scrub').addEventListener('input', (e) => {
-  $('t-tick').textContent = fmt(Number(e.target.value));
-});
-
-/** Send the speed control's current position to the engine, and label it. */
-function applySpeed() {
-  const value = Number($('t-speed').value);
-  $('t-speed-val').textContent = String(value);
-  worker.postMessage({ type: 'speed', value });
-}
 $('t-speed').addEventListener('input', applySpeed);
 
 $('reset').addEventListener('click', () => {
@@ -702,10 +489,6 @@ $('reset').addEventListener('click', () => {
   setRunning(false);
   history.clear();
   showInspector(null);
-  // A new world is founded with its own stock of matter, so the control that
-  // says how much of that stock is present goes back to all of it.
-  matterSlider.value = '1';
-  showMatter();
   worker.postMessage({ type: 'reset', ...currentSetup() });
 });
 
@@ -714,34 +497,6 @@ $('scale').addEventListener('change', () => $('reset').click());
 $('color').addEventListener('change', (e) => {
   worker.postMessage({ type: 'color', value: Number(e.target.value) });
 });
-
-// Snapshot controls are optional, and everything that implements them lives
-// between these markers so the single-file build can remove it whole. A
-// published page cannot start a download, so shipping the code would leave a
-// dead feature in a page that appears to offer it.
-//
-// #region snapshot
-saveSnapshot = (bytes) => {
-  const blob = new Blob([bytes], { type: 'application/octet-stream' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `borscht-${Date.now()}.borscht`;
-  a.click();
-  URL.revokeObjectURL(url);
-};
-$('save').addEventListener('click', () => worker.postMessage({ type: 'save' }));
-$('load').addEventListener('click', () => $('file').click());
-$('file').addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  setRunning(false);
-  history.clear();
-  const bytes = await file.arrayBuffer();
-  worker.postMessage({ type: 'load', bytes }, [bytes]);
-  e.target.value = '';
-});
-// #endregion snapshot
 
 function buildParamUI() {
   const container = $('params');
@@ -789,11 +544,11 @@ function buildParamUI() {
 // ------------------------------------------------------------------- frame --
 
 function loop() {
-  if (showTree) drawTree(latestTick);
+  if (showTree) drawReport();
   else renderer.draw(view);
   if (latest) {
-    drawChart($('chart-pop'), ['plants', 'animals'], ['#4ade80', '#60a5fa']);
-    drawChart($('chart-matter'), ['biomass', 'soil', 'bodies'], ['#4ade80', '#a78bfa', '#fbbf24'], {
+    drawChart($('chart-pop'), ['red', 'blue'], ['#eb4e46', '#4e96f5']);
+    drawChart($('chart-matter'), ['red_holding', 'blue_holding'], ['#eb4e46', '#4e96f5'], {
       stacked: true,
     });
   }

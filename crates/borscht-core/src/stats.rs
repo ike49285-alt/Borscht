@@ -42,89 +42,23 @@ macro_rules! stats_fields {
 stats_fields! {
     /// Ticks elapsed.
     tick,
-    /// Live plants.
-    plants,
-    /// Live animals.
-    animals,
-    /// Live plant species with a meaningful population.
-    plant_species,
-    /// Live animal species with a meaningful population.
-    animal_species,
-    /// Total plant biomass.
-    plant_biomass,
-    /// Total animal body mass.
-    animal_mass,
-    /// Total free matter in the soil.
-    soil,
-    /// Matter in every pool. Constant by construction, so drift here means a
-    /// bug in one of the transfer paths.
-    total_matter,
-    /// Total metabolic energy held by animals.
-    animal_energy,
-    /// Seeds set this tick.
-    plant_births,
-    /// Plants lost this tick.
-    plant_deaths,
-    /// Animals born this tick.
-    animal_births,
-    /// Animals lost this tick, predation included.
-    animal_deaths,
-    /// Successful predation events this tick.
-    kills,
-    /// Disturbance events this tick: fire, storm, flood.
-    disturbances,
-    /// Organisms killed by disturbance this tick.
-    disturbance_deaths,
-    /// Mean regional productivity. 1.0 is an average year.
-    productivity,
-    /// Fraction of the world below 70% of normal productivity.
-    drought_fraction,
-    /// Current global temperature anomaly.
-    temp_anomaly,
-    /// Seeds that could not be set, almost always because the plant pool is
-    /// full.
-    plant_births_blocked,
-    /// Animals that met the conditions to breed this tick.
-    animal_repro_ready,
-    /// Births that failed because the parent lacked the matter to build a body.
-    animal_births_blocked_matter,
-    /// Births that failed because the animal pool is full.
-    animal_births_blocked_space,
-    /// Births that failed for want of a compatible mate nearby: mate
-    /// limitation, the Allee effect that ends sparse animal populations.
-    animal_births_blocked_mate,
-    /// Candidate partners actually examined during failed mate searches.
-    mate_candidates_seen,
-    /// Candidates rejected because they were too distant genetically.
-    mate_rejected_distance,
-    /// Mean fraction of loci carrying two different alleles. The first thing to
-    /// collapse when a population passes through a bottleneck.
-    mean_heterozygosity,
-    /// Population-weighted mean animal body size.
-    mean_size,
-    /// Mean top speed.
-    mean_max_speed,
-    /// Mean diet gene: 0 is wholly herbivorous, 1 wholly carnivorous.
-    mean_diet,
-    /// Fraction of animals that are mostly carnivorous.
-    carnivore_fraction,
-    /// Mean sensory reach.
-    mean_vision,
-    /// Mean maximum age.
-    mean_lifespan,
-    /// Mean per-gene mutation probability. Evolves in its own right.
-    mean_mutation_rate,
-    /// Mean preferred temperature, which tracks where the population sits on
-    /// the climate gradient.
-    mean_temp_opt,
-    /// Mean plant chemical defence.
-    mean_plant_toxicity,
-    /// Mean plant photosynthetic rate.
-    mean_plant_growth,
-    /// Where the year is, in `[0, 1)`.
-    season_phase,
-    /// Splits refused because the species registry was full.
-    blocked_splits,
+    /// Units still alive, per side.
+    red,
+    blue,
+    /// Units alive and still fighting, i.e. not routing. The gap between this
+    /// and the head count is what a collapse looks like as a number.
+    red_holding,
+    blue_holding,
+    /// Mean nerve remaining, per side.
+    red_morale,
+    blue_morale,
+    /// Fighting strength on the field, per side: head count weighted by what
+    /// each unit is worth and how hurt it is.
+    red_strength,
+    blue_strength,
+    /// Cumulative dead, per side.
+    red_killed,
+    blue_killed,
 }
 
 #[cfg(test)]
@@ -145,11 +79,11 @@ mod tests {
     fn fields_are_readable_by_name_at_the_right_offset() {
         let mut s = Stats::default();
         s.tick = 7.0;
-        s.animals = 123.0;
-        s.season_phase = 0.25;
+        s.red = 123.0;
+        s.blue_morale = 0.25;
         assert_eq!(s.get("tick"), Some(7.0));
-        assert_eq!(s.get("animals"), Some(123.0));
-        assert_eq!(s.get("season_phase"), Some(0.25));
+        assert_eq!(s.get("red"), Some(123.0));
+        assert_eq!(s.get("blue_morale"), Some(0.25));
         assert_eq!(s.get("no_such_stat"), None);
         assert_eq!(s.as_slice()[0], 7.0);
     }

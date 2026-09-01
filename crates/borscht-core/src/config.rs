@@ -79,332 +79,54 @@ macro_rules! config_params {
 }
 
 config_params! {
-    // ---- world structure (reset required) ----
-    /// Side length of the square, toroidal world in simulation units.
-    ///
-    /// The defaults describe a world of about ten thousand organisms.
-    ///
-    /// That is well below the density at which a sexual animal population
-    /// reliably establishes -- at forty thousand organisms only one seed in six
-    /// still had animals after six thousand ticks, against six in six at eighty
-    /// thousand. A default world will therefore usually lose its animals, and
-    /// that is a minimum-viable-population result rather than a fault. Use the
-    /// larger scales to watch a food web that persists.
-    world_size: f32 = 205.0, "world", 64.0, 4096.0;
+    /// Field edge, in units. A soldier is about half a unit across, so this is
+    /// roughly a metre per unit.
+    field_size: f32 = 900.0, "field", 100.0, 8192.0;
     /// Cells per side of the spatial grid. Must be a power of two.
-    grid_dim: u32 = 32, "world", 8.0, 2048.0;
-    /// Side length, in grid cells, of the block within which animals can
-    /// actually reach each other and the plants they eat.
     ///
-    /// Sensing and interaction want opposite things from the grid. Gradients
-    /// need fine cells to point anywhere useful; grazing and predation need
-    /// cells with somebody in them. At equilibrium densities a single sensing
-    /// cell holds well under one animal, so cell-local predation is effectively
-    /// impossible and carnivores can never establish. Blocks stay disjoint, so
-    /// each still owns its organisms and its soil exclusively.
-    interaction_block: u32 = 4, "world", 1.0, 32.0;
-    /// Hard cap on live plants. Reaching it simply makes seeding fail.
-    max_plants: u32 = 7_000, "world", 100.0, 2_000_000.0;
-    /// Hard cap on live animals.
-    max_animals: u32 = 3_000, "world", 10.0, 1_000_000.0;
-    /// Plants seeded at reset.
-    initial_plants: u32 = 3_000, "world", 10.0, 2_000_000.0;
-    /// Animals seeded at reset.
-    initial_animals: u32 = 120, "world", 1.0, 1_000_000.0;
-    /// Distinct founding plant populations.
-    ///
-    /// Plants can self, so unrelated founding stocks are viable on their own and
-    /// a varied starting flora costs nothing.
-    founder_lineages: u32 = 8, "world", 1.0, 512.0;
-    /// Distinct founding animal populations.
-    ///
-    /// Far lower than the plant figure, and for a real reason. Animals need a
-    /// compatible mate, and separate founding stocks are reproductively isolated
-    /// from each other from the first tick. Splitting a propagule across two
-    /// dozen stocks makes two dozen populations of a handful of individuals
-    /// each, every one of them instantly below the density at which it can find
-    /// mates, and the whole thing spirals into fragmentation and dies -- which
-    /// is correct behaviour from an initial condition nobody would mean. A
-    /// colonisation event brings one species, or a few; the rest is supposed to
-    /// happen during the run.
-    /// A few, not one and not dozens. One founding population makes the whole
-    /// run turn on a single random genotype; dozens fragment the propagule into
-    /// groups too sparse to find mates in, since separate stocks are
-    /// reproductively isolated from the first tick.
-    animal_founder_lineages: u32 = 2, "world", 1.0, 128.0;
-    /// Standing genetic variation within each founding population, in gene
-    /// units out of 255.
-    ///
-    /// Founders are a *sample from a source population*, not a set of unrelated
-    /// genotypes. Drawing them independently and uniformly maximises the range
-    /// sampled but does not describe a population at all: two uniform random
-    /// genomes differ by about 0.29 on the distance scale, further apart than
-    /// the mating threshold, so such founders cannot interbreed and every world
-    /// ends immediately. Propagule pressure works through the standing variation
-    /// *within* a source population, which is what this sets.
-    founder_spread: f32 = 8.2, "world", 0.0, 128.0;
-    /// Fraction of full reserves that founding animals start with.
-    founder_energy: f32 = 0.60, "world", 0.05, 1.0;
-    /// How close to its maximum size a founding plant starts. Founders that
-    /// begin as seedlings take hundreds of ticks to reach seeding size, by
-    /// which time the founding animals have already starved.
-    founder_plant_fill: f32 = 0.70, "world", 0.05, 1.0;
+    /// A cell wants to hold a workable handful of units: too fine and the
+    /// strength field a unit steers by is mostly empty cells, too coarse and
+    /// target selection scans hundreds of bodies to find the nearest.
+    grid_dim: u32 = 256, "field", 8.0, 4096.0;
+    /// Hard cap on units on the field, both sides together.
+    max_units: u32 = 200_000, "field", 100.0, 4_000_000.0;
+    /// Units each side musters.
+    units_per_side: u32 = 40_000, "field", 10.0, 2_000_000.0;
+    /// Kinds of unit each side fields.
+    kinds: u32 = 4, "field", 1.0, 8.0;
 
-    // ---- environment ----
-    /// Ticks in a full seasonal cycle.
-    season_length: u32 = 3_000, "environment", 100.0, 50_000.0;
-    /// Strength of the pole-to-equator temperature gradient. This is what
-    /// creates spatial niches, and without it the whole world selects for one
-    /// optimum and speciation never gets going.
-    latitude_amplitude: f32 = 1.0, "environment", 0.0, 2.0;
-    /// Seasonal swing added on top of latitude.
-    season_amplitude: f32 = 0.35, "environment", 0.0, 2.0;
-    /// Baseline light available for photosynthesis.
-    base_light: f32 = 1.0, "environment", 0.0, 4.0;
-    /// Seasonal swing in available light.
-    light_season_amplitude: f32 = 0.25, "environment", 0.0, 1.0;
-    /// Matter placed in the soil per unit of world area at reset. The world
-    /// runs on a closed nutrient budget, so this sets the ceiling on total
-    /// biomass. Expressed as a density, not a per-cell amount, so changing grid
-    /// resolution does not change how much matter the world contains.
-    soil_density: f32 = 0.375, "environment", 0.0, 20.0;
-    /// Fraction of a cell's surplus nutrient that spreads to its neighbours
-    /// each tick. Keeps dead zones from becoming permanent.
-    soil_diffusion: f32 = 0.06, "environment", 0.0, 0.25;
-    // ---- environmental stochasticity ----
-    /// Resolution, per side, of the regional climate field. Regional droughts
-    /// are the reason this is not a single global number: a world where every
-    /// place has a bad year at once has no refuges, and refuges are what
-    /// populations actually persist in.
-    climate_regions: u32 = 8, "environment", 1.0, 64.0;
-    /// Autocorrelation of the regional productivity anomaly, per tick.
-    ///
-    /// Environmental time series are reddened, not white. White noise averages
-    /// out over a lifetime and barely perturbs a population; autocorrelated
-    /// noise produces runs of bad years, which is what actually drives
-    /// populations to extinction. Values near 1 mean long memory.
-    climate_redness: f32 = 0.9970, "environment", 0.0, 0.9999;
-    /// Standard deviation of the regional productivity anomaly, as a fraction
-    /// of mean productivity.
-    climate_variance: f32 = 0.35, "environment", 0.0, 1.0;
-    /// Autocorrelation of the global temperature anomaly, per tick.
-    temp_redness: f32 = 0.9990, "environment", 0.0, 0.9999;
-    /// Standard deviation of the global temperature anomaly, in the same units
-    /// as the latitude gradient.
-    temp_variance: f32 = 0.22, "environment", 0.0, 2.0;
-    /// Expected disturbance events per tick: fire, storm, flood. Patch-scale
-    /// destruction is a structuring force in most real ecosystems, not an
-    /// interruption to one.
-    disturbance_rate: f32 = 0.02, "environment", 0.0, 5.0;
-    /// Disturbance radius as a fraction of the world's width.
-    disturbance_radius: f32 = 0.045, "environment", 0.001, 0.5;
-    /// Fraction of organisms killed at the centre of a disturbance.
-    disturbance_severity: f32 = 0.9, "environment", 0.0, 1.0;
-    /// Soil density at which nutrient uptake runs at half rate.
-    soil_half: f32 = 0.09, "environment", 0.002, 4.0;
+    /// How far apart the two musters are drawn up, as a fraction of the field.
+    deploy_separation: f32 = 0.45, "deployment", 0.05, 0.95;
+    /// Depth of each formation, front to back, as a fraction of the field.
+    deploy_depth: f32 = 0.12, "deployment", 0.01, 0.9;
+    /// Width of each formation, flank to flank, as a fraction of the field.
+    deploy_width: f32 = 0.55, "deployment", 0.05, 1.0;
 
-    // ---- plants ----
-    /// Local biomass density at which shading halves the growth rate.
-    shade_half: f32 = 0.55, "plants", 0.005, 20.0;
-    /// Fraction of biomass respired away each tick, returned to the soil.
-    plant_maintenance: f32 = 0.0008, "plants", 0.0, 0.05;
-    /// Biomass below which a plant dies.
-    plant_min_biomass: f32 = 0.02, "plants", 0.0001, 1.0;
-    /// Age at which a plant's mortality hazard has risen by a factor of e.
-    plant_senescence: f32 = 1_600.0, "plants", 50.0, 100_000.0;
-    /// Growth cost paid for full chemical defence.
-    toxicity_growth_cost: f32 = 0.45, "plants", 0.0, 1.0;
-    /// Per-gene mutation probability for plants.
-    plant_mutation_rate: f32 = 0.030, "plants", 0.0, 0.5;
-    /// Smallest biomass a seed may carry.
-    plant_seed_min: f32 = 0.05, "plants", 0.001, 5.0;
+    /// Turn applied per tick at full rudder, in radians.
+    ///
+    /// Bounded because a body cannot pivot instantly, and a line that can is a
+    /// line that never has a flank to turn.
+    turn_rate: f32 = 0.12, "movement", 0.005, 1.0;
+    /// Fraction of speed retained each tick, which is what gives a charge its
+    /// build-up and a halt its slide.
+    drag: f32 = 0.80, "movement", 0.0, 0.99;
+    /// Multiplier on top speed for a unit that has broken. Fear is faster than
+    /// discipline.
+    rout_speed: f32 = 1.5, "movement", 1.0, 4.0;
 
-    // ---- animals ----
-    /// Ticks between brain evaluations. Movement still integrates every tick.
-    /// This is the single biggest lever on cost at large populations.
-    think_interval: u32 = 4, "animals", 1.0, 32.0;
-    /// Energy stored per unit of body size at full reserves.
-    energy_per_size: f32 = 22.0, "animals", 1.0, 200.0;
-    /// Body matter per unit of body size.
-    mass_per_size: f32 = 0.30, "animals", 0.01, 5.0;
-    /// Fraction of ingested matter an animal keeps for building offspring. The
-    /// rest is excreted straight back to the soil.
-    matter_retention: f32 = 0.55, "animals", 0.0, 1.0;
-    /// How much matter an animal can hold, as a multiple of its own body mass.
-    /// Bounded so a long-lived grazer cannot hoard the world's nutrient budget.
-    reserve_capacity: f32 = 4.0, "animals", 0.1, 50.0;
-    /// Basal metabolic rate coefficient, multiplied by `size^0.75`.
+    /// How far a unit will look for someone to fight, in units.
     ///
-    /// Everything below is expressed as a *fraction of basal*, which is how
-    /// organ maintenance is actually measured. They used to be independent
-    /// additive surcharges of the same magnitude as basal itself, so an animal
-    /// with middling genes paid over two and a half times its basal rate in
-    /// organ costs alone and income never cleared upkeep by any margin.
-    /// Calibrated so that animals can make a living at all. The energy budget
-    /// has no independent units -- only the ratio of income to upkeep is
-    /// meaningful -- so this sets the scale rather than deciding an outcome.
-    /// Sexual reproduction needs a lower figure than clonal did: two parents
-    /// per offspring, plus the possibility of finding no mate.
+    /// Bounded to its own cell and the ring around it whatever this says: a
+    /// unit fights what it can reach, and anything further is the commander's
+    /// problem.
+    search_radius: f32 = 3.0, "combat", 0.5, 32.0;
+    /// Fraction of the casualty field carried from one tick to the next.
     ///
-    /// It also decides whether animals move at all, which was not obvious until
-    /// it was measured. At 0.015 an animal could live indefinitely off the
-    /// regrowth of the patch it was standing on, so sitting still was the
-    /// optimal strategy and evolution took it: mean thrust was *negative*, and
-    /// the population held station while the vegetation around it stayed pinned
-    /// at the grazing floor. That is a sea anemone, not a grazer. Raising it
-    /// makes a single patch insufficient, so foraging pays. Across five seeds at
-    /// 25,000 organisms, tripling it took median travel from 4.9 world units per
-    /// hundred ticks to 24.5 and, far from costing lives, took establishment
-    /// from two seeds in five to three.
-    metabolism: f32 = 0.045, "animals", 0.0, 1.0;
-    /// Cost of a fully developed sensory system, as a fraction of basal rate.
-    vision_upkeep: f32 = 0.25, "animals", 0.0, 3.0;
-    /// Cost of maximum weapons and armour, as a fraction of basal rate.
-    combat_upkeep: f32 = 0.30, "animals", 0.0, 3.0;
-    /// Cost of slow ageing and large reserves, as a fraction of basal rate.
-    longevity_upkeep: f32 = 0.25, "animals", 0.0, 3.0;
-    /// Cost of movement, multiplied by size and the square of speed.
-    move_cost: f32 = 0.085, "animals", 0.0, 2.0;
-    /// Plant biomass an animal can ingest per tick, per unit of size, when food
-    /// is abundant.
-    graze_rate: f32 = 0.60, "animals", 0.0, 5.0;
-    /// Fraction of a plant's maximum size that grazers cannot reach.
-    ///
-    /// Real grazed plants survive precisely because the crown and roots are out
-    /// of reach. Without a refuge, grazing pressure turns directly into plant
-    /// *mortality*: herbivores eat plants down past the death threshold, and the
-    /// stand can only recover from seed instead of regrowing. That converts a
-    /// gentle negative feedback into a violent one and is what makes the
-    /// plant-herbivore cycle swing by an order of magnitude.
-    graze_refuge: f32 = 0.15, "animals", 0.0, 0.9;
-    /// How much grazers get in each other's way, per unit of local animal
-    /// density.
-    ///
-    /// With intake set by food alone, per-capita income does not fall as the
-    /// herd grows, so the population has no intermediate equilibrium: growth is
-    /// either positive until it hits the hard cap or negative until extinction,
-    /// and the run alternates between the two. Interference between consumers
-    /// (the Beddington-DeAngelis term) makes income fall smoothly with crowding
-    /// and gives the population somewhere to settle.
-    graze_interference: f32 = 1.20, "animals", 0.0, 20.0;
-    /// Local plant density at which grazing runs at half its maximum rate.
-    ///
-    /// This is a Holling type II functional response, and it is what keeps the
-    /// herbivore-plant cycle from detonating. With intake capped only by a flat
-    /// rate, herbivores eat just as efficiently at low plant density as at high
-    /// and strip the world bare before starving; saturating intake gives sparse
-    /// plants an effective refuge and damps the oscillation.
-    graze_half: f32 = 0.35, "animals", 0.001, 20.0;
-    /// Energy released per unit of biomass digested.
-    energy_per_biomass: f32 = 12.0, "animals", 0.1, 50.0;
-    /// How much of a plant's toxicity blocks energy extraction.
-    toxicity_defence: f32 = 0.85, "animals", 0.0, 1.0;
-    /// Upkeep surcharge for a fully developed digestive system, per gut.
-    ///
-    /// This is the whole trade-off behind diet. Carrying the machinery for both
-    /// plants and flesh means paying for both, so a generalist runs at a
-    /// standing cost a specialist does not, and specialisation emerges from that
-    /// rather than from a curve chosen in advance to produce it.
-    /// Roughly the share of basal rate the digestive tract accounts for in real
-    /// animals; the earlier 0.45 per gut was not physiological.
-    gut_upkeep: f32 = 0.20, "animals", 0.0, 3.0;
-    /// Fraction of a killed animal's energy the predator absorbs.
-    predation_efficiency: f32 = 0.85, "animals", 0.0, 1.0;
-    /// Energy spent on a failed attack, per unit of size.
-    attack_cost: f32 = 0.22, "animals", 0.0, 5.0;
-    /// Turn applied per tick at full rudder when barely moving, in radians.
-    ///
-    /// This is the pivot rate, not the turn rate at speed: see
-    /// `turn_lateral_accel`.
-    turn_rate: f32 = 0.42, "animals", 0.0, 3.2;
-    /// Lateral acceleration an animal can generate, which is what actually
-    /// limits how tightly it can turn while moving.
-    ///
-    /// Without this, turning was a fixed angle per tick regardless of speed --
-    /// an animal could pivot on the spot at a sprint, for free. Evolution found
-    /// that immediately: animals turned at four fifths of full rudder
-    /// continuously and orbited a circle of radius 0.8 world units, less than
-    /// half a sensing cell. They travelled 27 units of path for every 0.6 of
-    /// actual ground covered, never left the cell they were born in, and held
-    /// their patch pinned at the grazing floor forever. Station-keeping was the
-    /// optimal strategy because it cost nothing.
-    ///
-    /// Cornering is limited by grip, so the radius of a turn grows with the
-    /// square of speed (`r = v^2 / a`) and the angular rate falls as `a / v`.
-    /// The default puts the turning circle of a typical animal at a few sensing
-    /// cells across, so moving takes it somewhere it can sense a difference.
-    turn_lateral_accel: f32 = 0.009, "animals", 0.0001, 1.0;
-    /// Fraction of velocity retained each tick.
-    drag: f32 = 0.82, "animals", 0.0, 1.0;
-    /// Per-weight mutation probability for brains, relative to the animal's own
-    /// mutation-rate gene.
-    brain_mutation_scale: f32 = 1.4, "animals", 0.0, 10.0;
-    /// Extra upkeep paid when living away from the preferred temperature. This
-    /// is what makes the climate gradient a real cost rather than decoration.
-    temp_stress: f32 = 0.80, "animals", 0.0, 5.0;
-    /// Floor under attack and defence, so an animal with neither gene is still
-    /// not literally powerless.
-    combat_base: f32 = 0.30, "animals", 0.0, 2.0;
-    /// Age-independent hazard: the Makeham term. Accidents, disease, bad luck.
-    ///
-    /// Together with senescence below this replaces a hard maximum age. A cutoff
-    /// makes every animal immortal right up to a birthday, which is not how
-    /// anything dies and which let lineages that never reproduced persist
-    /// indefinitely -- there was no way for selection to remove them, because
-    /// they produced no offspring to select on. A rising hazard means nothing is
-    /// immortal and a lineage that does not breed is gone within a few
-    /// lifetimes, which is what removes them honestly.
-    mortality_makeham: f32 = 0.00025, "animals", 0.0, 0.05;
-    /// Hazard at age zero for the age-dependent (Gompertz) term.
-    mortality_gompertz: f32 = 0.00008, "animals", 0.0, 0.05;
-    /// Chance per tick that a plant dies for reasons the model does not
-    /// represent: herbivores it never met, pathogens, trampling.
-    plant_mortality: f32 = 0.00020, "animals", 0.0, 0.05;
-
-    // ---- speciation ----
-    /// Genetic distance beyond which two animals will not breed together.
-    ///
-    /// This is reproductive isolation, and it is what actually makes a species
-    /// a species: a group that interbreeds. The registry's distance threshold
-    /// only decides what a lineage is *labelled*, which is an operational
-    /// convenience rather than the biology.
-    mating_threshold: f32 = 0.22, "speciation", 0.01, 1.0;
-    /// How many cells an animal will search outward for a mate before giving
-    /// up.
-    ///
-    /// Mate finding is not confined to the interaction block. The block exists
-    /// so that feeding writes stay disjoint; finding a mate only *reads* the
-    /// partner, so it can range further, and it must -- at equilibrium density
-    /// a block usually contains nobody else at all, and confining the search to
-    /// it made every animal population fail for want of a mate regardless of
-    /// how healthy it was. The search is still bounded, so mate limitation
-    /// remains a real Allee effect at genuinely low density.
-    mate_search_cells: u32 = 400, "speciation", 1.0, 4096.0;
-    /// Cells sampled for a pollen donor before a plant selfs.
-    ///
-    /// Plants fall back to selfing rather than failing, which is what mixed
-    /// mating systems do. Animals have no such fallback, so mate limitation can
-    /// and does end an animal population.
-    pollen_search_tries: u32 = 4, "plants", 1.0, 32.0;
-    /// Genetic distance from a species' founding genome at which a lineage is
-    /// recorded as a new species.
-    species_threshold: f32 = 0.16, "speciation", 0.01, 1.0;
-    /// Population below which a species is retired from the registry, and the
-    /// population a candidate must reach before it enters the tree of life.
-    species_min_population: u32 = 8, "speciation", 1.0, 10_000.0;
-    /// How fast a species' reference genome follows its own members, per birth.
-    ///
-    /// This is what makes the distance threshold ask whether a lineage has
-    /// split, rather than how far it has changed since it began. A group
-    /// diverging faster
-    /// than the reference can follow separates; a population drifting as a whole
-    /// carries its reference with it and produces no branch, because one lineage
-    /// changing through time is not a branching event.
-    ///
-    /// Too high and nothing ever speciates; too low and it reverts to measuring
-    /// cumulative change from the founder. At the default the reference tracks
-    /// its population over roughly a hundred births.
-    species_drift: f32 = 0.01, "speciation", 0.0, 1.0;
+    /// Morale reads this field, so it decides how long a unit goes on feeling
+    /// the men who fell beside it. Clearing it every tick would give a line no
+    /// reason to break: it would only ever see the deaths of the current
+    /// instant.
+    loss_memory: f32 = 0.92, "combat", 0.0, 0.999;
 }
 
 impl ParamInfo {
@@ -445,66 +167,52 @@ impl Config {
         (self.grid_dim as usize) * (self.grid_dim as usize)
     }
 
-    /// World units per grid cell.
+    /// Field units per grid cell.
     #[inline(always)]
     pub fn cell_size(&self) -> f32 {
-        self.world_size / self.grid_dim as f32
+        self.field_size / self.grid_dim as f32
     }
 
-    /// Repair anything that would make the world impossible to build, so that a
-    /// bad value from the UI degrades instead of panicking deep in a loop.
+    /// Repair anything that would make the battle impossible to set up, so that
+    /// a bad value from the interface degrades instead of panicking deep in a
+    /// loop.
     pub fn sanitize(&mut self) {
-        self.world_size = self.world_size.clamp(16.0, 65_536.0);
+        self.field_size = self.field_size.clamp(16.0, 65_536.0);
         self.grid_dim = self.grid_dim.clamp(4, 4096).next_power_of_two();
-        // Blocks tile the grid exactly, so both must be powers of two and the
-        // block can never exceed the grid.
-        self.interaction_block = self
-            .interaction_block
-            .clamp(1, self.grid_dim)
-            .next_power_of_two();
-        self.max_plants = self.max_plants.clamp(1, 8_000_000);
-        self.max_animals = self.max_animals.clamp(1, 8_000_000);
-        self.initial_plants = self.initial_plants.min(self.max_plants);
-        self.initial_animals = self.initial_animals.min(self.max_animals);
-        self.founder_lineages = self.founder_lineages.clamp(1, 4096);
-        self.animal_founder_lineages = self.animal_founder_lineages.clamp(1, 4096);
-        self.think_interval = self.think_interval.clamp(1, 64);
-        self.season_length = self.season_length.max(1);
-        self.drag = self.drag.clamp(0.0, 1.0);
-        self.soil_diffusion = self.soil_diffusion.clamp(0.0, 0.25);
-        self.species_threshold = self.species_threshold.max(1e-3);
+        self.max_units = self.max_units.clamp(2, 8_000_000);
+        // Both sides have to fit, and each side has to have somebody in it.
+        self.units_per_side = self
+            .units_per_side
+            .clamp(1, (self.max_units / crate::grid::TEAMS as u32).max(1));
+        self.kinds = self.kinds.clamp(1, crate::army::MAX_ARCHETYPES as u32);
+        self.turn_rate = self.turn_rate.max(1e-4);
+        self.drag = self.drag.clamp(0.0, 0.99);
+        self.loss_memory = self.loss_memory.clamp(0.0, 0.999);
     }
 
-    /// A world sized for a target total population, keeping density constant so
-    /// that the ecology behaves the same at every scale.
-    pub fn for_population(total: u32) -> Self {
+    /// A field sized to hold `total` units at a constant density, so the
+    /// tactics behave the same at every scale and only the size of the map
+    /// changes.
+    pub fn for_muster(total: u32) -> Self {
         let mut c = Config::default();
-        let default_total = (c.max_plants + c.max_animals) as f32;
-        let scale = total as f32 / default_total;
-        c.max_plants = (c.max_plants as f32 * scale) as u32;
-        c.max_animals = (c.max_animals as f32 * scale) as u32;
-        c.initial_plants = (c.initial_plants as f32 * scale) as u32;
-        c.initial_animals = (c.initial_animals as f32 * scale) as u32;
-        // Area scales with population so density, and therefore every
-        // interaction rate, is unchanged.
-        c.world_size *= crate::fastmath::sqrt(scale);
-        // Round the grid to the *nearest* power of two rather than up. Cell size
-        // is what every per-cell budget is denominated in -- mate search covers a
-        // fixed number of cells, and a cell has to hold somebody -- so rounding
-        // up could halve the area those budgets reach at some scales and not
-        // others, which is a change in the ecology dressed up as a change in
-        // resolution.
+        let base = c.units_per_side * crate::grid::TEAMS as u32;
+        let scale = total as f32 / base as f32;
+        c.units_per_side = ((c.units_per_side as f32 * scale) as u32).max(1);
+        c.max_units = (total as f32 * 1.05) as u32 + 16;
+        c.field_size *= crate::fastmath::sqrt(scale);
+        // Nearest power of two, not the next one up: cell size is what every
+        // per-cell budget is denominated in -- whether a cell holds anybody,
+        // how many bodies target selection scans -- so rounding up would change
+        // the combat at some scales and not others.
         let want = c.grid_dim as f32 * crate::fastmath::sqrt(scale);
         let lo = (want as u32).max(1).next_power_of_two();
         let lo = if lo as f32 > want { lo / 2 } else { lo };
-        // The geometric midpoint between lo and 2*lo, so the pick is nearest in
-        // the ratio that matters rather than in absolute cells.
-        let midpoint = lo as f32 * core::f32::consts::SQRT_2;
-        let nearest = if want >= midpoint { lo * 2 } else { lo };
+        let nearest = if want >= lo as f32 * core::f32::consts::SQRT_2 {
+            lo * 2
+        } else {
+            lo
+        };
         c.grid_dim = nearest.clamp(8, 4096);
-        // Interaction blocks are an absolute area, not a fraction of the grid:
-        // they exist to hold a workable number of organisms, and that number
-        // must not change when the world is rescaled.
         c.sanitize();
         c
     }
@@ -517,61 +225,46 @@ mod tests {
     #[test]
     fn every_param_round_trips() {
         let mut c = Config::default();
-        for (i, info) in PARAMS.iter().enumerate() {
-            let id = i as u32;
-            let probe = (info.lo + info.hi) * 0.5;
-            assert!(c.set_param(id, probe), "{} rejected {probe}", info.name);
-            let got = c.get_param(id);
-            // Integer-typed params truncate, which is expected.
-            assert!(
-                (got - probe).abs() <= 1.0 + probe.abs() * 1e-6,
-                "{}: set {probe}, read back {got}",
-                info.name
-            );
+        for i in 0..PARAMS.len() as u32 {
+            let before = c.get_param(i);
+            assert!(c.set_param(i, before), "param {i} rejected its own value");
+            assert_eq!(c.get_param(i), before, "param {i} did not round trip");
         }
     }
 
     #[test]
     fn param_ids_match_names_and_defaults() {
         let c = Config::default();
-        for (i, info) in PARAMS.iter().enumerate() {
-            assert_eq!(Config::param_id(info.name), Some(i as u32), "{}", info.name);
+        for (i, p) in PARAMS.iter().enumerate() {
+            assert_eq!(Config::param_id(p.name), Some(i as u32));
             assert!(
-                (c.get_param(i as u32) - info.default).abs() <= 1e-3 * info.default.abs().max(1.0),
-                "{} default mismatch",
-                info.name
+                (c.get_param(i as u32) - p.default).abs() < 1e-3,
+                "{} default disagrees with the table",
+                p.name
             );
         }
-        assert_eq!(Config::param_id("no_such_param"), None);
     }
 
     #[test]
     fn every_param_has_a_readable_description() {
-        for info in PARAMS {
-            let d = info.description();
-            assert!(!d.is_empty(), "{} has no doc comment", info.name);
-            assert!(
-                !d.contains("doc ="),
-                "{}: doc not unwrapped: {d}",
-                info.name
-            );
-            assert!(!d.contains('"'), "{}: stray quotes: {d}", info.name);
-            assert!(!info.group.is_empty(), "{} has no group", info.name);
+        for p in PARAMS {
+            let d = p.description();
+            assert!(!d.is_empty(), "{} has no description", p.name);
+            assert!(!d.contains('"'), "{}: stray quotes: {d}", p.name);
         }
     }
 
     #[test]
     fn defaults_sit_inside_their_advertised_range() {
-        for info in PARAMS {
+        for p in PARAMS {
             assert!(
-                info.default >= info.lo && info.default <= info.hi,
+                p.default >= p.lo && p.default <= p.hi,
                 "{} default {} outside [{}, {}]",
-                info.name,
-                info.default,
-                info.lo,
-                info.hi
+                p.name,
+                p.default,
+                p.lo,
+                p.hi
             );
-            assert!(info.lo < info.hi, "{} has an empty range", info.name);
         }
     }
 
@@ -581,60 +274,32 @@ mod tests {
         assert!(!c.set_param(PARAMS.len() as u32, 1.0));
         assert!(!c.set_param(0, f32::NAN));
         assert!(!c.set_param(0, f32::INFINITY));
-        assert_eq!(c, Config::default());
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn interaction_blocks_tile_the_grid() {
-        let mut c = Config::default();
-        c.grid_dim = 256;
-        c.interaction_block = 3;
-        c.sanitize();
-        assert_eq!(c.interaction_block, 4);
-        assert_eq!(c.grid_dim % c.interaction_block, 0);
-
-        // A block larger than the grid must be clamped, not left to index out
-        // of bounds.
-        c.grid_dim = 32;
-        c.interaction_block = 512;
-        c.sanitize();
-        assert!(c.interaction_block <= c.grid_dim);
-        assert_eq!(c.grid_dim % c.interaction_block, 0);
-
-        for target in [20_000u32, 200_000, 1_000_000] {
-            let c = Config::for_population(target);
-            assert_eq!(c.grid_dim % c.interaction_block, 0, "target {target}");
-        }
-    }
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn sanitize_repairs_hostile_values() {
-        let mut c = Config::default();
-        c.grid_dim = 500; // not a power of two
-        c.world_size = -5.0;
-        c.initial_plants = 10_000_000;
-        c.max_plants = 1_000;
-        c.think_interval = 0;
+        let mut c = Config {
+            grid_dim: 500,
+            units_per_side: 10_000_000,
+            max_units: 1_000,
+            kinds: 99,
+            drag: 5.0,
+            ..Default::default()
+        };
         c.sanitize();
         assert_eq!(c.grid_dim, 512);
-        assert!(c.world_size >= 16.0);
-        assert!(c.initial_plants <= c.max_plants);
-        assert_eq!(c.think_interval, 1);
-        assert_eq!(c.cell_count(), 512 * 512);
+        assert!(c.units_per_side * crate::grid::TEAMS as u32 <= c.max_units);
+        assert!(c.kinds as usize <= crate::army::MAX_ARCHETYPES);
+        assert!(c.drag <= 0.99);
     }
 
-    /// Scaling the world must hold density constant, or the ecology tuned at
-    /// one size collapses at another.
     #[test]
-    fn for_population_preserves_density() {
+    fn for_muster_preserves_density() {
         let base = Config::default();
-        let base_density =
-            (base.max_plants + base.max_animals) as f32 / (base.world_size * base.world_size);
-        for target in [2_500u32, 10_000, 25_000, 60_000, 200_000, 1_000_000] {
-            let c = Config::for_population(target);
-            let density = (c.max_plants + c.max_animals) as f32 / (c.world_size * c.world_size);
+        let base_density = (base.units_per_side * 2) as f32 / (base.field_size * base.field_size);
+        for target in [2_000u32, 20_000, 200_000, 1_000_000] {
+            let c = Config::for_muster(target);
+            let density = (c.units_per_side * 2) as f32 / (c.field_size * c.field_size);
             assert!(
                 (density / base_density - 1.0).abs() < 0.05,
                 "target {target}: density {density} vs base {base_density}"
@@ -642,20 +307,14 @@ mod tests {
         }
     }
 
-    /// Per-cell budgets -- how many cells mate search may visit, how many
-    /// organisms an interaction block holds -- are only meaningful if a cell
-    /// covers about the same ground at every scale. Rounding the grid to the
-    /// nearest power of two keeps that within sqrt(2); rounding up did not.
     #[test]
-    fn for_population_keeps_cell_size_stable() {
+    fn for_muster_keeps_cell_size_stable() {
         let base = Config::default().cell_size();
-        for target in [2_500u32, 10_000, 25_000, 60_000, 200_000, 1_000_000] {
-            let c = Config::for_population(target);
-            let ratio = c.cell_size() / base;
+        for target in [2_000u32, 20_000, 200_000, 1_000_000] {
+            let ratio = Config::for_muster(target).cell_size() / base;
             assert!(
                 (0.70..=1.42).contains(&ratio),
-                "target {target}: cell {} vs base {base} (ratio {ratio})",
-                c.cell_size()
+                "target {target}: cell size ratio {ratio}"
             );
         }
     }

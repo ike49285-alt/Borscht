@@ -1,133 +1,57 @@
 # Borscht
 
-An evolution simulator. Plants and animals share a world with a closed nutrient
-budget, a climate that varies with latitude and season, and no scripted
-behaviour at all. Everything you see — where things live, what they eat, whether
-predators exist — is the outcome of selection on mutable genomes.
+A mass battle simulator: two armies, hundreds of thousands of men each, every
+one of them an individual body with a position, a facing, health and nerve.
 
-The default world holds about a hundred thousand organisms; it scales up to a
-million if you want one. It runs in the browser and headless from the command
-line for long experiments.
+It grew out of an evolution simulator, and kept the parts that turned out to be
+about *scale* rather than about ecology: struct-of-arrays pools, a counting-sort
+spatial grid, sensing through per-cell fields rather than neighbour lists,
+quantised neural networks, a raw `extern "C"` WebAssembly boundary with no
+bindgen, and an instanced renderer that draws bodies with a heading rather than
+points. The ecology itself is in the git history.
 
-```
-tools/build-web.sh
-python3 -m http.server -d web 8080     # then open http://localhost:8080
-```
+## Where it is
 
-## What actually evolves
+Stage one: two armies muster, march at each other, and fight. Behaviour is
+hard-coded -- walk toward the enemy strength you can sense, hit whatever comes
+into reach, with a blow from behind landing harder than one from the front.
+There is no morale yet, so lines do not break; there are no commanders, so
+nothing manoeuvres. Those are next, and they are the point.
 
-Each organism carries a genome of bytes. Every byte maps onto a trait, mutates
-when it is copied, and — this is the part that matters — **costs something**.
+## The measured ceiling
 
-Animals have sixteen loci: body size, top speed, sensory reach, two independent
-gut investments, attack, defence, maturity age, offspring investment, mutation
-rate, senescence rate, temperature preference and tolerance, colour, energy
-storage, and breeding threshold — each carrying two alleles. Plants have eight: growth rate, maximum size,
-seed dispersal range, seed investment, toxicity, temperature preference and
-tolerance, and colour.
+Both sides together, on one core, including the phase where the armies are
+actually in contact:
 
-Diet is not a dial. There are two genes — one for digesting plants, one for
-digesting flesh — and a gut is tissue you pay upkeep on. Specialisation emerges
-because carrying both guts means paying for both. A single "diet" gene needs a
-hand-picked curve to say how a half-carnivore fares, and whatever curve you
-choose is the answer you wanted rather than one the model produced.
+| men | native ms/tick | native ticks/s | wasm ms/tick | wasm ticks/s |
+|-----|---------------:|---------------:|-------------:|-------------:|
+| 20,000 | 2.1 | 484 | 1.8 | 572 |
+| 100,000 | 9.5 | 105 | 9.0 | 111 |
+| 500,000 | 39 | 26 | 46 | 22 |
+| 1,000,000 | 104 | 10 | 132 | 8 |
 
-A gene with only upside is not an evolutionary pressure — the population pins it
-to the maximum and stops being interesting. So size raises attack and storage
-but also metabolism, following Kleiber's `mass^0.75`. Speed costs energy with
-the square of velocity. Vision, weapons, guts and slow ageing are charged as
-*fractions of basal metabolic rate*, which is how organ maintenance is actually
-measured. A wide temperature tolerance lowers the peak, so a generalist never
-beats a specialist on the specialist's home ground.
+A million men run, and they are not a slideshow by accident: at eight ticks a
+second plus thirty milliseconds of frame packing, that is about six frames a
+second in a browser. **500,000 is the practical ceiling for something worth
+watching**, and 100,000 leaves real headroom for the morale and command work
+that has not been done yet. The viewer offers all of them and says which is
+which.
 
-Animals also carry a small neural network — fourteen senses, ten hidden units,
-three actions — whose weights recombine and mutate alongside the genes. It sees local plant,
-prey and predator density and their gradients, its own energy and age, crowding,
-temperature mismatch, and an internal oscillator; it decides how to turn, how
-hard to move, whether to feed, and whether to breed. Gradients are rotated into
-the animal's own frame of reference, so a brain learns "food is ahead" rather
-than having to rediscover steering separately for every compass direction.
+Two measurements were worth the trouble of taking:
 
-Founders are drawn at random and get no help. Their diets are whatever they are,
-which means a founding cohort can and does eat itself; they begin with no store
-of matter and have to eat before they can build anything. Reproduction is
-physiological rather than a decision — an animal that is mature, fed and
-carrying enough matter breeds — because a neural veto on breeding is not how
-organisms work, and it produces a lineage that is fit in every other respect but
-never reproduces, and so never produces the offspring selection would need to
-remove it.
+**The first benchmark lied.** It ran two hundred ticks from deployment, which at
+these distances is entirely marching. Coarsening the grid looked like a clean
+win, because coarse cells make the per-cell fields smaller. Timing a *whole
+battle* reversed it completely -- 128 cells a side took 333 seconds against 80
+for 512 -- because target selection scans a neighbourhood, and a neighbourhood
+holding four times as many men costs four times as much.
 
-Nothing dies on a birthday either. Mortality is Gompertz–Makeham: a constant
-hazard plus one rising exponentially with age. Nothing is immortal, so a lineage
-that fails is gone within a few lifetimes.
-
-## Sex
-
-Organisms are diploid. Every locus carries two alleles, expression is their mean
-(additive gene action, the standard model for quantitative traits), and
-reproduction goes through gametes: one allele per locus, assorted independently,
-fused into a zygote. Animal brains recombine by uniform crossover between the
-parents. Heterozygosity is tracked, and it falls over a run — drift removes
-alleles and only mutation puts them back.
-
-Animals must **find a mate**, and there is no selfing fallback: two animals breed
-only if their genetic distance is below a threshold, so reproductive isolation —
-not a label in a registry — is what makes a species a species. Plants outcross
-where they can and self when they cannot, which is what mixed mating systems do.
-
-Sex is expensive, and the model shows it. Clonal reproduction gave 4–5 of 6
-worlds a persistent animal population; with sex it is closer to 2–3 of 6. That is
-not a defect to be tuned away — the two-fold cost of sex and Allee effects in
-small sexual populations are exactly what the literature describes. Adding sex
-also exposed a real gap: animals could sense *crowding* but had no directional
-sense of their own kind, so mate-seeking and breeding aggregation could not
-evolve at all. They now have a conspecific gradient.
-
-## The environment is not a backdrop
-
-Temperature and light vary with latitude and season, and on top of that sit two
-stochastic processes. Both are AR(1), because environmental variance only
-matters if it is **autocorrelated**: white noise averages out within a lifetime
-and barely perturbs a population, while reddened noise produces runs of bad
-years, and runs of bad years are what actually drive populations to extinction.
-
-Productivity varies *regionally* rather than globally, so a drought leaves
-refuges — and refuges are where populations survive bad years. Temperature has a
-global anomaly on top of the seasonal cycle. Disturbance — fire, storm, flood —
-clears patches at random, killing without regard to fitness, which is a
-different selective regime from starvation and predation.
-
-## Matter is conserved, energy is not
-
-The world runs on a fixed stock of matter that cycles between soil, plant
-biomass and animal bodies. Sunlight enters for free, flows up the food chain and
-dissipates when anything dies.
-
-This asymmetry is the main thing keeping the ecosystem from either collapsing or
-exploding: total biomass is capped by a physical budget rather than by a tuned
-constant. It is also a sharp correctness test. Matter is checked every tick in
-the test suite, and any drift means a bug in one of the transfer paths rather
-than an interesting ecological outcome.
-
-Animals build their offspring out of what they have eaten. That sounds
-equivalent to drawing from the soil under a closed budget, but it is not: plants
-sit at their nutrient-limited equilibrium and hold nearly all the matter, so
-soil stays pinned near zero and births fail however well-fed the animal is.
-
-The **biomass** control moves that budget. It is an intervention rather than a
-parameter — a step change in how much stuff there is to go round, of the kind an
-experimenter makes and an ecosystem does not. Taking matter out works up from the
-bottom of the food web: the soil first, because in this model the soil *is* the
-dead-organism pool and everything that dies goes to the soil where it fell; then
-the standing crop, thinned evenly; then animal reserves, which are fat and can be
-given up; and only then whole animals, because an animal cannot be partly
-removed. Adding matter puts it back into the soil in proportion to what is
-already there, so the spatial structure that makes some places worth being in
-survives the intervention.
-
-Conservation is not relaxed for the control. Every gram moved is recorded, and
-the invariant becomes an equality against founding stock plus that ledger — so an
-intervention still cannot hide a leak.
+**Compaction was clearing every target in the army, every tick.** Swap-remove
+moves a unit's index, so compacting has to drop every stored target; and in a
+battle somebody dies almost every tick. Every man in contact was therefore
+re-scanning his surroundings continuously to find the enemy he was already
+fighting. Bodies now wait on the field until there are enough to be worth
+clearing, which halved the cost of a battle.
 
 ## Layout
 

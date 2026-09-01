@@ -11,21 +11,12 @@
 // identity changes.
 
 export const ColorMode = Object.freeze({
-  species: 0,
-  diet: 1,
-  energy: 2,
-  age: 3,
-  size: 4,
+  team: 0,
+  kind: 1,
+  health: 2,
+  morale: 3,
 });
 
-const SNAPSHOT_ERRORS = [
-  null,
-  'not a Borscht snapshot',
-  'snapshot was written by a different format version',
-  'snapshot was written by a build with different parameters',
-  'snapshot is truncated or corrupt',
-  'snapshot is larger than this build can hold',
-];
 
 export class Borscht {
   #exports;
@@ -95,20 +86,18 @@ export class Borscht {
     return this.#exports.population();
   }
 
-  get plantCount() {
-    return this.#exports.plant_count();
+  /** Units still on the field for one side. */
+  teamCount(team) {
+    return this.#exports.team_count(team >>> 0);
   }
 
-  get animalCount() {
-    return this.#exports.animal_count();
+  /** Whether one side has been wiped out. */
+  get decided() {
+    return this.#exports.decided() === 1;
   }
 
   get worldSize() {
     return this.#exports.world_size();
-  }
-
-  get totalMatter() {
-    return this.#exports.total_matter();
   }
 
   // ----------------------------------------------------------- parameters --
@@ -125,33 +114,14 @@ export class Borscht {
     this.#exports.params_reset();
   }
 
-  // -------------------------------------------------------------- matter --
-
-  /**
-   * Set how much matter the world holds, as a multiple of what it was founded
-   * with. Withdrawal takes the soil (which is where the dead are) before the
-   * plants, and the plants before the animals. Returns the signed amount moved.
-   */
-  setMatter(factor) {
-    return this.#exports.set_matter(factor);
-  }
-
-  /** What the world holds now. */
-  totalMatter() {
-    return this.#exports.total_matter();
-  }
-
-  /** What it should hold: founding stock plus every operator intervention. */
-  matterBudget() {
-    return this.#exports.matter_budget();
-  }
-
   /** Apply `{ name: value }` using the generated parameter table. */
   configure(params, values) {
     for (const [name, value] of Object.entries(values)) {
-      const param = params.find((p) => p.name === name);
-      if (!param) throw new Error(`unknown parameter: ${name}`);
-      this.setParam(param.id, value);
+      const p = params.find((q) => q.name === name);
+      if (!p) throw new Error(`no parameter named ${name}`);
+      if (!this.setParam(p.id, value)) {
+        throw new Error(`${name} rejected the value ${value}`);
+      }
     }
   }
 
@@ -180,7 +150,7 @@ export class Borscht {
    * `bytes` is a view into WebAssembly memory, not a copy: read or upload it
    * before calling anything else.
    */
-  render(mode = ColorMode.species) {
+  render(mode = ColorMode.team) {
     const count = this.#exports.prepare_render(mode);
     const stride = this.#exports.render_stride();
     const ptr = this.#exports.render_ptr();
@@ -192,99 +162,18 @@ export class Borscht {
     };
   }
 
-  /** Largest species, as `{ id, population, hue, parent, birthTick }`. */
-  species(limit = 32, animals = true) {
-    const rows = this.#exports.prepare_species(limit >>> 0, animals ? 1 : 0);
-    if (rows === 0) return [];
-    const data = this.#floats(this.#exports.species_ptr(), rows * 5);
-    const out = [];
-    for (let i = 0; i < rows; i += 1) {
-      const o = i * 5;
-      out.push({
-        id: data[o] | 0,
-        population: data[o + 1] | 0,
-        hue: data[o + 2],
-        parent: data[o + 3] | 0,
-        birthTick: data[o + 4] | 0,
-      });
-    }
-    return out;
-  }
-
-  /**
-   * The tree of life: every lineage that ever reached `minPeak` individuals,
-   * including extinct ones. `parent` and `extinctTick` are null where the
-   * lineage is a root or still alive.
+    /**
+   * The man nearest a point, or null.
+   *
+   * The returned array is the wasm crate's `INSPECT_FIELDS`, in order, and the
+   * page names them; keeping the naming on one side means adding a field is one
+   * edit rather than two that can disagree.
    */
-  lineages(minPeak = 2, animals = true) {
-    const rows = this.#exports.prepare_lineages(minPeak >>> 0, animals ? 1 : 0);
-    if (rows === 0) return [];
-    const data = this.#floats(this.#exports.lineages_ptr(), rows * 6);
-    const out = [];
-    for (let i = 0; i < rows; i += 1) {
-      const o = i * 6;
-      out.push({
-        id: data[o],
-        parent: data[o + 1] < 0 ? null : data[o + 1],
-        birthTick: data[o + 2],
-        extinctTick: data[o + 3] < 0 ? null : data[o + 3],
-        peak: data[o + 4],
-        hue: data[o + 5],
-      });
-    }
-    return out;
-  }
-
-  lineageTotal(animals = true) {
-    return this.#exports.lineage_total(animals ? 1 : 0);
-  }
-
-  lineageDropped(animals = true) {
-    return this.#exports.lineage_dropped(animals ? 1 : 0);
-  }
-
-  /** Nearest organism to a world position, or null. */
   inspect(x, y, radius = 12) {
-    const kind = this.#exports.inspect(x, y, radius);
-    if (kind === 0) return null;
-    const data = this.#floats(this.#exports.inspect_ptr(), this.#exports.inspect_len());
-    const geneCount = kind === 2 ? 16 : 8;
-    const header = 8;
-    return {
-      kind: kind === 2 ? 'animal' : 'plant',
-      id: data[1],
-      species: data[2] | 0,
-      x: data[3],
-      y: data[4],
-      // Energy for an animal, biomass for a plant.
-      level: data[5],
-      age: data[6],
-      size: data[7],
-      genes: Array.from(data.subarray(header, header + geneCount)),
-      traits: Array.from(data.subarray(header + geneCount, header + geneCount * 2)),
-      brain: kind === 2 ? Array.from(data.subarray(header + geneCount * 2)) : [],
-    };
+    const n = this.#exports.inspect(x, y, radius);
+    if (n === 0) return null;
+    return Array.from(this.#floats(this.#exports.inspect_ptr(), n));
   }
 
-  // ------------------------------------------------------------- snapshot --
 
-  /** Serialise the world. Returns a copy, safe to keep. */
-  save() {
-    const len = this.#exports.snapshot_save();
-    if (len === 0) return new Uint8Array(0);
-    return this.#bytes(this.#exports.snapshot_ptr(), len).slice();
-  }
-
-  /** Load a snapshot. Throws with a readable message if it is not usable. */
-  load(bytes) {
-    const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    const ptr = this.#exports.alloc(view.length);
-    try {
-      this.#bytes(ptr, view.length).set(view);
-      const code = this.#exports.snapshot_load(ptr, view.length);
-      if (code !== 0) throw new Error(SNAPSHOT_ERRORS[code] ?? `snapshot error ${code}`);
-    } finally {
-      this.#exports.dealloc(ptr, view.length);
-    }
-  }
 }

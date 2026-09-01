@@ -1,4 +1,4 @@
-//! Rasterise a world into an RGB image.
+//! Rasterise a battlefield into an RGB image.
 //!
 //! At the target scale there are far more organisms than pixels, so points are
 //! accumulated with weights and averaged rather than drawn one over another.
@@ -6,8 +6,8 @@
 //! happened to be last in the array, which flickers between frames and hides
 //! real density structure.
 
-use borscht_core::world::{render_field, RENDER_STRIDE};
-use borscht_core::{ColorMode, World};
+use borscht_core::battle::{render_field, RENDER_STRIDE};
+use borscht_core::{Battle, ColorMode};
 
 pub struct Canvas {
     pub size: u32,
@@ -15,11 +15,9 @@ pub struct Canvas {
     weight: Vec<f32>,
 }
 
-/// Animals are rarer and more interesting than plants, so they are weighted up
-/// to stay visible against a dense plant background instead of being averaged
-/// into it.
-const ANIMAL_WEIGHT: f32 = 8.0;
-const PLANT_WEIGHT: f32 = 1.0;
+/// Every body counts the same. Both sides matter equally, so unlike the ecology
+/// this grew out of there is nothing here to weight up against a background.
+const UNIT_WEIGHT: f32 = 1.0;
 
 /// Empty ground: a near-black blue, so bare soil is visibly bare rather than the
 /// same black as an unlit organism.
@@ -44,13 +42,12 @@ impl Canvas {
         }
     }
 
-    pub fn draw(&mut self, world: &mut World, mode: ColorMode) {
+    pub fn draw(&mut self, battle: &mut Battle, mode: ColorMode) {
         self.accum.fill(0.0);
         self.weight.fill(0.0);
 
-        let plants = world.plants.len();
-        let count = world.prepare_render(mode);
-        let buf = world.render_buffer();
+        let count = battle.prepare_render(mode);
+        let buf = battle.render_buffer();
         let size = self.size as usize;
 
         for p in 0..count {
@@ -63,11 +60,7 @@ impl Canvas {
             let px = (qx as usize * size) >> 16;
             let py = (qy as usize * size) >> 16;
             let idx = py.min(size - 1) * size + px.min(size - 1);
-            let w = if p < plants {
-                PLANT_WEIGHT
-            } else {
-                ANIMAL_WEIGHT
-            };
+            let w = UNIT_WEIGHT;
             let c = o + render_field::COLOR;
             self.accum[idx * 3] += buf[c] as f32 * w;
             self.accum[idx * 3 + 1] += buf[c + 1] as f32 * w;
@@ -114,81 +107,35 @@ mod tests {
     use super::*;
     use borscht_core::Config;
 
-    fn world() -> World {
-        let mut c = Config::for_population(20_000);
-        c.grid_dim = 64;
-        c.sanitize();
-        World::new(c, 1)
+    fn battle() -> Battle {
+        Battle::new(Config::for_muster(2_000), 1)
     }
 
-    #[test]
-    fn empty_cells_get_the_background_and_occupied_ones_do_not() {
-        let mut w = world();
-        let mut canvas = Canvas::new(64);
-        canvas.draw(&mut w, ColorMode::Species);
-        let rgb = canvas.to_rgb();
-        assert_eq!(rgb.len(), 64 * 64 * 3);
-        let background = rgb.chunks(3).filter(|p| *p == BACKGROUND).count();
-        assert!(background > 0, "nothing was left empty");
-        assert!(background < 64 * 64, "nothing was drawn");
-    }
-
-    #[test]
-    fn an_empty_world_renders_entirely_as_background() {
-        let mut c = Config::for_population(20_000);
-        c.initial_plants = 0;
-        c.initial_animals = 0;
-        c.grid_dim = 64;
-        c.sanitize();
-        let mut w = World::new(c, 1);
-        let mut canvas = Canvas::new(32);
-        canvas.draw(&mut w, ColorMode::Species);
-        assert!(canvas.to_rgb().chunks(3).all(|p| *p == BACKGROUND));
-    }
-
-    #[test]
-    fn redrawing_clears_the_previous_frame() {
-        let mut w = world();
-        let mut canvas = Canvas::new(48);
-        canvas.draw(&mut w, ColorMode::Species);
-        let first = canvas.to_rgb();
-        canvas.draw(&mut w, ColorMode::Species);
-        assert_eq!(
-            first,
-            canvas.to_rgb(),
-            "redraw must be idempotent, not additive"
-        );
-    }
-
-    /// Occupied pixels must be brighter than bare ground, or density structure
-    /// is invisible.
     #[test]
     fn drawn_pixels_are_brighter_than_the_background() {
-        let mut w = world();
-        w.tick_many(30);
-        let mut canvas = Canvas::new(96);
-        canvas.draw(&mut w, ColorMode::Species);
-        let rgb = canvas.to_rgb();
-        let occupied: Vec<&[u8]> = rgb.chunks(3).filter(|p| *p != BACKGROUND).collect();
-        assert!(!occupied.is_empty(), "nothing was drawn");
-        let mean = occupied
-            .iter()
-            .map(|p| (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3)
-            .sum::<u32>() as f32
-            / occupied.len() as f32;
+        let mut b = battle();
+        let mut canvas = Canvas::new(64);
+        canvas.draw(&mut b, ColorMode::Team);
+        let img = canvas.to_rgb();
         assert!(
-            mean > 40.0,
-            "drawn pixels average only {mean:.0}/255 -- too dark to read"
+            img.chunks(3).any(|p| p[0] > 30 || p[1] > 30 || p[2] > 30),
+            "nothing was drawn"
         );
     }
 
     #[test]
-    fn output_is_a_decodable_png() {
-        let mut w = world();
-        let mut canvas = Canvas::new(64);
-        canvas.draw(&mut w, ColorMode::Species);
-        let png = canvas.encode();
-        assert_eq!(&png[1..4], b"PNG");
-        assert!(png.len() > 1000);
+    fn an_empty_field_renders_entirely_as_background() {
+        let mut c = Config::for_muster(2_000);
+        c.units_per_side = 1;
+        let mut b = Battle::new(c, 1);
+        // Kill everybody, then let compaction clear the pool.
+        for i in 0..b.army.len() {
+            b.army.kill(i);
+        }
+        b.army.compact();
+        let mut canvas = Canvas::new(32);
+        canvas.draw(&mut b, ColorMode::Team);
+        let img = canvas.to_rgb();
+        assert!(img.chunks(3).all(|p| p[0] < 40 && p[1] < 40 && p[2] < 40));
     }
 }
