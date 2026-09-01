@@ -98,7 +98,14 @@ const params = strip(read('params.js'));
 const borscht = strip(read('borscht.js'));
 const renderer = strip(read('renderer.js'));
 const engine = strip(read('worker.js'));
-const app = strip(read('app.js'));
+let app = strip(read('app.js'));
+
+// Snapshot save and load, removed whole. A published page cannot start a
+// download, so the controls are dropped from the markup above and the code
+// behind them goes too rather than sitting there unreachable.
+const region = /\n\/\/ #region snapshot\n[\s\S]*?\n\/\/ #endregion snapshot/;
+if (!region.test(app)) throw new Error('snapshot region markers not found in app.js');
+app = app.replace(region, '');
 
 const wasm = readFileSync(`${root}web/borscht.wasm`).toString('base64');
 

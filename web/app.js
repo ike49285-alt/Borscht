@@ -42,6 +42,9 @@ let worldSize = 1;
 // ordering bug where a reset arrived before the module had finished loading.
 const params = PARAMS;
 
+// Set by the snapshot region below, and left null in builds that drop it.
+let saveSnapshot = null;
+
 // -------------------------------------------------------------------- input --
 
 let dragging = false;
@@ -597,16 +600,9 @@ worker.onmessage = (event) => {
     case 'inspected':
       showInspector(msg.organism);
       break;
-    case 'saved': {
-      const blob = new Blob([msg.bytes], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `borscht-${Date.now()}.borscht`;
-      a.click();
-      URL.revokeObjectURL(url);
+    case 'saved':
+      saveSnapshot?.(msg.bytes);
       break;
-    }
     case 'error':
       fail(msg.message);
       break;
@@ -713,23 +709,33 @@ $('color').addEventListener('change', (e) => {
   worker.postMessage({ type: 'color', value: Number(e.target.value) });
 });
 
-// Snapshot controls are optional. The single-file build leaves them out --
-// a published page cannot start a download, so the buttons would be dead -- and
-// wiring absent elements would take the whole viewer down with a null
-// dereference before anything had a chance to draw.
-if ($('save') && $('load') && $('file')) {
-  $('save').addEventListener('click', () => worker.postMessage({ type: 'save' }));
-  $('load').addEventListener('click', () => $('file').click());
-  $('file').addEventListener('change', async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setRunning(false);
-    history.clear();
-    const bytes = await file.arrayBuffer();
-    worker.postMessage({ type: 'load', bytes }, [bytes]);
-    e.target.value = '';
-  });
-}
+// Snapshot controls are optional, and everything that implements them lives
+// between these markers so the single-file build can remove it whole. A
+// published page cannot start a download, so shipping the code would leave a
+// dead feature in a page that appears to offer it.
+//
+// #region snapshot
+saveSnapshot = (bytes) => {
+  const blob = new Blob([bytes], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `borscht-${Date.now()}.borscht`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+$('save').addEventListener('click', () => worker.postMessage({ type: 'save' }));
+$('load').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  setRunning(false);
+  history.clear();
+  const bytes = await file.arrayBuffer();
+  worker.postMessage({ type: 'load', bytes }, [bytes]);
+  e.target.value = '';
+});
+// #endregion snapshot
 
 function buildParamUI() {
   const container = $('params');
