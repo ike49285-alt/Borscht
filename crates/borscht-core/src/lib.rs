@@ -11,6 +11,7 @@ pub mod morale;
 pub mod rng;
 pub mod stats;
 pub mod terrain;
+pub mod trained;
 
 pub use battle::{Battle, ColorMode, Outcome};
 pub use commander::{Order, Posture};

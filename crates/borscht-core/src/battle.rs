@@ -11,9 +11,20 @@
 //! # One generator, in update order
 //!
 //! Draws are taken in the order units are updated, so which unit reaches a gap
-//! first is a real contingency rather than something arranged in advance. Two
-//! runs of the same seed diverge, and that is the intent: a battle is decided by
-//! exactly this kind of accident.
+//! first is a real contingency rather than something arranged in advance: a
+//! battle is decided by exactly this kind of accident, and a small change
+//! anywhere cascades through the rest of it.
+//!
+//! It is nonetheless **reproducible**. Everything is drawn from the seed and the
+//! tick is single-threaded, so the same seed and parameters give the same
+//! battle, byte for byte -- which is what makes a regression test possible and
+//! what the page's snapshot feature relies on. An earlier version of this note
+//! claimed two runs of one seed diverge; they do not, and the trainer's first
+//! noise floor came out as exactly zero because of it.
+//!
+//! To fight the same ground twice with different accidents, change the battle
+//! stream with [`Battle::restream`], which leaves the terrain and the muster
+//! alone.
 
 use crate::army::{Archetype, Army};
 use crate::config::Config;
@@ -760,6 +771,16 @@ impl Battle {
 
     pub fn field_size(&self) -> f32 {
         self.cfg.field_size
+    }
+
+    /// Fight the same battle again with different accidents.
+    ///
+    /// Terrain and deployment are drawn from the seed on their own streams, so
+    /// this changes what happens *in* the battle without changing the ground it
+    /// is fought over or the armies that turn up. That is exactly the comparison
+    /// a trainer needs: the same problem, posed twice.
+    pub fn restream(&mut self, trial: u64) {
+        self.rng = Rng::new(self.seed, 0x9E37_79B9 ^ trial.wrapping_mul(0x9E37_79B9_7F4A_7C15));
     }
 
     pub fn rng_bits(&self) -> (u64, u64) {

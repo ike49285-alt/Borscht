@@ -113,7 +113,7 @@ pub struct Net {
 
 impl Default for Net {
     fn default() -> Self {
-        Net::doctrine()
+        Net::trained()
     }
 }
 
@@ -202,6 +202,24 @@ impl Net {
         n.skip(i::OWN_KEPT, o::WITHDRAW, -1.2);
 
         n
+    }
+
+    /// The commander a battle is fought with: the trained weights when a run
+    /// has produced any, and the hand-written doctrine when it has not.
+    ///
+    /// Falling back rather than shipping whatever the last run happened to
+    /// produce is deliberate. A commander should only be replaced by one that
+    /// has been shown to be better, and "no run has beaten the doctrine yet" is
+    /// a real answer.
+    pub fn trained() -> Self {
+        match crate::trained::TRAINED {
+            Some(w) if w.len() == LEN => {
+                let mut n = Net::zeroed();
+                n.w.copy_from_slice(w);
+                n
+            }
+            _ => Net::doctrine(),
+        }
     }
 
     /// Score one (division, sector) pair.
@@ -310,6 +328,24 @@ mod tests {
                 }
             }
             assert!(n.eval(&x).iter().all(|v| v.is_finite()));
+        }
+    }
+
+    #[test]
+    fn trained_weights_round_trip_or_fall_back_to_the_doctrine() {
+        // The generated constant is the one piece of this that is written by a
+        // program and read by the build, so the two have to agree on its length.
+        // A wrong-sized array must fall back rather than be loaded crooked.
+        match crate::trained::TRAINED {
+            Some(w) => {
+                assert_eq!(w.len(), LEN, "the generated weights are the wrong length");
+                assert!(w.iter().all(|v| v.is_finite()));
+                assert_eq!(Net::trained().w.as_slice(), w);
+            }
+            None => {
+                let d = Net::doctrine();
+                assert_eq!(Net::trained().w, d.w, "no trained weights should mean the doctrine plays");
+            }
         }
     }
 

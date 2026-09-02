@@ -12,6 +12,8 @@ use borscht_core::stats::STAT_NAMES;
 use borscht_core::{Battle, ColorMode, Outcome};
 use std::time::Instant;
 
+mod train;
+
 fn usage() -> ! {
     eprintln!(
         "borscht - mass battle simulator
@@ -22,6 +24,8 @@ USAGE:
                     [--frames N] [--image-size N] [--color MODE] [--set key=value]...
     borscht nerve   [--muster N] [--ticks N] [--seed N] [--set key=value]...
     borscht orders  [--muster N] [--ticks N] [--seed N] [--set key=value]...
+    borscht train   [--muster N] [--ticks N] [--seed N] [--generations N]
+                    [--population N] [--sigma F] [--out FILE]
     borscht params  [--json]
 
 OPTIONS:
@@ -34,6 +38,9 @@ OPTIONS:
     --image-size N   frame edge in pixels
     --color MODE     team | kind | health | morale | division (default team)
     --set key=value  override any parameter; repeatable (`borscht params` lists them)
+    --generations N  training generations (default 30)
+    --population N   commanders per generation (default 16)
+    --sigma F        mutation size, per weight (default 0.08)
     --quiet          print one summary line of key=value pairs, for sweeps"
     );
     std::process::exit(2)
@@ -51,6 +58,9 @@ struct Args {
     overrides: Vec<(String, f32)>,
     quiet: bool,
     json: bool,
+    generations: u32,
+    population: usize,
+    sigma: f32,
 }
 
 fn parse() -> Args {
@@ -66,13 +76,16 @@ fn parse() -> Args {
         overrides: Vec::new(),
         quiet: false,
         json: false,
+        generations: 30,
+        population: 16,
+        sigma: 0.08,
     };
     let mut it = std::env::args().skip(1);
     args.command = it.next().unwrap_or_else(|| usage());
     while let Some(key) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| usage());
         match key.as_str() {
-            "--muster" | "--population" => {
+            "--muster" => {
                 let v = value();
                 args.musters.push(v.parse().unwrap_or_else(|_| {
                     eprintln!("error: --muster wants an integer, got {v:?}");
@@ -105,6 +118,9 @@ fn parse() -> Args {
                 });
                 args.overrides.push((k.to_string(), parsed));
             }
+            "--generations" => args.generations = value().parse().unwrap_or(30),
+            "--population" => args.population = value().parse().unwrap_or(16),
+            "--sigma" => args.sigma = value().parse().unwrap_or(0.08),
             "--quiet" => args.quiet = true,
             "--json" => args.json = true,
             "--help" | "-h" => usage(),
@@ -147,6 +163,15 @@ fn main() {
         "battle" | "run" => battle(&args),
         "nerve" => nerve(&args),
         "orders" => orders(&args),
+        "train" => train::run(&train::Plan {
+            cfg: build_config(Some(args.musters.first().copied().unwrap_or(4_000)), &args.overrides),
+            seed: args.seed,
+            ticks: if args.ticks == 2000 { 1500 } else { args.ticks },
+            generations: args.generations,
+            population: args.population,
+            sigma: args.sigma,
+            out: args.out.clone(),
+        }),
         "params" if args.json => emit_params_js(),
         "params" => list_params(),
         other => {

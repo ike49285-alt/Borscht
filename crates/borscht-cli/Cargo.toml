@@ -13,3 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 borscht-core = { path = "../borscht-core", features = ["parallel"] }
+# The trainer plays hundreds of battles per generation and they are entirely
+# independent of one another, which is the one place in this project where
+# threads buy anything.
+rayon = "1.10"
