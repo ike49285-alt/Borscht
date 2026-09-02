@@ -15,6 +15,7 @@ use std::time::Instant;
 mod matchlog;
 mod sweep;
 mod train;
+mod verdict;
 
 fn usage() -> ! {
     eprintln!(
@@ -29,6 +30,7 @@ USAGE:
     borscht sweep   [--muster N] [--ticks N] [--seeds N] [--set key=value]...
     borscht train   [--muster N] [--ticks N] [--seed N] [--generations N]
                     [--population N] [--sigma F] [--out FILE] [--log DIR]
+                    [--verdicts PATH]
     borscht replay  DIR --match ID [--out DIR] [--frames N] [--color MODE]
     borscht params  [--json]
     borscht commander
@@ -45,6 +47,9 @@ OPTIONS:
     --set key=value  override any parameter; repeatable (`borscht params` lists them)
     --log DIR        record every battle a training run plays, so any of them
                      can be replayed afterwards
+    --verdicts PATH  judgements on watched battles, as a .jsonl file or a
+                     directory of documents; flagged seeds are trained on and
+                     approved seeds are reported on separately
     --match ID       which recorded battle to replay
     --seeds N        battles in a sweep, run across cores (default 24)
     --doctrine       sweep with the hand-written commander instead of the
@@ -75,6 +80,7 @@ struct Args {
     seeds: u64,
     doctrine: bool,
     log: Option<String>,
+    verdicts: Option<String>,
     match_id: Option<u64>,
 }
 
@@ -97,6 +103,7 @@ fn parse() -> Args {
         seeds: 24,
         doctrine: false,
         log: None,
+        verdicts: None,
         match_id: None,
     };
     let mut it = std::env::args().skip(1);
@@ -142,6 +149,7 @@ fn parse() -> Args {
             "--population" => args.population = value().parse().unwrap_or(16),
             "--sigma" => args.sigma = value().parse().unwrap_or(0.08),
             "--log" => args.log = Some(value()),
+            "--verdicts" => args.verdicts = Some(value()),
             "--match" => args.match_id = value().parse().ok(),
             "--doctrine" => args.doctrine = true,
             "--quiet" => args.quiet = true,
@@ -211,6 +219,7 @@ fn main() {
             sigma: args.sigma,
             out: args.out.clone(),
             log: args.log.clone(),
+            verdicts: args.verdicts.clone(),
         }),
         // Which commander does this build actually ship? The page reports the
         // same name from the WebAssembly module, and a verdict recorded there

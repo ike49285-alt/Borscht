@@ -162,10 +162,18 @@ pub fn noise_floor(cfg: &Config, net: &Net, seeds: &[u64], ticks: u32) -> (f32, 
     (mean, var.sqrt())
 }
 
+/// How many times over a flagged seed is played, against once for an ordinary
+/// one. Three is chosen to be a thumb on the scale rather than a hand: a search
+/// that spends most of its evaluations on six situations is no longer measuring
+/// a commander, it is fitting one to those six.
+const FLAGGED_WEIGHT: usize = 3;
+
 pub struct Plan {
     pub cfg: Config,
     /// Where to keep a record of every battle the run plays, if anywhere.
     pub log: Option<String>,
+    /// What somebody watching thought of the play, if anything.
+    pub verdicts: Option<String>,
     pub seed: u64,
     pub ticks: u32,
     pub generations: u32,
@@ -203,7 +211,25 @@ pub fn run(plan: &Plan) {
         .collect();
 
     let mut archive: Vec<Net> = vec![doctrine];
-    let seeds: Vec<u64> = (0..6).map(|i| plan.seed.wrapping_mul(1_000_003) + i).collect();
+    let mut seeds: Vec<u64> = (0..6).map(|i| plan.seed.wrapping_mul(1_000_003) + i).collect();
+
+    // Ground somebody watched and found wanting, added to what the search works
+    // on. See `verdict.rs` for why a judgement steers the training set rather
+    // than scoring a candidate directly.
+    let judged = match plan.verdicts.as_ref() {
+        Some(path) => match crate::verdict::read(std::path::Path::new(path)) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => crate::verdict::Judged::default(),
+    };
+    if !judged.is_empty() {
+        crate::verdict::report(&judged, &plan.cfg, &crate::matchlog::name_of(&Net::trained()));
+        seeds.extend(judged.training_seeds(FLAGGED_WEIGHT));
+    }
 
     let (floor_mean, floor_sd) = noise_floor(&plan.cfg, &doctrine, &(0..24).map(|i| i as u64 + 1).collect::<Vec<_>>(), plan.ticks);
     println!(
@@ -307,6 +333,67 @@ pub fn run(plan: &Plan) {
         println!("  -> better than the doctrine by more than twice the noise in the measurement.");
     } else {
         println!("  -> NOT better than the doctrine. The doctrine stands.");
+    }
+
+    // The two sets a person's judgement made, reported apart from the average
+    // and apart from each other.
+    //
+    // This is the whole guard against training on a handful of opinions. A
+    // champion that improves on the flagged ground and regresses on the ground
+    // somebody liked has not learned what it was asked to learn; it has fitted
+    // itself to six battles. Folding either number into the headline would hide
+    // exactly the failure the numbers exist to catch.
+    if !judged.is_empty() {
+        println!();
+        let flagged = judged.flagged_seeds();
+        if !flagged.is_empty() {
+            let on_flagged = evaluate(
+                &plan.cfg,
+                &champion,
+                &[doctrine],
+                &flagged,
+                plan.ticks,
+                log.as_mut().map(|l| (l, "flagged")),
+            );
+            println!(
+                "  on the {} seed{} you found wanting: {on_flagged:+.4}{}",
+                flagged.len(),
+                if flagged.len() == 1 { "" } else { "s" },
+                // A mean of six battles carries far more uncertainty than one
+                // of sixty-four, and saying so beside the number is the
+                // difference between a measurement and a hope.
+                if flagged.len() < 16 {
+                    "   (too few seeds to call; read it as a direction, not a result)"
+                } else {
+                    ""
+                }
+            );
+        }
+        let approved = judged.approved_seeds();
+        if !approved.is_empty() {
+            let on_approved = evaluate(
+                &plan.cfg,
+                &champion,
+                &[doctrine],
+                &approved,
+                plan.ticks,
+                log.as_mut().map(|l| (l, "approved")),
+            );
+            println!(
+                "  on the {} seed{}: {on_approved:+.4}",
+                approved.len(),
+                if approved.len() == 1 {
+                    " you thought was well fought"
+                } else {
+                    "s you thought were well fought"
+                }
+            );
+            if on_approved < -bar {
+                println!(
+                    "  -> the champion plays the battles you liked WORSE than the doctrine does.                      Whatever it gained, it gained by giving that up."
+                );
+            }
+        }
     }
 
     if let Some(path) = &plan.out {

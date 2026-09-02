@@ -37,6 +37,19 @@ pub fn name_of(net: &Net) -> String {
     format!("{:016x}", net.fingerprint())
 }
 
+/// Pull one flat field out of a JSON object.
+///
+/// Enough of a reader for the shapes this program handles: flat objects of
+/// numbers and strings, one per line. It stops at the first `,` or `}` after the
+/// key, so it reads scalars and not nested objects — a caller wanting one of
+/// those has outgrown this and should say so rather than get half an answer.
+pub fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let at = line.find(&format!("\"{key}\":"))? + key.len() + 3;
+    let rest = &line[at..];
+    let end = rest.find([',', '}'])?;
+    Some(rest[..end].trim().trim_matches('"'))
+}
+
 /// One battle, in the form that can rebuild it.
 #[derive(Clone, Debug)]
 pub struct Row {
@@ -82,12 +95,7 @@ impl Row {
     /// shape is flat, and the core of this project carries no dependencies at
     /// all.
     pub fn from_json(line: &str) -> Option<Row> {
-        let field = |key: &str| -> Option<&str> {
-            let at = line.find(&format!("\"{key}\":"))? + key.len() + 3;
-            let rest = &line[at..];
-            let end = rest.find([',', '}'])?;
-            Some(rest[..end].trim_matches('"'))
-        };
+        let field = |key: &str| field(line, key);
         Some(Row {
             id: field("id")?.parse().ok()?,
             phase: field("phase")?.to_string(),
