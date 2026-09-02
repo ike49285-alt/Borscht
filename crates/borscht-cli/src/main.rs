@@ -12,6 +12,7 @@ use borscht_core::stats::STAT_NAMES;
 use borscht_core::{Battle, ColorMode, Outcome};
 use std::time::Instant;
 
+mod sweep;
 mod train;
 
 fn usage() -> ! {
@@ -24,6 +25,7 @@ USAGE:
                     [--frames N] [--image-size N] [--color MODE] [--set key=value]...
     borscht nerve   [--muster N] [--ticks N] [--seed N] [--set key=value]...
     borscht orders  [--muster N] [--ticks N] [--seed N] [--set key=value]...
+    borscht sweep   [--muster N] [--ticks N] [--seeds N] [--set key=value]...
     borscht train   [--muster N] [--ticks N] [--seed N] [--generations N]
                     [--population N] [--sigma F] [--out FILE]
     borscht params  [--json]
@@ -38,6 +40,9 @@ OPTIONS:
     --image-size N   frame edge in pixels
     --color MODE     team | kind | health | morale | division (default team)
     --set key=value  override any parameter; repeatable (`borscht params` lists them)
+    --seeds N        battles in a sweep, run across cores (default 24)
+    --doctrine       sweep with the hand-written commander instead of the
+                     trained one, for comparing the two
     --generations N  training generations (default 30)
     --population N   commanders per generation (default 16)
     --sigma F        mutation size, per weight (default 0.08)
@@ -61,6 +66,8 @@ struct Args {
     generations: u32,
     population: usize,
     sigma: f32,
+    seeds: u64,
+    doctrine: bool,
 }
 
 fn parse() -> Args {
@@ -79,6 +86,8 @@ fn parse() -> Args {
         generations: 30,
         population: 16,
         sigma: 0.08,
+        seeds: 24,
+        doctrine: false,
     };
     let mut it = std::env::args().skip(1);
     args.command = it.next().unwrap_or_else(|| usage());
@@ -118,9 +127,11 @@ fn parse() -> Args {
                 });
                 args.overrides.push((k.to_string(), parsed));
             }
+            "--seeds" => args.seeds = value().parse().unwrap_or(24),
             "--generations" => args.generations = value().parse().unwrap_or(30),
             "--population" => args.population = value().parse().unwrap_or(16),
             "--sigma" => args.sigma = value().parse().unwrap_or(0.08),
+            "--doctrine" => args.doctrine = true,
             "--quiet" => args.quiet = true,
             "--json" => args.json = true,
             "--help" | "-h" => usage(),
@@ -163,6 +174,12 @@ fn main() {
         "battle" | "run" => battle(&args),
         "nerve" => nerve(&args),
         "orders" => orders(&args),
+        "sweep" => sweep::run(
+            &build_config(args.musters.first().copied().or(Some(8_000)), &args.overrides),
+            args.seeds,
+            if args.ticks == 2000 { 3000 } else { args.ticks },
+            args.doctrine,
+        ),
         "train" => train::run(&train::Plan {
             cfg: build_config(Some(args.musters.first().copied().unwrap_or(4_000)), &args.overrides),
             seed: args.seed,
