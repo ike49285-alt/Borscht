@@ -165,7 +165,23 @@ export class Borscht {
     };
   }
 
-    /**
+  /**
+   * The ground, as `dim * dim` pairs of bytes: height, then cover.
+   *
+   * Read once per battle rather than once per frame -- terrain does not move,
+   * and at a 256-cell grid this is 128 KiB with no business crossing the
+   * boundary sixty times a second. Like `render`, `bytes` is a view into
+   * WebAssembly memory rather than a copy.
+   */
+  terrain() {
+    const dim = this.#exports.prepare_terrain();
+    if (!dim) return null;
+    const ptr = this.#exports.terrain_ptr();
+    if (!ptr) return null;
+    return { dim, bytes: this.#bytes(ptr, dim * dim * 2) };
+  }
+
+  /**
    * The man nearest a point, or null.
    *
    * The returned array is the wasm crate's `INSPECT_FIELDS`, in order, and the

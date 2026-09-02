@@ -82,6 +82,50 @@ void main() {
   }
 }`;
 
+// The ground, drawn under everything as a single screen-filling quad.
+//
+// Not a quad the size of the world: the body shader wraps the field as a torus
+// (`d -= floor(d + 0.5)`), and a world-sized quad cannot be wrapped that way --
+// its corners would fold across the seam. Going the other way round instead,
+// from screen position back to world position, and letting the texture repeat,
+// costs one quad and agrees with the bodies at every pan and zoom.
+const GROUND_VERTEX = `#version 300 es
+layout(location = 0) in vec2 a_corner;   // full-screen quad, clip space
+out vec2 v_clip;
+void main() {
+  v_clip = a_corner;
+  gl_Position = vec4(a_corner, 0.0, 1.0);
+}`;
+
+const GROUND_FRAGMENT = `#version 300 es
+precision mediump float;
+in vec2 v_clip;
+
+uniform sampler2D u_ground;  // R: height over the field's relief, G: cover
+uniform vec2 u_pan;
+uniform float u_zoom;
+uniform vec2 u_aspect;
+
+out vec4 outColor;
+
+// Valley floor, hilltop, and woodland. Shading rather than contours: a battle
+// is read at a glance and banded elevation would fight the bodies for the eye.
+const vec3 LOW  = vec3(0.055, 0.065, 0.094);
+const vec3 HIGH = vec3(0.325, 0.310, 0.263);
+const vec3 WOOD = vec3(0.055, 0.165, 0.086);
+
+void main() {
+  // Screen back to world, the exact inverse of what the body shader does
+  // forwards. The texture wraps, so this needs no seam handling of its own.
+  vec2 world = v_clip / (2.0 * u_zoom * u_aspect) + u_pan;
+  vec2 g = texture(u_ground, world).rg;
+
+  vec3 bare = mix(LOW, HIGH, g.r);
+  // Trees keep the hill's shading rather than flattening it, so a wooded slope
+  // still reads as a slope.
+  outColor = vec4(mix(bare, WOOD * (0.6 + 0.4 * g.r), g.g), 1.0);
+}`;
+
 function compile(gl, type, source) {
   const shader = gl.createShader(type);
   gl.shaderSource(shader, source);
@@ -157,6 +201,46 @@ export class Renderer {
     instanced(5, 4, gl.UNSIGNED_BYTE, true, 8);
     gl.bindVertexArray(null);
 
+    // --- the ground ---------------------------------------------------
+    const ground = gl.createProgram();
+    gl.attachShader(ground, compile(gl, gl.VERTEX_SHADER, GROUND_VERTEX));
+    gl.attachShader(ground, compile(gl, gl.FRAGMENT_SHADER, GROUND_FRAGMENT));
+    gl.linkProgram(ground);
+    if (!gl.getProgramParameter(ground, gl.LINK_STATUS)) {
+      throw new Error(`ground program failed to link: ${gl.getProgramInfoLog(ground)}`);
+    }
+    this.ground = ground;
+    this.groundUniforms = {
+      pan: gl.getUniformLocation(ground, 'u_pan'),
+      zoom: gl.getUniformLocation(ground, 'u_zoom'),
+      aspect: gl.getUniformLocation(ground, 'u_aspect'),
+      sampler: gl.getUniformLocation(ground, 'u_ground'),
+    };
+
+    this.groundVao = gl.createVertexArray();
+    gl.bindVertexArray(this.groundVao);
+    this.groundQuad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.groundQuad);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1]),
+      gl.STATIC_DRAW,
+    );
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
+    gl.bindVertexArray(null);
+
+    this.groundTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.groundTexture);
+    // REPEAT, to match the wrap the body shader applies to positions. LINEAR,
+    // because a grid cell is metres across and nearest sampling would render
+    // hills as a staircase.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    this.groundDim = 0;
+
     this.capacity = 0;
     this.count = 0;
     this.plants = 0;
@@ -185,6 +269,22 @@ export class Renderer {
     if (worldSize > 0) this.worldSize = worldSize;
   }
 
+  /**
+   * Upload the ground. `bytes` is `dim * dim` pairs: height, then cover.
+   *
+   * Called when a battle is created or reset, not per frame.
+   */
+  uploadTerrain(bytes, dim) {
+    const gl = this.gl;
+    if (!dim || !bytes || bytes.length < dim * dim * 2) return;
+    gl.bindTexture(gl.TEXTURE_2D, this.groundTexture);
+    // Two bytes a texel is not a multiple of the default four-byte row
+    // alignment, so an odd-width grid would shear without this.
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, dim, dim, 0, gl.RG, gl.UNSIGNED_BYTE, bytes);
+    this.groundDim = dim;
+  }
+
   resize() {
     const canvas = this.canvas;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -201,11 +301,28 @@ export class Renderer {
     const gl = this.gl;
     this.resize();
     gl.clear(gl.COLOR_BUFFER_BIT);
-    if (this.count === 0) return;
 
     const { width, height } = this.canvas;
     const shorter = Math.min(width, height);
     const aspect = [shorter / width, shorter / height];
+
+    // Ground first, and unconditionally: a field with nobody left alive on it
+    // is still a field, and returning early on an empty army used to leave the
+    // viewer staring at the clear colour.
+    if (this.groundDim > 0) {
+      gl.useProgram(this.ground);
+      gl.bindVertexArray(this.groundVao);
+      gl.uniform2f(this.groundUniforms.pan, view.x, view.y);
+      gl.uniform1f(this.groundUniforms.zoom, view.zoom);
+      gl.uniform2f(this.groundUniforms.aspect, aspect[0], aspect[1]);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.groundTexture);
+      gl.uniform1i(this.groundUniforms.sampler, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.bindVertexArray(null);
+    }
+
+    if (this.count === 0) return;
 
     gl.useProgram(this.program);
     gl.bindVertexArray(this.vao);

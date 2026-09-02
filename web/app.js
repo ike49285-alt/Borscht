@@ -422,6 +422,11 @@ worker.onmessage = (event) => {
       $('tree-summary').textContent = OUTCOME[msg.outcome] ?? OUTCOME[0];
       break;
     }
+    case 'terrain':
+      // The ground arrives once per battle rather than per frame, so it is
+      // uploaded here and then simply drawn under every subsequent frame.
+      renderer.uploadTerrain(new Uint8Array(msg.buffer), msg.dim);
+      break;
     case 'inspected':
       showInspector(msg.organism);
       break;

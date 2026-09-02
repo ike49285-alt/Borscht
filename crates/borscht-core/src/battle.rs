@@ -99,9 +99,20 @@ pub struct Counters {
     /// Men who ran clean off the field, per side. Not casualties: they are the
     /// part of a broken army that gets away.
     pub fled: [u32; TEAMS],
+    /// Summed downhill advantage over every blow a side struck, and how many
+    /// blows that was.
+    ///
+    /// The mean of these two is the only honest answer to "did this side get to
+    /// fight downhill?". The mean height of a whole army is not: most of an
+    /// army is not in contact, so it measures where the reserves are standing.
+    pub blow_slope: [f32; TEAMS],
+    pub blows: [u32; TEAMS],
 }
 
 const SALT_INIT: u64 = 0x5EED_0001;
+/// Keeps the ground's noise off the same stream the muster is drawn from, so
+/// changing how units deploy does not silently reshape every hill.
+const SALT_TERRAIN: u64 = 0x5EED_0002;
 
 pub struct Battle {
     pub cfg: Config,
@@ -120,6 +131,7 @@ pub struct Battle {
     pub counters: Counters,
     render_buf: Vec<u8>,
     render_count: usize,
+    terrain_buf: Vec<u8>,
 }
 
 /// How far off the field's edge a running man has to get before he is counted
@@ -172,9 +184,25 @@ impl Battle {
             counters: Counters::default(),
             render_buf: Vec::new(),
             render_count: 0,
+            terrain_buf: Vec::new(),
         };
+        battle.lay_out_ground();
         battle.deploy();
         battle
+    }
+
+    /// Shape the ground for the current seed and configuration.
+    fn lay_out_ground(&mut self) {
+        self.grid.generate_terrain(
+            self.seed ^ SALT_TERRAIN,
+            crate::terrain::Shape {
+                // A fraction of the field becomes a height in world units, so
+                // slope comes out as a real rise over run.
+                relief: self.cfg.terrain_relief * self.cfg.field_size,
+                scale: self.cfg.terrain_scale,
+                wood: self.cfg.wood_cover,
+            },
+        );
     }
 
     /// Re-muster both armies, keeping the current configuration.
@@ -184,6 +212,9 @@ impl Battle {
         self.rng = Rng::new(seed, 0x9E37_79B9);
         self.army.clear();
         self.counters = Counters::default();
+        // New seed, new ground. A reset that kept the old field would quietly
+        // make the terrain a property of the session rather than of the battle.
+        self.lay_out_ground();
         self.deploy();
     }
 
@@ -287,7 +318,14 @@ impl Battle {
             // Strength, not head count: a unit at a tenth of its health should
             // not make the line read as though it were fresh.
             let health = clamp(self.army.hp[i] / a.hp.max(1e-3), 0.0, 1.0);
-            self.grid.strength[team][cell] += a.worth() * health;
+            // And what can be seen of him, not what is there. Trees take men out
+            // of the strength field without taking them out of the head count,
+            // which is the whole of how cover works: everything that *looks* --
+            // steering, the local odds nerve reads, the test for whether a
+            // fugitive has got clear -- reads strength, and everything that
+            // *touches* -- the blow, the cohesion of a formation -- reads count.
+            let seen = 1.0 - self.cfg.cover_hide * self.grid.cover[cell];
+            self.grid.strength[team][cell] += a.worth() * health * seen.max(0.0);
             self.grid.count[team][cell] += 1.0;
             if self.army.routing(i) {
                 self.grid.routing[team][cell] += 1.0;
@@ -410,8 +448,18 @@ impl Battle {
             let speed = self.army.speed[i] * cfg.drag + top * (1.0 - cfg.drag);
             self.army.speed[i] = speed;
             let (s, c) = sin_cos(heading);
-            let x = clamp_field(self.army.x[i] + c * speed, size);
-            let y = clamp_field(self.army.y[i] + s * speed, size);
+
+            // What the ground does to the step, rather than to the man. Terrain
+            // resists movement; it does not change how hard he is trying, so it
+            // is applied here and not to the speed he carries -- which keeps it
+            // out of the momentum the drag term models.
+            let climb = self.grid.grade(cx, cy, c, s);
+            let cell_now = geom.cell_at(cx, cy);
+            let going = clamp(1.0 - cfg.slope_cost * climb, 0.25, 1.5)
+                * (1.0 - cfg.cover_drag * self.grid.cover[cell_now]);
+
+            let x = clamp_field(self.army.x[i] + c * speed * going, size);
+            let y = clamp_field(self.army.y[i] + s * speed * going, size);
             self.army.x[i] = x;
             self.army.y[i] = y;
 
@@ -458,7 +506,24 @@ impl Battle {
             let victim_team = self.army.team[t] as usize;
             let armour = self.archetypes[victim_team][self.army.kind[t] as usize].armour;
             let was_running = self.army.routing(t);
-            if self.army.wound(t, blow.damage, armour) {
+            // Striking downhill: the slope under the man's feet, along the line
+            // of the blow.
+            //
+            // Not the difference between his cell's height and his target's.
+            // Two men close enough to touch are in the same cell almost always,
+            // so that difference is exactly zero for nearly every blow struck
+            // and the term is dead however large its coefficient.
+            let cell = self.grid.units.cell_of[i] as usize;
+            let (dx, dy) = unit(
+                self.army.x[t] - self.army.x[i],
+                self.army.y[t] - self.army.y[i],
+            );
+            let (bx, by) = self.grid.cell_xy(cell as u32);
+            let downhill = -self.grid.grade(bx as i32, by as i32, dx, dy);
+            self.counters.blow_slope[team] += downhill;
+            self.counters.blows[team] += 1;
+            let damage = blow.damage * (1.0 + cfg.high_ground * downhill).max(0.0);
+            if self.army.wound(t, damage, armour) {
                 killed[victim_team] += 1;
                 if was_running {
                     self.counters.killed_routing[victim_team] += 1;
@@ -584,6 +649,32 @@ impl Battle {
 
     pub fn render_count(&self) -> usize {
         self.render_count
+    }
+
+    /// Pack the ground into two bytes a cell for the host to upload as a
+    /// texture: height normalised against the field's relief, then cover.
+    ///
+    /// Two channels rather than a palette, so the colour of a hill is the
+    /// renderer's business and can be changed without touching the simulation.
+    /// Called once per battle rather than once per frame -- the ground does not
+    /// move.
+    pub fn prepare_terrain(&mut self) -> u32 {
+        let n = self.grid.cells();
+        self.terrain_buf.resize(n * 2, 0);
+        let inv = if self.grid.relief > 0.0 {
+            255.0 / self.grid.relief
+        } else {
+            0.0
+        };
+        for i in 0..n {
+            self.terrain_buf[i * 2] = clamp(self.grid.height[i] * inv, 0.0, 255.0) as u8;
+            self.terrain_buf[i * 2 + 1] = clamp(self.grid.cover[i] * 255.0, 0.0, 255.0) as u8;
+        }
+        self.grid.dim()
+    }
+
+    pub fn terrain_buffer(&self) -> &[u8] {
+        &self.terrain_buf
     }
 
     pub fn render_buffer(&self) -> &[u8] {
@@ -899,6 +990,51 @@ mod tests {
             }
         }
         assert_eq!(b.outcome(), Outcome::BlueHolds);
+    }
+
+    #[test]
+    fn a_wood_hides_men_without_thinning_them() {
+        // Cover scales what goes into the *strength* field and leaves the head
+        // count alone. Everything that looks -- steering, the local odds nerve
+        // reads -- goes through strength; everything that touches goes through
+        // count. Getting that the wrong way round would make trees a combat
+        // penalty rather than concealment.
+        let mut open = small();
+        open.wood_cover = 0.0;
+        let mut wooded = small();
+        wooded.wood_cover = 0.6;
+        wooded.cover_hide = 1.0;
+
+        let open = Battle::new(open, 41);
+        let wooded = Battle::new(wooded, 41);
+
+        assert_eq!(
+            open.army.muster(),
+            wooded.army.muster(),
+            "trees changed how many men took the field"
+        );
+        let seen = |b: &Battle| b.grid.total_strength(0) + b.grid.total_strength(1);
+        assert!(
+            seen(&wooded) < seen(&open) * 0.95,
+            "a wooded field showed as much strength as an open one: {} against {}",
+            seen(&wooded),
+            seen(&open)
+        );
+    }
+
+    #[test]
+    fn flat_ground_leaves_the_battle_exactly_as_it_was() {
+        // The switch every pre-terrain invariant leans on: with no relief and no
+        // trees there is nothing for the ground to do, so the slope term must be
+        // identically zero rather than merely small.
+        let mut c = small();
+        c.terrain_relief = 0.0;
+        c.wood_cover = 0.0;
+        let mut b = Battle::new(c, 43);
+        b.tick_many(150);
+        assert!(b.grid.height.iter().all(|&h| h == 0.0));
+        assert!(b.grid.cover.iter().all(|&v| v == 0.0));
+        assert_eq!(b.grid.grade(4, 4, 1.0, 0.0), 0.0);
     }
 
     #[test]

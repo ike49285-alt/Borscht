@@ -9,6 +9,7 @@ pub mod grid;
 pub mod morale;
 pub mod rng;
 pub mod stats;
+pub mod terrain;
 
 pub use battle::{Battle, ColorMode, Outcome};
 pub use config::Config;

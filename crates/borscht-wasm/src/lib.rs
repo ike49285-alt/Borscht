@@ -230,6 +230,21 @@ pub extern "C" fn render_plant_count() -> u32 {
     0
 }
 
+/// Pack the ground and return the grid dimension, or zero when there is no
+/// battle. The buffer is `dim * dim * 2` bytes: height, then cover.
+#[no_mangle]
+pub extern "C" fn prepare_terrain() -> u32 {
+    battle().map_or(0, |b| b.prepare_terrain())
+}
+
+#[no_mangle]
+pub extern "C" fn terrain_ptr() -> *const u8 {
+    match battle() {
+        Some(b) => b.terrain_buffer().as_ptr(),
+        None => core::ptr::null(),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn world_size() -> f32 {
     battle().map_or(0.0, |b| b.field_size())

@@ -192,6 +192,19 @@ pub struct Grid {
     /// Routing units per cell, per side. Panic is contagious, and this is the
     /// carrier.
     pub routing: [Vec<f32>; TEAMS],
+
+    /// Height of the ground, **in world units** -- the same units as a unit's
+    /// `x` and `y`, so a difference divided by a distance is a real grade.
+    /// Static: written once per battle by [`crate::terrain::generate`] and read
+    /// every tick.
+    pub height: Vec<f32>,
+    /// Height of the tallest ground, in world units. Kept so a renderer can
+    /// normalise the field for contrast without scanning it.
+    pub relief: f32,
+    /// How wooded the ground is, in `[0, 1]`. Also static.
+    pub cover: Vec<f32>,
+    /// Working space for the wood threshold, kept so a reset does not allocate.
+    scratch: Vec<f32>,
 }
 
 impl Grid {
@@ -216,7 +229,41 @@ impl Grid {
             count: zeros(),
             losses: zeros(),
             routing: zeros(),
+            height: vec![0.0f32; cells],
+            relief: 0.0,
+            cover: vec![0.0f32; cells],
+            scratch: Vec::new(),
         }
+    }
+
+    /// Lay out the ground for this battle.
+    ///
+    /// Separate from `new` because the geometry comes from the config and the
+    /// ground comes from the seed, and a reset changes the second without
+    /// touching the first.
+    pub fn generate_terrain(&mut self, seed: u64, shape: crate::terrain::Shape) {
+        self.relief = shape.relief.max(0.0);
+        crate::terrain::generate(
+            &mut self.height,
+            &mut self.cover,
+            &mut self.scratch,
+            self.geom.dim,
+            seed,
+            shape,
+        );
+    }
+
+    /// The slope at a cell along a direction, as a plain rise over run.
+    ///
+    /// Positive means the ground climbs the way `(dx, dy)` points. The height
+    /// field is in world units and the central difference is per cell, so the
+    /// cell size is what converts one into the other -- and leaving that
+    /// division out is exactly how the first version of terrain came to have no
+    /// effect on anything.
+    #[inline(always)]
+    pub fn grade(&self, cx: i32, cy: i32, dx: f32, dy: f32) -> f32 {
+        let (_, gx, gy) = self.geom.sample(&self.height, cx, cy);
+        (gx * dx + gy * dy) / self.geom.cell_size
     }
 
     #[inline(always)]
@@ -296,6 +343,38 @@ mod tests {
 
     fn grid() -> Grid {
         Grid::new(16, 160.0)
+    }
+
+    #[test]
+    fn a_grade_is_a_rise_over_a_run() {
+        // The test that would have caught terrain having no effect on anything.
+        // A height field kept in [0, 1] over a field hundreds of units across is
+        // a grade of about one in fifteen hundred, and every slope term
+        // downstream is then multiplied by nothing -- which is exactly what
+        // happened, and no coefficient could rescue it.
+        let mut g = Grid::new(16, 160.0); // cells are 10 units across
+        g.relief = 16.0;
+        // A ramp climbing east: one unit of height per unit of distance east,
+        // divided by ten, so a one-in-ten slope.
+        for cy in 0..16 {
+            for cx in 0..16 {
+                g.height[(cy as usize) * 16 + cx as usize] = cx as f32;
+            }
+        }
+        // Away from the edges, where the grid's wrap folds the ramp back.
+        let east = g.grade(8, 8, 1.0, 0.0);
+        assert!(
+            (east - 0.1).abs() < 1e-4,
+            "climbing east should be a one-in-ten grade, got {east}"
+        );
+        assert!(
+            (g.grade(8, 8, -1.0, 0.0) + 0.1).abs() < 1e-4,
+            "and going back down it should be the same number, negative"
+        );
+        assert!(
+            g.grade(8, 8, 0.0, 1.0).abs() < 1e-4,
+            "walking along the contour is not a climb"
+        );
     }
 
     #[test]

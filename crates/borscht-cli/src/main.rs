@@ -388,6 +388,15 @@ fn battle(args: &Args) {
     let mut milestones = [[None::<u32>; 3]; 2];
     let mut peak_routing = 0u32;
 
+    // The ground each side is standing on when the fighting starts.
+    //
+    // This is the measurement that says whether terrain decides anything or is
+    // merely decorative: if the side that came to the fight holding the higher
+    // ground does not win more often than chance, the hills are scenery and the
+    // honest thing is to say so rather than to turn the constants up.
+    let mut ground = [0.0f32; 2];
+    let mut contact_at = None;
+
     for tick in 0..args.ticks {
         b.tick();
         {
@@ -409,6 +418,23 @@ fn battle(args: &Args) {
                 }
             }
             peak_routing = peak_routing.max(routing_now);
+
+            if contact_at.is_none() && b.stats.red_killed + b.stats.blue_killed > 0.0 {
+                contact_at = Some(tick);
+                let mut sum = [0.0f64; 2];
+                let mut men = [0u32; 2];
+                for i in 0..b.army.len() {
+                    if !b.army.alive(i) {
+                        continue;
+                    }
+                    let t = b.army.team[i] as usize;
+                    sum[t] += b.grid.height[b.grid.units.cell_of[i] as usize] as f64;
+                    men[t] += 1;
+                }
+                for t in 0..2 {
+                    ground[t] = (sum[t] / men[t].max(1) as f64) as f32;
+                }
+            }
         }
         if tick % 20 == 0 {
             csv.push_str(&format!("{tick},"));
@@ -449,9 +475,15 @@ fn battle(args: &Args) {
     };
     if args.quiet {
         println!(
-            "ticks={} red={} blue={} red_started={} blue_started={} red_killed={} blue_killed={} winner={winner}",
-            b.tick, end[0], end[1], started[0], started[1],
-            b.stats.red_killed, b.stats.blue_killed
+            "ticks={} red={} blue={} red_holding={} blue_holding={} red_started={} blue_started={} red_killed={} blue_killed={} red_ground={:.4} blue_ground={:.4} red_slope={:.5} blue_slope={:.5} contact={} winner={winner}",
+            b.tick, end[0], end[1],
+            b.stats.red_holding, b.stats.blue_holding,
+            started[0], started[1],
+            b.stats.red_killed, b.stats.blue_killed,
+            ground[0], ground[1],
+            b.counters.blow_slope[0] / b.counters.blows[0].max(1) as f32,
+            b.counters.blow_slope[1] / b.counters.blows[1].max(1) as f32,
+            contact_at.map_or(-1i64, |t| t as i64)
         );
     } else {
         println!("after {} ticks: {winner}", b.tick);
@@ -466,6 +498,17 @@ fn battle(args: &Args) {
         println!(
             "  mean nerve   red {:.2}   blue {:.2}",
             b.stats.red_morale, b.stats.blue_morale
+        );
+        println!(
+            "  mean downhill on blows struck   red {:+.4}   blue {:+.4}",
+            b.counters.blow_slope[0] / b.counters.blows[0].max(1) as f32,
+            b.counters.blow_slope[1] / b.counters.blows[1].max(1) as f32,
+        );
+        println!(
+            "  ground held at contact (tick {})   red {:.3}   blue {:.3}",
+            contact_at.map_or("never".to_string(), |t| t.to_string()),
+            ground[0],
+            ground[1]
         );
 
         let c = b.counters;

@@ -98,6 +98,19 @@ export function createEngine({ post, schedule }) {
     if (overrides) sim.configure(PARAMS, overrides);
     sim.create(seed);
     tickMsAverage = 0;
+    publishTerrain();
+  }
+
+  /// Ship the ground across once, when it changes -- which is when a battle is
+  /// created or reset, and never in between.
+  function publishTerrain() {
+    const ground = sim.terrain();
+    if (!ground) return;
+    // Copied out of WebAssembly memory before it is transferred: the view would
+    // be detached the moment that memory grows, and it cannot be transferred
+    // while it aliases the heap.
+    const buffer = ground.bytes.slice().buffer;
+    post({ type: 'terrain', buffer, dim: ground.dim }, [buffer]);
   }
 
   // Messages that arrived before there was a world to apply them to.

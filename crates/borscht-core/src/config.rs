@@ -102,6 +102,52 @@ config_params! {
     /// Width of each formation, flank to flank, as a fraction of the field.
     deploy_width: f32 = 0.55, "deployment", 0.05, 1.0;
 
+    /// Height of the tallest ground, as a fraction of the field's edge.
+    ///
+    /// A fraction of the field rather than a bare number, because that is what
+    /// makes it a *slope*: hills a third of the field wide standing a twentieth
+    /// of the field tall are a one-in-seven climb whatever the muster. The first
+    /// version of this kept height in `[0, 1]` over a field hundreds of units
+    /// across -- a grade of one in fifteen hundred -- and every terrain effect
+    /// downstream was multiplied by nothing. Turning the coefficients up five
+    /// times over did not move the outcome, because there was no ground to
+    /// begin with.
+    ///
+    /// Zero is dead flat, which is the field as it was before there was any
+    /// ground, and is what the regression tests hold themselves to.
+    terrain_relief: f32 = 0.05, "terrain", 0.0, 0.4;
+    /// Size of a hill as a fraction of the field's edge.
+    ///
+    /// A fraction rather than a distance, so a battle of five thousand and a
+    /// battle of a million are fought over ground of the same shape rather than
+    /// the larger one being fought over noise.
+    terrain_scale: f32 = 0.35, "terrain", 0.05, 1.0;
+    /// Fraction of the field under trees.
+    wood_cover: f32 = 0.18, "terrain", 0.0, 0.8;
+    /// Speed lost per unit of grade climbed, a grade being a plain rise over
+    /// run.
+    ///
+    /// Signed, so the same term that costs a man his wind going up hands it back
+    /// coming down -- which is what makes a charge downhill worth ordering.
+    slope_cost: f32 = 2.0, "terrain", 0.0, 8.0;
+    /// Speed lost in the thickest wood.
+    cover_drag: f32 = 0.45, "terrain", 0.0, 0.95;
+    /// How much of a unit's fighting strength the thickest wood hides.
+    ///
+    /// Hides, not weakens: this scales what goes into the *strength* field,
+    /// which is what everyone steers by and what the morale rule reads as local
+    /// odds, while the head count stays true. So men in trees are harder to find
+    /// and harder to be frightened by, but fight exactly as well, and a
+    /// commander cannot see into a wood either.
+    cover_hide: f32 = 0.75, "terrain", 0.0, 1.0;
+    /// Extra damage for a blow struck down a full unit of grade.
+    ///
+    /// Read off the slope under the man and the direction of the blow, not off
+    /// the difference between two cells' heights: two men close enough to touch
+    /// are in the same cell almost always, so a cell-to-cell difference is zero
+    /// for nearly every blow struck and the term does nothing.
+    high_ground: f32 = 2.0, "terrain", 0.0, 8.0;
+
     /// Turn applied per tick at full rudder, in radians.
     ///
     /// Bounded because a body cannot pivot instantly, and a line that can is a
@@ -291,6 +337,12 @@ impl Config {
         self.loss_memory = self.loss_memory.clamp(0.0, 0.999);
         self.rout_vulnerability = self.rout_vulnerability.max(1.0);
         self.cohesion_full = self.cohesion_full.max(1.0);
+        self.terrain_relief = self.terrain_relief.clamp(0.0, 1.0);
+
+        self.terrain_scale = self.terrain_scale.clamp(0.02, 1.0);
+        self.wood_cover = self.wood_cover.clamp(0.0, 1.0);
+        self.cover_drag = self.cover_drag.clamp(0.0, 0.95);
+        self.cover_hide = self.cover_hide.clamp(0.0, 1.0);
     }
 
     /// A field sized to hold `total` units at a constant density, so the

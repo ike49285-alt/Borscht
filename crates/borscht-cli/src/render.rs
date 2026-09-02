@@ -13,15 +13,23 @@ pub struct Canvas {
     pub size: u32,
     accum: Vec<f32>,
     weight: Vec<f32>,
+    /// The ground, resampled to pixels once per draw. Bodies are composited
+    /// over it, so an empty stretch of field shows the terrain rather than a
+    /// flat background -- which is the whole point of having terrain.
+    ground: Vec<f32>,
 }
 
 /// Every body counts the same. Both sides matter equally, so unlike the ecology
 /// this grew out of there is nothing here to weight up against a background.
 const UNIT_WEIGHT: f32 = 1.0;
 
-/// Empty ground: a near-black blue, so bare soil is visibly bare rather than the
-/// same black as an unlit organism.
-const BACKGROUND: [u8; 3] = [6, 8, 14];
+/// Bare ground in the valley bottoms, and on the tops. Everything between is
+/// interpolated, so relief reads as shading rather than as a contour map.
+const LOW: [f32; 3] = [10.0, 13.0, 20.0];
+const HIGH: [f32; 3] = [82.0, 78.0, 66.0];
+/// Woods. Dark and green enough to be obviously not ground and obviously not
+/// men, since a body in a wood is drawn over the top of it.
+const WOOD: [f32; 3] = [14.0, 42.0, 22.0];
 
 /// `v^0.55`, tabulated. Lifts the midtones without blowing out the highlights.
 static GAMMA_LUT: std::sync::LazyLock<[u8; 256]> = std::sync::LazyLock::new(|| {
@@ -39,12 +47,47 @@ impl Canvas {
             size,
             accum: vec![0.0; n * 3],
             weight: vec![0.0; n],
+            ground: vec![0.0; n * 3],
+        }
+    }
+
+    /// Resample the height and cover fields to pixels.
+    ///
+    /// Nearest-neighbour: the grid is usually finer than the image at the sizes
+    /// this renders, so interpolating would blur detail that is already there.
+    fn paint_ground(&mut self, battle: &Battle) {
+        let size = self.size as usize;
+        let dim = battle.grid.dim() as usize;
+        // Height is in world units now, so contrast is normalised by the
+        // field's own relief. Flat ground then renders flat rather than
+        // amplifying the last bit of noise into a mountain range.
+        let inv_relief = if battle.grid.relief > 0.0 {
+            1.0 / battle.grid.relief
+        } else {
+            0.0
+        };
+        for py in 0..size {
+            let gy = (py * dim / size).min(dim - 1);
+            for px in 0..size {
+                let gx = (px * dim / size).min(dim - 1);
+                let cell = gy * dim + gx;
+                let h = (battle.grid.height[cell] * inv_relief).clamp(0.0, 1.0);
+                let w = battle.grid.cover[cell].clamp(0.0, 1.0);
+                let i = (py * size + px) * 3;
+                for c in 0..3 {
+                    let bare = LOW[c] + (HIGH[c] - LOW[c]) * h;
+                    // Trees keep the hill's shading rather than flattening it,
+                    // so a wooded slope still reads as a slope.
+                    self.ground[i + c] = bare + (WOOD[c] * (0.6 + 0.4 * h) - bare) * w;
+                }
+            }
         }
     }
 
     pub fn draw(&mut self, battle: &mut Battle, mode: ColorMode) {
         self.accum.fill(0.0);
         self.weight.fill(0.0);
+        self.paint_ground(battle);
 
         let count = battle.prepare_render(mode);
         let buf = battle.render_buffer();
@@ -83,15 +126,23 @@ impl Canvas {
         for i in 0..n {
             let w = self.weight[i];
             if w <= 0.0 {
-                out[i * 3..i * 3 + 3].copy_from_slice(&BACKGROUND);
+                for c in 0..3 {
+                    out[i * 3 + c] = self.ground[i * 3 + c].clamp(0.0, 255.0) as u8;
+                }
                 continue;
             }
             // Occupancy boost saturates quickly; without a cap a single dense
             // cell blows out and the rest of the frame reads as empty.
             let boost = 1.0 + (w / (w + 6.0)) * 0.6;
+            // One body in a pixel lets most of the ground through; a press of
+            // them covers it. Without this the thinnest skirmish line paints
+            // over the terrain as solidly as a phalanx does.
+            let opacity = w / (w + 0.5);
             for c in 0..3 {
                 let v = (self.accum[i * 3 + c] / w * boost).clamp(0.0, 255.0) / 255.0;
-                out[i * 3 + c] = (GAMMA_LUT[(v * 255.0) as usize]).max(BACKGROUND[c]);
+                let body = GAMMA_LUT[(v * 255.0) as usize] as f32;
+                let under = self.ground[i * 3 + c];
+                out[i * 3 + c] = (under + (body - under) * opacity).clamp(0.0, 255.0) as u8;
             }
         }
         out
@@ -112,6 +163,26 @@ mod tests {
     }
 
     #[test]
+    fn the_ground_is_drawn_where_nobody_is_standing() {
+        // Terrain that is never visible is terrain that may as well not exist.
+        let mut c = Config::for_muster(2_000);
+        c.terrain_relief = 1.0;
+        let mut b = Battle::new(c, 4);
+        let mut canvas = Canvas::new(96);
+        canvas.draw(&mut b, ColorMode::Team);
+        let img = canvas.to_rgb();
+        let shades: std::collections::HashSet<[u8; 3]> = img
+            .chunks(3)
+            .map(|p| [p[0], p[1], p[2]])
+            .collect();
+        assert!(
+            shades.len() > 20,
+            "the field rendered in {} shades, so the ground is flat colour",
+            shades.len()
+        );
+    }
+
+    #[test]
     fn drawn_pixels_are_brighter_than_the_background() {
         let mut b = battle();
         let mut canvas = Canvas::new(64);
@@ -126,6 +197,10 @@ mod tests {
     #[test]
     fn an_empty_field_renders_entirely_as_background() {
         let mut c = Config::for_muster(2_000);
+        // Flat and bare, so "background" is one colour and the assertion below
+        // means what it used to. With terrain on, empty ground is hills.
+        c.terrain_relief = 0.0;
+        c.wood_cover = 0.0;
         c.units_per_side = 1;
         let mut b = Battle::new(c, 1);
         // Kill everybody, then let compaction clear the pool.
