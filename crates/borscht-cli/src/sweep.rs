@@ -154,28 +154,25 @@ pub fn run(cfg: &Config, seeds: u64, ticks: u32, doctrine: bool) {
         .collect();
 
     let per_side = cfg.units_per_side.max(1) as f32;
+    // Scored on who is still breathing rather than who is still holding. The
+    // field is closed and a rout is a withdrawal a side recovers from, so
+    // "holding" is a state both armies pass through repeatedly and settles
+    // nothing; the survivors do.
     let margin: Vec<f32> = trials
         .iter()
-        .map(|t| (t.holding[0] - t.holding[1]) / per_side)
+        .map(|t| (t.alive[0] as f32 - t.alive[1] as f32) / per_side)
         .collect();
     let slope_edge: Vec<f32> = trials.iter().map(|t| t.slope[0] - t.slope[1]).collect();
     let ground_edge: Vec<f32> = trials.iter().map(|t| t.ground[0] - t.ground[1]).collect();
 
     let n = trials.len();
     let decided = trials.iter().filter(|t| t.decided).count();
-    // A win where the winner has nothing left is a mutual collapse with a
-    // technical victor, and counting it as a victory hides the thing most worth
-    // knowing. A twentieth of a side still holding is the line drawn here.
+    // A win where the winner has nothing left is a mutual ruin with a technical
+    // victor, and counting it as a victory hides the thing most worth knowing.
+    // A twentieth of a side still alive is the line drawn here.
     let real = trials
         .iter()
-        .filter(|t| {
-            let (hi, lo) = if t.holding[0] > t.holding[1] {
-                (t.holding[0], t.holding[1])
-            } else {
-                (t.holding[1], t.holding[0])
-            };
-            lo == 0.0 && hi > per_side * 0.05
-        })
+        .filter(|t| t.decided && t.alive[0].max(t.alive[1]) as f32 > per_side * 0.05)
         .count();
     // Outcomes here are bimodal -- a decisive victory leaves the winner most of
     // a side, mutual ruin leaves both sides nothing -- so a median of the
@@ -184,7 +181,7 @@ pub fn run(cfg: &Config, seeds: u64, ticks: u32, doctrine: bool) {
     // camp. Report the split instead, and quartiles rather than a midpoint.
     let mut kept: Vec<f32> = trials
         .iter()
-        .map(|t| t.holding[0].max(t.holding[1]) / per_side)
+        .map(|t| t.alive[0].max(t.alive[1]) as f32 / per_side)
         .collect();
     kept.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let quartile = |q: f32| {
@@ -194,22 +191,33 @@ pub fn run(cfg: &Config, seeds: u64, ticks: u32, doctrine: bool) {
     };
     let ruin = trials
         .iter()
-        .filter(|t| t.holding[0].max(t.holding[1]) <= per_side * 0.05)
+        .filter(|t| t.alive[0].max(t.alive[1]) as f32 <= per_side * 0.05)
         .count();
     let length = median(trials.iter().map(|t| t.ticks as f32).collect());
     let ran_out = trials.iter().filter(|t| t.ticks >= ticks as u64).count();
 
+    // What is *actually* playing. `Net::trained` falls back to the doctrine when
+    // no run has beaten it, so "trained" was a label the header printed rather
+    // than a fact about the battles underneath it.
+    let commander = if doctrine || borscht_core::trained::TRAINED.is_none() {
+        "hand-written"
+    } else {
+        "trained"
+    };
+    let red_won = trials.iter().filter(|t| t.alive[1] == 0).count();
+    let blue_won = trials.iter().filter(|t| t.alive[0] == 0).count();
     println!(
-        "{n} battles of {} men under the {} commander, {:.1}s\n",
+        "{n} battles of {} men under the {commander} commander, {:.1}s\n",
         cfg.units_per_side * 2,
-        if doctrine { "hand-written" } else { "trained" },
         started.elapsed().as_secs_f32()
     );
+    println!("  red (attacking) won                {red_won:>2}/{n}");
+    println!("  blue (holding) won                 {blue_won:>2}/{n}");
     println!("  decided                            {decided:>2}/{n}");
-    println!("  decisive victories                 {real:>2}/{n}   (loser broken, winner keeps a twentieth or more)");
-    println!("  mutual ruin                        {ruin:>2}/{n}   (nobody left holding much of anything)");
+    println!("  decisive victories                 {real:>2}/{n}   (loser destroyed, winner keeps a twentieth or more)");
+    println!("  mutual ruin                        {ruin:>2}/{n}   (neither side has much of anything left)");
     println!(
-        "  winner's holding, quartiles        {:.0}% / {:.0}% / {:.0}% of a side",
+        "  winner's survivors, quartiles      {:.0}% / {:.0}% / {:.0}% of a side",
         quartile(0.25) * 100.0,
         quartile(0.5) * 100.0,
         quartile(0.75) * 100.0
@@ -228,6 +236,23 @@ pub fn run(cfg: &Config, seeds: u64, ticks: u32, doctrine: bool) {
             .collect(),
     );
     println!("  median still alive at the end      {:.0}% of both sides", survivors * 100.0);
+    // Alive and holding are different questions now that a rout is a
+    // withdrawal: an army can end a battle whole but with half of it still
+    // running for the rear.
+    let steady = median(
+        trials
+            .iter()
+            .map(|t| {
+                let alive = (t.alive[0] + t.alive[1]) as f32;
+                if alive > 0.0 {
+                    (t.holding[0] + t.holding[1]) / alive
+                } else {
+                    0.0
+                }
+            })
+            .collect(),
+    );
+    println!("  median of the living still holding {:.0}%", steady * 100.0);
     println!("  median first blood                 tick {met:.0}");
     if ran_out > 0 {
         // A truncated battle is scored as though it ended where the clock did,

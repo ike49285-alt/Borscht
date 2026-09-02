@@ -19,16 +19,16 @@
 
 use crate::fastmath::clamp;
 
-/// Unit is off the field and its slot has not been reclaimed yet. Set for the
-/// dead and for the fled alike, because the tick loop wants one cheap test for
-/// "is this man still here"; [`FLED`] says which of the two he is.
+/// Unit is dead and its slot has not been reclaimed yet.
+///
+/// The only way off this field. Men used to be able to run clean off the edge
+/// and out of the battle; now the field is closed and a rout is a withdrawal to
+/// the muster point rather than an exit, so every man who took the field is
+/// either still on it or a casualty.
 pub const DEAD: u8 = 1 << 0;
 /// Unit has broken and is running. It does not fight, and it frightens its
 /// neighbours.
 pub const ROUTING: u8 = 1 << 1;
-/// Unit ran clear off the edge of the field. He is gone from the roll like a
-/// corpse, but he is not a casualty, and the two must not be added together.
-pub const FLED: u8 = 1 << 2;
 
 /// No target.
 pub const NO_TARGET: u32 = u32::MAX;
@@ -120,6 +120,19 @@ pub struct Army {
     /// written a month later. It caps rather than wrapping, since all anyone
     /// asks of it is whether enough time has passed.
     pub broken_for: Vec<u8>,
+    /// Ticks of steadiness a man has left after re-forming, during which he
+    /// cannot break again.
+    ///
+    /// A separate byte from `broken_for` rather than that one counting the other
+    /// way. The two are never both meaningful, which is exactly the argument
+    /// that makes sharing a field tempting and exactly why it is not done: one
+    /// field with two meanings is how a subtle bug gets written a month later.
+    ///
+    /// Without it a division that re-forms at its muster point breaks again on
+    /// the spot, because the men arriving beside it are still running and panic
+    /// reads the share of them. Men who have just been rallied by their officers
+    /// do not scatter at the sight of the next company coming in.
+    pub steady_for: Vec<u8>,
     pub flags: Vec<u8>,
     /// Index of the unit being fought, or `NO_TARGET`.
     ///
@@ -148,6 +161,7 @@ impl Army {
             division: vec![0u8; capacity],
             cooldown: vec![0u8; capacity],
             broken_for: vec![0u8; capacity],
+            steady_for: vec![0u8; capacity],
             flags: vec![0u8; capacity],
             target: vec![NO_TARGET; capacity],
             len: 0,
@@ -193,12 +207,6 @@ impl Army {
         self.flags[i] & DEAD == 0
     }
 
-    /// Left the field on his own legs rather than on a shield.
-    #[inline(always)]
-    pub fn fled(&self, i: usize) -> bool {
-        self.flags[i] & FLED != 0
-    }
-
     #[inline(always)]
     pub fn routing(&self, i: usize) -> bool {
         self.flags[i] & ROUTING != 0
@@ -231,6 +239,7 @@ impl Army {
         self.division[i] = division;
         self.cooldown[i] = 0;
         self.broken_for[i] = 0;
+        self.steady_for[i] = 0;
         self.flags[i] = 0;
         self.target[i] = NO_TARGET;
         self.len += 1;
@@ -245,21 +254,6 @@ impl Army {
         }
         self.flags[i] |= DEAD;
         self.hp[i] = 0.0;
-        self.target[i] = NO_TARGET;
-    }
-
-    /// Take a man off the field because he has run right off the edge of it.
-    ///
-    /// His slot is reclaimed exactly as a corpse's is -- the pool has no third
-    /// state and does not need one -- but he is tallied apart from the dead.
-    /// Without this a broken army piles up along the boundary and stays there:
-    /// nobody fights it, nobody rallies out of it, and the field never empties.
-    #[inline(always)]
-    pub fn flee(&mut self, i: usize) {
-        if self.flags[i] & DEAD == 0 {
-            self.dead += 1;
-        }
-        self.flags[i] |= DEAD | FLED;
         self.target[i] = NO_TARGET;
     }
 
@@ -297,6 +291,7 @@ impl Army {
                 self.division[i] = self.division[last];
                 self.cooldown[i] = self.cooldown[last];
                 self.broken_for[i] = self.broken_for[last];
+                self.steady_for[i] = self.steady_for[last];
                 self.flags[i] = self.flags[last];
             }
             self.len = last;

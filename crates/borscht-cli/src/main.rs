@@ -657,9 +657,9 @@ fn battle(args: &Args) {
             );
         }
         println!(
-            "    peak running at once {peak_routing}, rallied {}, got away {}",
+            "    peak running at once {peak_routing}, rallied in the field {}, re-formed at the rear {}",
             c.rallied,
-            c.fled[0] + c.fled[1]
+            c.regrouped[0] + c.regrouped[1]
         );
         let fighting: u32 = c.killed_fighting.iter().sum();
         let running: u32 = c.killed_routing.iter().sum();

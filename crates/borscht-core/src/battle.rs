@@ -93,8 +93,9 @@ pub enum Outcome {
     RedHolds = 1,
     /// Blue holds the field.
     BlueHolds = 2,
-    /// Both armies broke. Nobody won; there is only a pursuit, in both
-    /// directions at once, and it is worth watching rather than stopping on.
+    /// Neither side is left standing. Vanishingly rare, and it means what it
+    /// says rather than "both armies have broken" -- breaking is something an
+    /// army now recovers from.
     MutualBreak = 3,
 }
 
@@ -112,9 +113,10 @@ pub struct Counters {
     /// Men cut down while running, per side. History says this should be the
     /// larger number.
     pub killed_routing: [u32; TEAMS],
-    /// Men who ran clean off the field, per side. Not casualties: they are the
-    /// part of a broken army that gets away.
-    pub fled: [u32; TEAMS],
+    /// Men who ran all the way back to their muster point and were re-formed
+    /// there, per side. A rout is now a withdrawal, so this is the number of
+    /// times a broken man was put back in the line.
+    pub regrouped: [u32; TEAMS],
     /// Summed downhill advantage over every blow a side struck, and how many
     /// blows that was.
     ///
@@ -148,6 +150,13 @@ pub struct Battle {
     pub view: crate::commander::View,
     /// Each division's position and condition, as of the last set of orders.
     pub divisions: [[crate::commander::DivisionState; crate::army::MAX_DIVISIONS]; TEAMS],
+    /// Where each division formed up, and where its broken men run back to.
+    ///
+    /// Fixed at deployment rather than following the division: a rally point
+    /// that chased the fighting would be no refuge at all, and one that drifted
+    /// forward could end up on the wrong side of the enemy -- which is how
+    /// fugitives came to charge the men who had broken them once already.
+    pub rally_point: [[(f32, f32); crate::army::MAX_DIVISIONS]; TEAMS],
     /// Fighting strength each side mustered, so "how much of itself has this
     /// army left" means something.
     pub started_strength: [f32; TEAMS],
@@ -161,11 +170,6 @@ pub struct Battle {
     render_count: usize,
     terrain_buf: Vec<u8>,
 }
-
-/// How far off the field's edge a running man has to get before he is counted
-/// as having left it. One body width: a router is moving faster than that in a
-/// tick, so this is a threshold he crosses rather than a band he sits in.
-const EDGE_MARGIN: f32 = 1.0;
 
 /// Which neighbouring cell a unit-length direction component points into.
 ///
@@ -208,6 +212,7 @@ impl Battle {
             view: crate::commander::View::default(),
             divisions: [[crate::commander::DivisionState::default(); crate::army::MAX_DIVISIONS];
                 TEAMS],
+            rally_point: [[(0.0, 0.0); crate::army::MAX_DIVISIONS]; TEAMS],
             started_strength: [0.0; TEAMS],
             host: [1.0; TEAMS],
             cfg,
@@ -348,6 +353,10 @@ impl Battle {
                         break;
                     }
                 }
+
+                // Where this division formed up, which is where its broken men
+                // will run back to for the rest of the battle.
+                self.rally_point[team][d] = (cx, size * 0.5 + (band_lo + band_hi) * 0.5 * width);
 
                 // Opening orders: the line goes forward, the reserve stands
                 // where it was drawn up.
@@ -578,12 +587,27 @@ impl Battle {
                 // precisely when a division is full of fugitives. A broken
                 // division therefore turned round and charged the men who had
                 // just broken it.
-                tx = -ex * seen;
-                ty = -ey * seen;
+                // He runs for the ground his division formed up on. The field
+                // is closed -- there is no running off the edge of it any more
+                // -- so a rout is a withdrawal to the muster point, where he can
+                // be gathered up and sent back in.
+                let (hx, hy) = self.rally_point[team]
+                    [(self.army.division[i] as usize).min(crate::army::MAX_DIVISIONS - 1)];
+                let (rx, ry) = unit(hx - self.army.x[i], hy - self.army.y[i]);
+                let (ax, ay) = (-ex * seen, -ey * seen);
+                tx = rx + ax * cfg.rout_fear;
+                ty = ry + ay * cfg.rout_fear;
+
+                // And never *through* the enemy to get there. If his muster
+                // point now lies beyond the men who broke him -- which happens
+                // the moment a line is overrun -- running for it would send him
+                // straight back into them, which is the exact shape of the last
+                // defect this steering had.
+                if tx * ax + ty * ay < 0.0 {
+                    tx = ax;
+                    ty = ay;
+                }
                 if tx == 0.0 && ty == 0.0 {
-                    // Nothing in sight to run from: keep going the way he was
-                    // already going, rather than stopping in the open. He leaves
-                    // the field by the edge in the end.
                     let (s, c) = sin_cos(self.army.heading[i]);
                     tx = c;
                     ty = s;
@@ -648,20 +672,6 @@ impl Battle {
             let y = clamp_field(self.army.y[i] + s * speed * going, size);
             self.army.x[i] = x;
             self.army.y[i] = y;
-
-            // A man who has run to the edge keeps going, and is gone. Otherwise
-            // fugitives pile up along the boundary where nothing can reach them
-            // and nothing can gather them up, and a mutually broken field never
-            // resolves into anything at all.
-            if self.army.routing(i)
-                && (x <= EDGE_MARGIN
-                    || y <= EDGE_MARGIN
-                    || x >= size - EDGE_MARGIN
-                    || y >= size - EDGE_MARGIN)
-            {
-                self.army.flee(i);
-                self.counters.fled[team] += 1;
-            }
         }
     }
 
@@ -754,12 +764,30 @@ impl Battle {
             } else {
                 0.5
             };
+            let cell = self.grid.units.cell_of[i] as usize;
+            let enemy_near = self.grid.strength[foe(team as u8)][cell] > 0.0;
             let p = crate::morale::pressure_on(&self.army, &self.grid, &cfg, i, a.hp, standing);
             let m = clamp(self.army.morale[i] + p.delta(&cfg), 0.0, 1.0);
             self.army.morale[i] = m;
 
             if self.army.routing(i) {
                 self.army.broken_for[i] = self.army.broken_for[i].saturating_add(1);
+
+                // Home. Reaching the ground his division formed up on is what
+                // ends a rout: he is gathered up by whoever is running the rear,
+                // given his nerve back, and goes in again. No waiting on his own
+                // mood and no need for a formed body to fall in with -- that is
+                // what the muster point *is*.
+                let (hx, hy) = self.rally_point[team]
+                    [(self.army.division[i] as usize).min(crate::army::MAX_DIVISIONS - 1)];
+                let home = cfg.regroup_radius * cfg.field_size;
+                let (dx, dy) = (self.army.x[i] - hx, self.army.y[i] - hy);
+                if dx * dx + dy * dy <= home * home {
+                    self.reform(i, cfg.regroup_nerve, cfg.steady_ticks);
+                    self.counters.regrouped[team] += 1;
+                    continue;
+                }
+
                 let long_enough = self.army.broken_for[i] as f32 >= cfg.rally_delay;
                 if long_enough
                     && crate::morale::may_rally(
@@ -771,9 +799,25 @@ impl Battle {
                         cfg.rally_margin,
                     )
                 {
-                    self.army.flags[i] &= !crate::army::ROUTING;
-                    self.army.broken_for[i] = 0;
+                    // Rallied in the field, on a formed body rather than at the
+                    // rear. He keeps the nerve he talked himself into.
+                    self.reform(i, m, cfg.steady_ticks);
                     self.counters.rallied += 1;
+                }
+            } else if self.army.steady_for[i] > 0 {
+                // Spent in contact only. Counted in plain ticks it is used up on
+                // the march back from the muster point and protects nothing at
+                // all: a man breaks, walks home, re-forms, walks back, and
+                // breaks again the moment he arrives. Measured that way, ten
+                // thousand men produced a hundred and thirty thousand breaks in
+                // one battle -- thirteen apiece -- and almost nobody died,
+                // because everyone spent the battle walking.
+                //
+                // What it is meant to buy is that a re-formed company *fights*
+                // for a while before it can break again, so that is what it is
+                // denominated in.
+                if enemy_near {
+                    self.army.steady_for[i] -= 1;
                 }
             } else if m < a.nerve {
                 self.army.flags[i] |= crate::army::ROUTING;
@@ -781,6 +825,18 @@ impl Battle {
                 self.counters.broke[team] += 1;
             }
         }
+    }
+
+    /// Put a broken man back in the line.
+    ///
+    /// The steadiness he is given afterwards is the whole of what stops a
+    /// re-formed company breaking again on the spot: the men arriving around it
+    /// are still running, and panic reads the share of them.
+    fn reform(&mut self, i: usize, nerve: f32, steady: f32) {
+        self.army.flags[i] &= !crate::army::ROUTING;
+        self.army.broken_for[i] = 0;
+        self.army.morale[i] = clamp(nerve, 0.0, 1.0);
+        self.army.steady_for[i] = clamp(steady, 0.0, 255.0) as u8;
     }
 
     fn collect_stats(&mut self) {
@@ -815,18 +871,20 @@ impl Battle {
 
     /// How the battle stands.
     ///
-    /// Judged on who is still holding the ground rather than on who is still
-    /// breathing: an army stops contesting a field when it breaks, and waiting
-    /// for the last fugitive to be cut down measures the pursuit, not the
-    /// battle.
+    /// Judged on who is still breathing. It used to be judged on who was still
+    /// *holding* -- an army that broke had stopped contesting the ground, and
+    /// waiting for the last fugitive measured the pursuit rather than the
+    /// battle. That was right while breaking was final. It is not right now: a
+    /// broken man withdraws to his muster point, is re-formed and goes back in,
+    /// so "nobody holding" is a state an army passes through several times in a
+    /// battle and recovers from. Ending on it would hand the field to whichever
+    /// side happened to be steady at that instant.
     ///
-    /// Both sides broken is its own answer. Folding it in with a victory --
-    /// which is what a plain `holding[0] == 0 || holding[1] == 0` does -- told
-    /// the viewer a mutual collapse was a decision, and the viewer stopped the
-    /// clock on it.
+    /// The field is closed and nobody leaves it, so the question is settled the
+    /// only way it can be.
     pub fn outcome(&self) -> Outcome {
-        let holding = [self.army.holding(0), self.army.holding(1)];
-        match (holding[0], holding[1]) {
+        let alive = self.army.muster();
+        match (alive[0], alive[1]) {
             (0, 0) => Outcome::MutualBreak,
             (0, _) => Outcome::BlueHolds,
             (_, 0) => Outcome::RedHolds,
@@ -1054,14 +1112,13 @@ mod tests {
             b.tick();
             let alive = b.army.muster();
             let dead = b.stats.red_killed as u32 + b.stats.blue_killed as u32;
-            // Three ways off the roll now, not two: a man who runs clear off the
-            // edge is gone from the field but he is not a casualty, and adding
-            // him to the dead would quietly inflate every butcher's bill.
-            let fled = b.counters.fled[0] + b.counters.fled[1];
+            // One way off the roll, now that the field is closed: a man who
+            // took it is either still standing on it or a casualty. Nobody
+            // leaves, so this is a stricter statement than it used to be.
             assert_eq!(
-                alive[0] + alive[1] + dead + fled,
+                alive[0] + alive[1] + dead,
                 total_started,
-                "tick {tick}: {} alive plus {dead} dead plus {fled} fled is not {total_started}",
+                "tick {tick}: {} alive plus {dead} dead is not {total_started}",
                 alive[0] + alive[1]
             );
             assert!(alive[0] <= started[0] && alive[1] <= started[1]);
@@ -1174,50 +1231,53 @@ mod tests {
     }
 
     #[test]
-    fn a_man_who_runs_off_the_edge_leaves_the_field() {
+    fn a_broken_man_runs_home_and_is_put_back_in_the_line() {
+        // The field is closed: a rout is a withdrawal to the muster point, not
+        // an exit. What it costs a side is the time its men spend out of the
+        // line, not their removal from the battle.
         let mut b = Battle::new(small(), 29);
-        // Break the whole of one side and let it run.
+        let started = b.started();
         for i in 0..b.army.len() {
             if b.army.team[i] == 0 {
                 b.army.flags[i] |= crate::army::ROUTING;
             }
         }
-        let started = b.started();
-        b.tick_many(1_200);
+        b.tick_many(900);
+
         assert!(
-            b.counters.fled[0] > 0,
-            "a broken army ran to the edge and stayed there"
+            b.counters.regrouped[0] > 0,
+            "a broken army never made it back to its own ground"
         );
-        // Gone from the roll, and counted apart from the dead.
+        // Nobody left, so every man is alive or dead and none is unaccounted.
         let alive = b.army.muster();
         let casualties = b.stats.red_killed as u32 + b.stats.blue_killed as u32;
-        assert_eq!(
-            alive[0] + alive[1] + casualties + b.counters.fled[0] + b.counters.fled[1],
-            started[0] + started[1]
+        assert_eq!(alive[0] + alive[1] + casualties, started[0] + started[1]);
+        // And they are back on their feet rather than milling at the boundary.
+        assert!(
+            b.army.holding(0) > 0,
+            "the whole side stayed broken with a rally point to run to"
         );
-        // And not drawn.
-        let drawn = b.prepare_render(ColorMode::Team);
-        assert_eq!(drawn, b.units());
-        assert_eq!(drawn as u32, alive[0] + alive[1]);
     }
 
     #[test]
-    fn a_mutual_break_is_not_a_victory() {
+    fn a_field_of_fugitives_has_not_been_decided() {
         let mut b = Battle::new(small(), 31);
         assert_eq!(b.outcome(), Outcome::Undecided);
         for i in 0..b.army.len() {
             b.army.flags[i] |= crate::army::ROUTING;
         }
-        // Nobody is holding the ground, but nobody has won it either -- and
-        // reporting this as a decision is what stopped the viewer's clock on a
-        // field that was still full of men.
-        assert_eq!(b.outcome(), Outcome::MutualBreak);
+        // Every man on the field is running, and that decides nothing: they
+        // withdraw to their muster points, re-form and go back in. Ending here
+        // would hand the field to whichever side was steady at the instant the
+        // clock was read.
+        assert_eq!(b.outcome(), Outcome::Undecided);
+
         for i in 0..b.army.len() {
             if b.army.team[i] == 1 {
-                b.army.flags[i] &= !crate::army::ROUTING;
+                b.army.kill(i);
             }
         }
-        assert_eq!(b.outcome(), Outcome::BlueHolds);
+        assert_eq!(b.outcome(), Outcome::RedHolds);
     }
 
     #[test]

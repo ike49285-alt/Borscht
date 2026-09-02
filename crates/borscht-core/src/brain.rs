@@ -24,7 +24,7 @@ use crate::fastmath::tanh_fast;
 use crate::rng::Rng;
 
 /// Features describing one (division, sector) pair.
-pub const N_IN: usize = 17;
+pub const N_IN: usize = 18;
 pub const N_HID: usize = 10;
 /// One score for the sector, then a logit per posture.
 pub const N_OUT: usize = 6;
@@ -89,9 +89,20 @@ pub mod input {
     /// holding back from the bodies he has sent forward, and every division is
     /// ordered to advance on the first tick.
     pub const DEPTH: usize = 15;
+    /// One for the side whose job it is to attack, zero for the side holding.
+    ///
+    /// The two commanders were otherwise identical and playing a zero-sum game,
+    /// and mutual passivity is a stable equilibrium in one: attacking costs you
+    /// casualties on the way in, so whoever moves first is punished. Measured in
+    /// the order trace, both sides settled onto `hold` for every division from
+    /// about tick seven hundred and stayed there. Somebody has to be the
+    /// attacker, and telling the commander which side he is lets a doctrine --
+    /// and, later, training -- give the two roles different play instead of
+    /// pretending a battle is symmetric.
+    pub const ATTACKER: usize = 16;
     /// Always one, so the skip path carries a per-output bias in the same
     /// weights the doctrine is written in.
-    pub const BIAS: usize = 16;
+    pub const BIAS: usize = 17;
 }
 
 /// Output indices. Index 0 scores the sector; the rest are posture logits and
@@ -180,6 +191,12 @@ impl Net {
         n.skip(i::BIAS, o::ADVANCE, 0.6);
         n.skip(i::FOE_ROUTING, o::ADVANCE, 1.5);
         n.skip(i::OWN_KEPT, o::ADVANCE, 0.5);
+
+        // The attacker's job is to close; the defender's is to make him pay for
+        // it. Without this the two sides are the same commander playing itself,
+        // and they agree to stand still.
+        n.skip(i::ATTACKER, o::ADVANCE, 1.2);
+        n.skip(i::ATTACKER, o::HOLD, -1.0);
 
         n.skip(i::BIAS, o::HOLD, 0.2);
         n.skip(i::IN_CONTACT, o::HOLD, 0.7);
@@ -312,6 +329,35 @@ mod tests {
         let out = d.eval(&x);
         let best = (1..N_OUT).max_by(|&a, &b| out[a].partial_cmp(&out[b]).unwrap()).unwrap();
         assert_ne!(best, output::WITHDRAW, "logits were {out:?}");
+    }
+
+    #[test]
+    fn the_attacker_is_told_to_close_and_the_defender_to_stand() {
+        // Two identical commanders in a zero-sum game both decline to move:
+        // attacking costs casualties on the way in, so whoever goes first is
+        // punished, and the order trace showed every division on both sides
+        // sitting on `hold` from about tick seven hundred onward.
+        let d = Net::doctrine();
+        let best = |x: &[f32; N_IN]| {
+            let out = d.eval(x);
+            (1..N_OUT)
+                .max_by(|&a, &b| out[a].partial_cmp(&out[b]).unwrap())
+                .unwrap()
+        };
+        let mut attacker = features();
+        attacker[input::ATTACKER] = 1.0;
+        attacker[input::IN_CONTACT] = 1.0;
+        attacker[input::OWN_KEPT] = 1.0;
+        // An enemy who is actually there. Left at zero the defender advances
+        // too, and the test passes or fails on a situation that cannot arise:
+        // being in contact with nobody.
+        attacker[input::FOE_STRENGTH] = 0.3;
+
+        let mut defender = attacker;
+        defender[input::ATTACKER] = 0.0;
+
+        assert_eq!(best(&attacker), output::ADVANCE, "the attacker sat still");
+        assert_ne!(best(&defender), output::ADVANCE, "both sides attacked");
     }
 
     #[test]

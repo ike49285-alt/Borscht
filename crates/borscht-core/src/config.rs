@@ -193,6 +193,12 @@ config_params! {
     /// Multiplier on top speed for a unit that has broken. Fear is faster than
     /// discipline.
     rout_speed: f32 = 1.5, "movement", 1.0, 4.0;
+    /// How much a fugitive's line of flight bends away from the enemy, against
+    /// the pull of the muster point he is running for.
+    ///
+    /// He heads for his own ground, but not in a straight line if that would
+    /// take him past the men chasing him.
+    rout_fear: f32 = 0.8, "movement", 0.0, 4.0;
 
     /// How far a unit will look for someone to fight, in units.
     ///
@@ -298,6 +304,31 @@ config_params! {
     /// A single threshold makes units flicker in and out of rout at the
     /// boundary, which looks wrong and is a quiet way to get this subtly broken.
     rally_margin: f32 = 0.22, "morale", 0.0, 1.0;
+    /// How close to his muster point a broken man must get to be gathered up,
+    /// as a fraction of the field.
+    ///
+    /// Reaching your own ground is what ends a rout. There is no running off the
+    /// edge of the field any more: a broken man withdraws, is re-formed, and
+    /// goes back in, so the cost of breaking is the time he spends out of the
+    /// line rather than his removal from the battle.
+    regroup_radius: f32 = 0.06, "morale", 0.005, 0.5;
+    /// Nerve a man is put back in the line with, having been re-formed at his
+    /// muster point.
+    regroup_nerve: f32 = 0.7, "morale", 0.0, 1.0;
+    /// Ticks *of contact* a re-formed man cannot break for.
+    ///
+    /// Denominated in fighting rather than in wall-clock ticks. Counted plainly
+    /// it is spent on the march back from the muster point and protects nothing:
+    /// measured that way ten thousand men broke a hundred and thirty thousand
+    /// times in a single battle and hardly anybody died, because the whole army
+    /// spent its time walking between the line and the rear.
+    ///
+    /// Without this a division that re-forms at its muster point breaks again
+    /// where it stands: the men arriving beside it are still running, panic
+    /// reads the share of them, and the same company cycles between the line and
+    /// the rear for the rest of the battle. Men just rallied by their officers
+    /// do not scatter at the sight of the next company coming in.
+    steady_ticks: f32 = 120.0, "morale", 0.0, 255.0;
     /// Ticks a man must spend running before he will re-form, however calm he
     /// has become.
     ///

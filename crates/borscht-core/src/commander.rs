@@ -322,6 +322,10 @@ fn features(
     x[input::ARMY_KEPT] = army.kept;
     x[input::ARMY_BROKEN] = army.broken;
     x[input::DEPTH] = clamp((me.from_foe - army.mean_from_foe) / view.field, -1.0, 1.0);
+    // Red attacks, blue holds. An arbitrary assignment of a real asymmetry:
+    // battles have an attacker and a defender, and two identical commanders in
+    // a zero-sum game will otherwise both decline to move.
+    x[input::ATTACKER] = if team == 0 { 1.0 } else { 0.0 };
     x[input::BIAS] = 1.0;
     x
 }
