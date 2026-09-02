@@ -19,11 +19,16 @@
 
 use crate::fastmath::clamp;
 
-/// Unit is dead but its slot has not been reclaimed yet.
+/// Unit is off the field and its slot has not been reclaimed yet. Set for the
+/// dead and for the fled alike, because the tick loop wants one cheap test for
+/// "is this man still here"; [`FLED`] says which of the two he is.
 pub const DEAD: u8 = 1 << 0;
 /// Unit has broken and is running. It does not fight, and it frightens its
 /// neighbours.
 pub const ROUTING: u8 = 1 << 1;
+/// Unit ran clear off the edge of the field. He is gone from the roll like a
+/// corpse, but he is not a casualty, and the two must not be added together.
+pub const FLED: u8 = 1 << 2;
 
 /// No target.
 pub const NO_TARGET: u32 = u32::MAX;
@@ -170,9 +175,16 @@ impl Army {
         self.dead
     }
 
+    /// Still on the field: neither cut down nor run away.
     #[inline(always)]
     pub fn alive(&self, i: usize) -> bool {
         self.flags[i] & DEAD == 0
+    }
+
+    /// Left the field on his own legs rather than on a shield.
+    #[inline(always)]
+    pub fn fled(&self, i: usize) -> bool {
+        self.flags[i] & FLED != 0
     }
 
     #[inline(always)]
@@ -219,6 +231,21 @@ impl Army {
         }
         self.flags[i] |= DEAD;
         self.hp[i] = 0.0;
+        self.target[i] = NO_TARGET;
+    }
+
+    /// Take a man off the field because he has run right off the edge of it.
+    ///
+    /// His slot is reclaimed exactly as a corpse's is -- the pool has no third
+    /// state and does not need one -- but he is tallied apart from the dead.
+    /// Without this a broken army piles up along the boundary and stays there:
+    /// nobody fights it, nobody rallies out of it, and the field never empties.
+    #[inline(always)]
+    pub fn flee(&mut self, i: usize) {
+        if self.flags[i] & DEAD == 0 {
+            self.dead += 1;
+        }
+        self.flags[i] |= DEAD | FLED;
         self.target[i] = NO_TARGET;
     }
 

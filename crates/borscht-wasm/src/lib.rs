@@ -141,10 +141,14 @@ pub extern "C" fn team_count(team: u32) -> u32 {
     })
 }
 
-/// Whether one side has been wiped out.
+/// How the battle stands: 0 undecided, 1 red holds, 2 blue holds, 3 both broke.
+///
+/// The host wants the three apart. Collapsing them into a yes-or-no told the
+/// viewer that a mutual collapse was a decision, and the viewer stopped the
+/// clock on a field that still had two running armies on it.
 #[no_mangle]
-pub extern "C" fn decided() -> u32 {
-    battle().map_or(0, |b| b.decided() as u32)
+pub extern "C" fn outcome() -> u32 {
+    battle().map_or(0, |b| b.outcome() as u32)
 }
 
 // ------------------------------------------------------------- parameters --

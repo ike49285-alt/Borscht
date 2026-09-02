@@ -63,6 +63,25 @@ impl ColorMode {
     }
 }
 
+/// How a battle stands.
+///
+/// Three states rather than a yes-or-no, because "nobody is holding" is not the
+/// same event as "one side is holding" and treating them alike is what made a
+/// mutual collapse read as a victory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum Outcome {
+    /// Both sides still have men standing their ground.
+    Undecided = 0,
+    /// Red holds the field: blue has nobody left holding it.
+    RedHolds = 1,
+    /// Blue holds the field.
+    BlueHolds = 2,
+    /// Both armies broke. Nobody won; there is only a pursuit, in both
+    /// directions at once, and it is worth watching rather than stopping on.
+    MutualBreak = 3,
+}
+
 /// Running totals a battle is judged by, kept apart from the per-tick stats
 /// because they accumulate rather than being sampled.
 #[derive(Clone, Copy, Debug, Default)]
@@ -77,6 +96,9 @@ pub struct Counters {
     /// Men cut down while running, per side. History says this should be the
     /// larger number.
     pub killed_routing: [u32; TEAMS],
+    /// Men who ran clean off the field, per side. Not casualties: they are the
+    /// part of a broken army that gets away.
+    pub fled: [u32; TEAMS],
 }
 
 const SALT_INIT: u64 = 0x5EED_0001;
@@ -98,6 +120,26 @@ pub struct Battle {
     pub counters: Counters,
     render_buf: Vec<u8>,
     render_count: usize,
+}
+
+/// How far off the field's edge a running man has to get before he is counted
+/// as having left it. One body width: a router is moving faster than that in a
+/// tick, so this is a threshold he crosses rather than a band he sits in.
+const EDGE_MARGIN: f32 = 1.0;
+
+/// Which neighbouring cell a unit-length direction component points into.
+///
+/// Rounds rather than truncates, so a diagonal reads as diagonal: the man looks
+/// at the cell he is actually walking into.
+#[inline(always)]
+fn pace(v: f32) -> i32 {
+    if v > 0.5 {
+        1
+    } else if v < -0.5 {
+        -1
+    } else {
+        0
+    }
 }
 
 /// A direction of unit length, or zero when there is no direction to be had.
@@ -186,10 +228,33 @@ impl Battle {
             } else {
                 size * 0.5 + size * cfg.deploy_separation * 0.5
             };
+            // Kinds go in as bodies, in bands across the front, and the order
+            // of the bands is drawn afresh for each side.
+            //
+            // Shuffling the kinds man by man reads as variety and is in fact
+            // the opposite: every cell gets the same mix, so every part of the
+            // line has the same nerve, meets the same odds, and arrives at the
+            // breaking point at the same moment. Both armies then dissolve
+            // together within twenty ticks whatever the morale rule says --
+            // measured across every setting of shock, panic and ascendancy.
+            // Banding gives the line a weak part and a strong part and gives
+            // the two sides different ones, which is where a local collapse
+            // starts and what it rolls along.
+            let kinds = cfg.kinds.max(1) as usize;
+            let mut band = [0u8; crate::army::MAX_ARCHETYPES];
+            for (k, slot) in band.iter_mut().enumerate().take(kinds) {
+                *slot = k as u8;
+            }
+            for k in (1..kinds).rev() {
+                band.swap(k, rng.below(k as u32 + 1) as usize);
+            }
+
             for _ in 0..per_side {
                 let x = clamp_field(cx + rng.range(-depth * 0.5, depth * 0.5), size);
-                let y = clamp_field(size * 0.5 + rng.range(-width * 0.5, width * 0.5), size);
-                let kind = rng.below(cfg.kinds.max(1)) as u8;
+                let across = rng.range(-0.5, 0.5);
+                let y = clamp_field(size * 0.5 + across * width, size);
+                let slot = ((across + 0.5) * kinds as f32) as usize;
+                let kind = band[slot.min(kinds - 1)];
                 let a = self.archetypes[team][kind as usize];
                 if !self
                     .army
@@ -285,20 +350,39 @@ impl Battle {
                 (ox - self.army.x[i], oy - self.army.y[i])
             };
 
-            // Push out of the crush. Both directions are normalised first: the
-            // enemy gradient and the friendly one have unrelated magnitudes, and
-            // combining them raw would let whichever field happens to be
-            // steeper decide the behaviour -- a units mistake that looks exactly
-            // like a tuning problem.
+            // Both directions are normalised first: the enemy gradient and the
+            // friendly one have unrelated magnitudes, and combining them raw
+            // would let whichever field happens to be steeper decide the
+            // behaviour -- a units mistake that looks exactly like a tuning
+            // problem.
             (tx, ty) = unit(tx, ty);
             let (sx, sy) = unit(ogx, ogy);
-            tx -= sx * cfg.spacing;
-            ty -= sy * cfg.spacing;
 
             if self.army.routing(i) {
-                // Away from the enemy, and away fast.
+                // Away from the enemy, and away fast. A frightened man does not
+                // dress his ranks, so neither the press ahead of him nor the
+                // spacing from his neighbours applies.
                 tx = -tx;
                 ty = -ty;
+            } else {
+                // Advance only if there is room in front. One read of his own
+                // side's head count, one cell along the way he means to go: if
+                // that is already at fighting density he is in a rear rank, and
+                // a rear rank does not walk through the men in front of it.
+                //
+                // This is what gives a formation depth. Without it every man
+                // steers up the same enemy gradient until both armies are a
+                // single mass, everybody is in contact, everybody is shocked at
+                // once, and the whole army breaks in the same instant with no
+                // steady rear to rally on.
+                let ahead = self.grid.count[team][geom.cell_at(cx + pace(tx), cy + pace(ty))];
+                let room = clamp(1.0 - ahead / cfg.press_limit.max(1e-3), 0.0, 1.0);
+                tx *= room;
+                ty *= room;
+                // Push out of the crush, which is also what dresses him on his
+                // neighbours once the advance is damped away.
+                tx -= sx * cfg.spacing;
+                ty -= sy * cfg.spacing;
             }
 
             let want = if tx == 0.0 && ty == 0.0 {
@@ -326,8 +410,24 @@ impl Battle {
             let speed = self.army.speed[i] * cfg.drag + top * (1.0 - cfg.drag);
             self.army.speed[i] = speed;
             let (s, c) = sin_cos(heading);
-            self.army.x[i] = clamp_field(self.army.x[i] + c * speed, size);
-            self.army.y[i] = clamp_field(self.army.y[i] + s * speed, size);
+            let x = clamp_field(self.army.x[i] + c * speed, size);
+            let y = clamp_field(self.army.y[i] + s * speed, size);
+            self.army.x[i] = x;
+            self.army.y[i] = y;
+
+            // A man who has run to the edge keeps going, and is gone. Otherwise
+            // fugitives pile up along the boundary where nothing can reach them
+            // and nothing can gather them up, and a mutually broken field never
+            // resolves into anything at all.
+            if self.army.routing(i)
+                && (x <= EDGE_MARGIN
+                    || y <= EDGE_MARGIN
+                    || x >= size - EDGE_MARGIN
+                    || y >= size - EDGE_MARGIN)
+            {
+                self.army.flee(i);
+                self.counters.fled[team] += 1;
+            }
         }
     }
 
@@ -446,15 +546,30 @@ impl Battle {
         self.started
     }
 
-    /// Whether the field is settled.
+    /// How the battle stands.
     ///
-    /// Not "one side annihilated": a battle ends when an army stops holding the
-    /// ground, and men who have broken and are running are no longer contesting
-    /// anything. Waiting for the last of them to be cut down measures the length
-    /// of the pursuit, not the length of the battle.
-    pub fn decided(&self) -> bool {
+    /// Judged on who is still holding the ground rather than on who is still
+    /// breathing: an army stops contesting a field when it breaks, and waiting
+    /// for the last fugitive to be cut down measures the pursuit, not the
+    /// battle.
+    ///
+    /// Both sides broken is its own answer. Folding it in with a victory --
+    /// which is what a plain `holding[0] == 0 || holding[1] == 0` does -- told
+    /// the viewer a mutual collapse was a decision, and the viewer stopped the
+    /// clock on it.
+    pub fn outcome(&self) -> Outcome {
         let holding = [self.army.holding(0), self.army.holding(1)];
-        holding[0] == 0 || holding[1] == 0
+        match (holding[0], holding[1]) {
+            (0, 0) => Outcome::MutualBreak,
+            (0, _) => Outcome::BlueHolds,
+            (_, 0) => Outcome::RedHolds,
+            _ => Outcome::Undecided,
+        }
+    }
+
+    /// Whether either side has stopped holding the ground.
+    pub fn decided(&self) -> bool {
+        self.outcome() != Outcome::Undecided
     }
 
     pub fn field_size(&self) -> f32 {
@@ -622,10 +737,14 @@ mod tests {
             b.tick();
             let alive = b.army.muster();
             let dead = b.stats.red_killed as u32 + b.stats.blue_killed as u32;
+            // Three ways off the roll now, not two: a man who runs clear off the
+            // edge is gone from the field but he is not a casualty, and adding
+            // him to the dead would quietly inflate every butcher's bill.
+            let fled = b.counters.fled[0] + b.counters.fled[1];
             assert_eq!(
-                alive[0] + alive[1] + dead,
+                alive[0] + alive[1] + dead + fled,
                 total_started,
-                "tick {tick}: {} alive plus {dead} dead is not {total_started}",
+                "tick {tick}: {} alive plus {dead} dead plus {fled} fled is not {total_started}",
                 alive[0] + alive[1]
             );
             assert!(alive[0] <= started[0] && alive[1] <= started[1]);
@@ -686,6 +805,100 @@ mod tests {
         b.tick_many(1_200);
         let dead = b.stats.red_killed + b.stats.blue_killed;
         assert!(dead > 0.0, "the two sides never came to blows");
+    }
+
+    #[test]
+    fn a_formation_has_a_front_and_a_rear() {
+        // What depth is *for*. Once the two sides are engaged, only a part of
+        // each army should be in contact; the rest is queued behind it and
+        // steady. With no press limit every man walks up the same gradient
+        // until the whole army is one mass in contact, and then the whole army
+        // is shocked in the same instant.
+        let mut deep = Battle::new(small(), 23);
+        let mut flat = Battle::new(
+            {
+                let mut c = small();
+                c.press_limit = 1_000.0;
+                c
+            },
+            23,
+        );
+        // How hard the men are packed where they are thickest. Counting who is
+        // "in contact" will not do it: without a press limit the two armies
+        // converge into one dense ball, and most of that ball has no enemy in
+        // its cell either -- but it is a crush, not a rear rank.
+        let crush = |b: &Battle| {
+            b.grid.count[0]
+                .iter()
+                .chain(b.grid.count[1].iter())
+                .fold(0.0f32, |a, &v| a.max(v))
+        };
+        // Far enough in that both are fighting, early enough that neither has
+        // dissolved.
+        deep.tick_many(320);
+        flat.tick_many(320);
+        assert!(
+            crush(&deep) < crush(&flat),
+            "the press limit did not hold the front open: {} men in the \
+             thickest cell with it against {} without",
+            crush(&deep),
+            crush(&flat)
+        );
+        // And it holds it open at roughly the density it was asked for, rather
+        // than at whatever the crush happens to settle at.
+        assert!(
+            crush(&deep) < deep.cfg.press_limit * 4.0,
+            "{} men in a cell against a press limit of {}",
+            crush(&deep),
+            deep.cfg.press_limit
+        );
+    }
+
+    #[test]
+    fn a_man_who_runs_off_the_edge_leaves_the_field() {
+        let mut b = Battle::new(small(), 29);
+        // Break the whole of one side and let it run.
+        for i in 0..b.army.len() {
+            if b.army.team[i] == 0 {
+                b.army.flags[i] |= crate::army::ROUTING;
+            }
+        }
+        let started = b.started();
+        b.tick_many(1_200);
+        assert!(
+            b.counters.fled[0] > 0,
+            "a broken army ran to the edge and stayed there"
+        );
+        // Gone from the roll, and counted apart from the dead.
+        let alive = b.army.muster();
+        let casualties = b.stats.red_killed as u32 + b.stats.blue_killed as u32;
+        assert_eq!(
+            alive[0] + alive[1] + casualties + b.counters.fled[0] + b.counters.fled[1],
+            started[0] + started[1]
+        );
+        // And not drawn.
+        let drawn = b.prepare_render(ColorMode::Team);
+        assert_eq!(drawn, b.units());
+        assert_eq!(drawn as u32, alive[0] + alive[1]);
+    }
+
+    #[test]
+    fn a_mutual_break_is_not_a_victory() {
+        let mut b = Battle::new(small(), 31);
+        assert_eq!(b.outcome(), Outcome::Undecided);
+        for i in 0..b.army.len() {
+            b.army.flags[i] |= crate::army::ROUTING;
+        }
+        // Nobody is holding the ground, but nobody has won it either -- and
+        // reporting this as a decision is what stopped the viewer's clock on a
+        // field that was still full of men.
+        assert_eq!(b.outcome(), Outcome::MutualBreak);
+        for i in 0..b.army.len() {
+            if b.army.team[i] == 1 {
+                b.army.flags[i] &= !crate::army::ROUTING;
+            }
+        }
+        assert_eq!(b.outcome(), Outcome::BlueHolds);
     }
 
     #[test]

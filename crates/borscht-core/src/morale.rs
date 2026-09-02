@@ -31,7 +31,8 @@ pub struct Pressure {
     pub odds: f32,
     /// How much of a formation he is standing in, in `[0, 1]`.
     pub cohesion: f32,
-    /// Share of the men around him, his own side, who have fallen lately.
+    /// Share of the men around him, his own side, who have fallen lately, in
+    /// `[0, 1)`: the fallen against the fallen plus those still standing.
     ///
     /// A *share*, not a count, and the distinction is the whole thing. A company
     /// of six that loses two is shattered; a mass of five hundred that loses two
@@ -40,20 +41,66 @@ pub struct Pressure {
     /// half times the death rate -- so one man dying per tick in a cell drove the
     /// shock term to 0.69 a tick and annihilated the nerve of both armies within
     /// seconds of contact.
+    ///
+    /// The second version divided by the head count *now*, which is the same
+    /// number in a full cell and nonsense in an empty one. Where the fighting
+    /// had thinned a cell to a man or two the share ran to five and past it, and
+    /// the mean told you nothing about it: with the front averaging a
+    /// comfortable +0.004 a tick, the worst one per cent of it was at -0.068 --
+    /// nine ticks from full nerve to none. Those were the men who broke, and
+    /// they broke everywhere along the line at once because thinned cells are
+    /// everywhere along the line. Counting the fallen among the men they fell
+    /// beside bounds it below one by construction.
     pub losses: f32,
     /// Share of the men around him, his own side, who are running.
     pub routing: f32,
+    /// Share of the *enemy* around him who are running, in `[0, 1]`, and zero
+    /// where there is no enemy to watch.
+    ///
+    /// The term that decides battles. Everything else here is symmetric: two
+    /// even armies wear each other down at the same rate, reach the breaking
+    /// point within a few ticks of each other, and dissolve together, which is
+    /// what measurement showed at every setting of shock and panic. Nothing
+    /// paid a side for winning. Men are steadied by the sight of the enemy
+    /// giving way, and that is the positive feedback that turns a moment's
+    /// advantage into a decision instead of a coin flip over which mob
+    /// evaporates last.
+    pub ascendancy: f32,
     /// How badly hurt he is, in `[0, 1]`, one being at the point of death.
     pub hurt: f32,
+    /// Share of the bodies around him that are enemies still fighting, in
+    /// `[0, 1]`: none for a man in the rear, a third or so in the front rank,
+    /// most of it for a man who has been swallowed.
+    ///
+    /// Still *fighting*. Counting the enemy's fugitives as part of the melee
+    /// went on charging the winner for a fight that was over: the men he had
+    /// just broken were still in his cell running through it, so his nerve
+    /// carried on draining at the moment it should have recovered, and both
+    /// armies ended up passing through rout whoever had won.
+    ///
+    /// The plain cost of standing in a fight, and it was missing. Without it
+    /// every other term in contact came out positive on balance -- friends at
+    /// your shoulder, and local odds that read better than even for nearly
+    /// everybody because a man is likelier to be standing where his own side is
+    /// thick -- so being in a melee *steadied* men. The median nerve in both
+    /// armies sat at 1.00 from the first contact to the last, and the two
+    /// thirds of each army that broke did so one at a time, each in the moment
+    /// his own neighbours were killed. There was no collective wavering
+    /// anywhere, and a line that never wavers cannot give way at a point and
+    /// roll from there.
+    pub melee: f32,
 }
 
 impl Pressure {
     /// Change in nerve for one tick.
     pub fn delta(&self, cfg: &Config) -> f32 {
-        cfg.morale_odds * (self.odds - 0.5) * 2.0 + cfg.morale_cohesion * self.cohesion
+        cfg.morale_odds * (self.odds - 0.5) * 2.0
+            + cfg.morale_cohesion * self.cohesion
+            + cfg.morale_ascendancy * self.ascendancy
             - cfg.morale_shock * self.losses
             - cfg.morale_panic * self.routing
             - cfg.morale_wound * self.hurt
+            - cfg.morale_melee * self.melee
     }
 }
 
@@ -67,7 +114,10 @@ pub fn pressure_on(army: &Army, grid: &Grid, cfg: &Config, i: usize, max_hp: f32
     // Everything about the men around him is per head, so a rule tuned in a
     // skirmish still means the same thing in a press.
     let here = grid.count[team][cell].max(1.0);
+    let fallen = grid.losses[team][cell];
     let running = grid.routing[team][cell];
+    let facing = grid.count[foe(army.team[i])][cell];
+    let facing_running = grid.routing[foe(army.team[i])][cell];
     // Steady men only. A crowd of fugitives is not a formation, and counting it
     // as one let a routing mob draw comfort from its own panic.
     let steady = (grid.count[team][cell] - running).max(0.0);
@@ -80,7 +130,7 @@ pub fn pressure_on(army: &Army, grid: &Grid, cfg: &Config, i: usize, max_hp: f32
         // break again seconds later, over and over.
         odds: if enemy > 1e-6 { own / total } else { 0.5 },
         cohesion: clamp(steady / cfg.cohesion_full, 0.0, 1.0),
-        losses: grid.losses[team][cell] / here,
+        losses: fallen / (fallen + here),
         // Panic is what breaks a man who is still standing. It is not what
         // keeps a broken one broken -- once he is running, what governs him is
         // whether he has got clear and whether there is anyone steady left to
@@ -88,7 +138,22 @@ pub fn pressure_on(army: &Army, grid: &Grid, cfg: &Config, i: usize, max_hp: f32
         // rallying arithmetically impossible: a routing mob is almost entirely
         // routing, so the term pinned his nerve at zero forever.
         routing: if army.routing(i) { 0.0 } else { running / here },
+        // A man who is running himself is in no state to notice, let alone to
+        // take heart from it.
+        ascendancy: if facing > 0.0 && !army.routing(i) {
+            clamp(facing_running / facing, 0.0, 1.0)
+        } else {
+            0.0
+        },
         hurt: clamp(1.0 - army.hp[i] / max_hp.max(1e-3), 0.0, 1.0),
+        melee: {
+            let fighting = (facing - facing_running).max(0.0);
+            if fighting > 0.0 {
+                fighting / (fighting + here)
+            } else {
+                0.0
+            }
+        },
     }
 }
 
@@ -132,13 +197,25 @@ mod tests {
         c
     }
 
+    /// A man in a formation, out of contact: nothing pulling either way except
+    /// the company around him.
     fn steady() -> Pressure {
         Pressure {
             odds: 0.5,
             cohesion: 1.0,
             losses: 0.0,
             routing: 0.0,
+            ascendancy: 0.0,
             hurt: 0.0,
+            melee: 0.0,
+        }
+    }
+
+    /// The same man with the enemy on him.
+    fn in_contact() -> Pressure {
+        Pressure {
+            melee: 0.4,
+            ..steady()
         }
     }
 
@@ -187,6 +264,48 @@ mod tests {
         assert!(
             even > 0.0,
             "an even fight with friends should not erode nerve"
+        );
+    }
+
+    #[test]
+    fn standing_in_a_fight_costs_nerve_by_itself() {
+        // The defect this term was added for: with every other pressure neutral
+        // and a man's own company at his shoulder, being in the melee has to
+        // pull his nerve *down*. When it did not, the median man in both armies
+        // sat at full nerve from first contact to last and no line could ever
+        // waver.
+        let c = cfg();
+        assert!(
+            in_contact().delta(&c) < steady().delta(&c),
+            "a melee should never be the more restful place to stand"
+        );
+        assert!(
+            in_contact().delta(&c) <= 0.0,
+            "and contact must not be a net gain: at the defaults it is a wash \
+             against a full formation, and the men falling turn it negative"
+        );
+        let under_fire = Pressure {
+            losses: 0.05,
+            ..in_contact()
+        };
+        assert!(under_fire.delta(&c) < 0.0);
+    }
+
+    #[test]
+    fn the_enemy_giving_way_steadies_a_man() {
+        let c = cfg();
+        let holding = in_contact().delta(&c);
+        let winning = Pressure {
+            ascendancy: 1.0,
+            melee: 0.0,
+            ..in_contact()
+        }
+        .delta(&c);
+        assert!(winning > holding, "seeing the enemy run should hearten");
+        assert!(
+            winning > 0.0,
+            "and a man whose enemy has broken should be recovering, not still \
+             draining -- otherwise both armies pass through rout whoever wins"
         );
     }
 

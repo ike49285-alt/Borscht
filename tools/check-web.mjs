@@ -170,8 +170,14 @@ if (banner) throw new Error(`page reported: ${banner}`);
 // The single-file build starts itself; the multi-file app waits to be told. So
 // ensure it is running rather than toggling, or the click pauses the one build
 // that was already going.
+// A generous timeout on both toggles. The single-file build runs the engine on
+// the main thread, and under software GL the render, not the simulation, holds
+// that thread for seconds at a time -- so a click a user would land takes far
+// longer than the default to be accepted. Failing there says nothing about the
+// page and everything about the harness.
+const TOGGLE = { timeout: 90_000 };
 if ((await page.getAttribute('#t-play', 'aria-label')) === 'Play') {
-  await page.click('#t-play');
+  await page.click('#t-play', TOGGLE);
 }
 await page.waitForFunction(
   // Not Number(): the readout abbreviates past a thousand, and Number('1.2k')
@@ -205,7 +211,12 @@ const region = {
 };
 const drawn = litFraction(`${OUT}/running.png`, region);
 
-await page.click('#t-play'); // pause
+await page.click('#t-play', TOGGLE); // pause
+// Re-read the clock here. Decoding the screenshot above happens in this
+// process while the page keeps simulating, so the tick sampled before it is
+// hundreds behind the counts sampled after -- which reads as the browser and
+// the engine disagreeing when they do not.
+const tickAtReadout = await readTick();
 const fps = await page.textContent('#h-fps');
 const ms = await page.textContent('#h-ms');
 const species = await page.textContent('#h-species');
@@ -271,7 +282,7 @@ const narrow = await page.evaluate(() => {
 });
 await page.screenshot({ path: `${OUT}/narrow.png` });
 
-console.log(`ticks:      ${tickAfter}`);
+console.log(`ticks:      ${tickAfter} running, ${tickAtReadout} at the readout below`);
 console.log(`red/blue:   ${await page.textContent('#h-plants')} / ${await readAnimals()}`);
 console.log(`holding:    ${species}   routing: ${carn}`);
 console.log(`ms/tick:    ${ms}    fps: ${fps}`);

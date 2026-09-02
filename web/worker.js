@@ -63,7 +63,7 @@ export function createEngine({ post, schedule }) {
         stats,
         red: sim.teamCount(0),
         blue: sim.teamCount(1),
-        decided: sim.decided,
+        outcome: sim.outcome,
         worldSize: sim.worldSize,
         tickMs: tickMsAverage,
         running,

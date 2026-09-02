@@ -10,5 +10,5 @@ pub mod morale;
 pub mod rng;
 pub mod stats;
 
-pub use battle::{Battle, ColorMode};
+pub use battle::{Battle, ColorMode, Outcome};
 pub use config::Config;

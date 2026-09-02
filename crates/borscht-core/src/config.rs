@@ -163,6 +163,27 @@ config_params! {
     /// spreads -- ten per cent of the men running at tick 422, half by 501, nine
     /// in ten by 560.
     morale_panic: f32 = 0.12, "morale", 0.0, 2.0;
+    /// Steadying from the enemy in front of you giving way, per tick when all
+    /// of him is running.
+    ///
+    /// The only term in the whole rule that is not symmetric between the two
+    /// sides, and therefore the only one that can decide anything. With it at
+    /// zero, two even armies break within twenty ticks of each other at every
+    /// setting of shock and panic that was measured, and the field is left to
+    /// whichever mob happens to evaporate second.
+    morale_ascendancy: f32 = 0.20, "morale", 0.0, 2.0;
+    /// Cost of standing in a melee, per tick with nothing but the enemy around
+    /// you.
+    ///
+    /// What makes contact frightening rather than merely dangerous, and the
+    /// term the rule was missing. It sets the *sign* of a front-rank man's
+    /// nerve: with it at zero every other term in contact nets positive and
+    /// nobody in an unbroken formation ever wavers, so a break can only ever be
+    /// an individual accident. It has to be large enough that the front drains
+    /// and small enough that the local terms -- odds, ascendancy, the men
+    /// falling beside him -- still decide which part of the line drains
+    /// fastest, because that is what makes a collapse start somewhere.
+    morale_melee: f32 = 0.015, "morale", 0.0, 2.0;
     /// Shock from your own wounds, per tick at the point of death.
     morale_wound: f32 = 0.004, "morale", 0.0, 0.5;
     /// Men in a cell at which cohesion counts as full.
@@ -189,6 +210,24 @@ config_params! {
     /// converge on a point, which leaves the local odds and local density that
     /// morale reads nearly uniform everywhere.
     spacing: f32 = 0.55, "movement", 0.0, 4.0;
+    /// Men per cell at which the ground in front of you counts as full.
+    ///
+    /// A man advances on the enemy only while the cell he is walking into holds
+    /// fewer of his own side than this; past it he holds his place and dresses
+    /// on his neighbours instead. That is the whole of what makes a formation
+    /// have depth, and depth is what makes a collapse start somewhere and
+    /// spread rather than taking the whole army in one tick: only the front
+    /// rank is in contact, so only the front rank is shocked, and the ranks
+    /// behind it are the steady body a break has to eat through.
+    ///
+    /// Measured over eight seeds at twenty thousand men: with this effectively
+    /// off, the two sides' first tenth breaks within two to seventeen ticks of
+    /// each other and the armies annihilate each other down to a few dozen men
+    /// apiece. At four the gap is nineteen to a hundred and thirty-one ticks in
+    /// seven seeds of eight, and both sides finish with hundreds to fifteen
+    /// hundred men still in hand. Tightening it further thins the fighting
+    /// without separating the breaks any more.
+    press_limit: f32 = 4.0, "movement", 1.0, 64.0;
 }
 
 impl ParamInfo {

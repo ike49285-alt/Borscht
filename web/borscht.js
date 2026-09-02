@@ -91,9 +91,12 @@ export class Borscht {
     return this.#exports.team_count(team >>> 0);
   }
 
-  /** Whether one side has been wiped out. */
-  get decided() {
-    return this.#exports.decided() === 1;
+  /**
+   * How the battle stands: 0 undecided, 1 red holds the field, 2 blue holds it,
+   * 3 both armies broke and neither does.
+   */
+  get outcome() {
+    return this.#exports.outcome();
   }
 
   get worldSize() {

@@ -222,6 +222,14 @@ function drawChart(canvasEl, keys, colors, { stacked = false } = {}) {
   });
 }
 
+/// Matches `Outcome` in the core, and the `outcome` export in the wasm ABI.
+const OUTCOME = [
+  'both lines holding',
+  'red holds the field',
+  'blue holds the field',
+  'both armies broke',
+];
+
 // --------------------------------------------------------------------- HUD --
 
 const fmt = (v) => {
@@ -388,7 +396,7 @@ worker.onmessage = (event) => {
       // Hand the buffer straight back so the worker can reuse it.
       worker.postMessage({ type: 'recycle', buffer: msg.buffer }, [msg.buffer]);
       latest = msg;
-      // The engine stops itself when a battle is decided, and starts itself
+      // Nothing stops the engine on its own any more, but it does start itself
       // when the page is built to autoplay. The button follows it rather than
       // the other way round, so the two cannot disagree.
       if (typeof msg.running === 'boolean' && msg.running !== running) {
@@ -405,12 +413,13 @@ worker.onmessage = (event) => {
 
       latestTick = msg.stats.tick;
       $('t-tick').textContent = fmt(latestTick);
-      if (msg.decided && running) {
-        // The field is settled; there is nothing left to simulate.
-        setRunning(false);
-        $('tree-summary').textContent =
-          msg.red > msg.blue ? 'red holds the field' : msg.blue > msg.red ? 'blue holds the field' : 'mutual annihilation';
-      }
+      // Report how it stands, and keep running. The clock used to stop here,
+      // which is what made a battle look hung: a mutual collapse counted as a
+      // decision, so the moment both lines gave way the page froze on a field
+      // still covered in running men. The pursuit is where most of the killing
+      // happens and it is the half worth watching, so the battle ends when the
+      // viewer pauses it, not when the engine decides it has seen enough.
+      $('tree-summary').textContent = OUTCOME[msg.outcome] ?? OUTCOME[0];
       break;
     }
     case 'inspected':

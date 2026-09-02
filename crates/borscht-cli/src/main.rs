@@ -9,7 +9,7 @@ mod render;
 
 use borscht_core::config::{Config, PARAMS};
 use borscht_core::stats::STAT_NAMES;
-use borscht_core::{Battle, ColorMode};
+use borscht_core::{Battle, ColorMode, Outcome};
 use std::time::Instant;
 
 fn usage() -> ! {
@@ -20,6 +20,7 @@ USAGE:
     borscht bench   [--muster N]... [--ticks N] [--seed N]
     borscht battle  [--muster N] [--ticks N] [--seed N] [--out DIR]
                     [--frames N] [--image-size N] [--color MODE] [--set key=value]...
+    borscht nerve   [--muster N] [--ticks N] [--seed N] [--set key=value]...
     borscht params  [--json]
 
 OPTIONS:
@@ -142,6 +143,7 @@ fn main() {
     match args.command.as_str() {
         "bench" => bench(&args),
         "battle" | "run" => battle(&args),
+        "nerve" => nerve(&args),
         "params" if args.json => emit_params_js(),
         "params" => list_params(),
         other => {
@@ -259,6 +261,108 @@ fn bench(args: &Args) {
     }
 }
 
+// ------------------------------------------------------------------- nerve --
+
+/// Where a man's nerve is actually going, term by term.
+///
+/// The morale rule is six terms pulling against each other and the only visible
+/// output is whether the army broke, which is not enough to tell a rule that is
+/// wrong from one that is merely mistuned. This prints the mean of each term
+/// per tick, split by whether the man is in contact with the enemy -- because
+/// the whole point of giving the formation depth was that those two groups
+/// should no longer be the same group.
+fn nerve(args: &Args) {
+    let cfg = build_config(args.musters.first().copied(), &args.overrides);
+    let mut b = Battle::new(cfg, args.seed);
+    let every = (args.ticks / 20).max(1);
+
+    println!(
+        "{:>6} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8}",
+        "tick", "where", "men", "odds", "cohes", "ascend", "shock", "panic", "wound", "net/tick"
+    );
+    for tick in 0..args.ticks {
+        b.tick();
+        if tick % every != 0 {
+            continue;
+        }
+        // [front, rear] x [terms]
+        let mut sum = [[0.0f64; 6]; 2];
+        let mut men = [0u32; 2];
+        let mut worst = [Vec::new(), Vec::new()];
+        let mut nerve_now: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+        // Where men are actually breaking, which is the question the mean of
+        // the delta cannot answer.
+        let mut broke = [0u32; 2];
+        for i in 0..b.army.len() {
+            if !b.army.alive(i) || b.army.routing(i) {
+                continue;
+            }
+            let team = b.army.team[i] as usize;
+            let a = b.archetypes[team][b.army.kind[i] as usize];
+            let cell = b.grid.units.cell_of[i] as usize;
+            let in_contact =
+                b.grid.count[borscht_core::grid::foe(b.army.team[i])][cell] > 0.0;
+            let p = borscht_core::morale::pressure_on(&b.army, &b.grid, &b.cfg, i, a.hp);
+            let g = usize::from(!in_contact);
+            let c = &b.cfg;
+            let terms = [
+                (c.morale_odds * (p.odds - 0.5) * 2.0) as f64,
+                (c.morale_cohesion * p.cohesion) as f64,
+                (c.morale_ascendancy * p.ascendancy) as f64,
+                (-c.morale_shock * p.losses) as f64,
+                (-c.morale_panic * p.routing) as f64,
+                (-c.morale_wound * p.hurt) as f64,
+            ];
+            for (slot, v) in sum[g].iter_mut().zip(terms) {
+                *slot += v;
+            }
+            men[g] += 1;
+            worst[g].push(terms.iter().sum::<f64>());
+            nerve_now[g].push(b.army.morale[i]);
+            if b.army.morale[i] < a.nerve + 0.05 {
+                broke[g] += 1;
+            }
+        }
+        for (g, name) in ["front", "rear"].iter().enumerate() {
+            let n = men[g].max(1) as f64;
+            let t: Vec<f64> = sum[g].iter().map(|v| v / n).collect();
+            println!(
+                "{tick:>6} {name:>5} {:>7} {:>7.4} {:>7.4} {:>7.4} {:>7.4} {:>7.4} {:>7.4} {:>8.4}",
+                men[g],
+                t[0],
+                t[1],
+                t[2],
+                t[3],
+                t[4],
+                t[5],
+                t.iter().sum::<f64>()
+            );
+            // The mean hides the men it is actually happening to. A rule whose
+            // average is comfortably positive can still be sending a tenth of
+            // the army over the edge.
+            let w = &mut worst[g];
+            w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let pick = |q: f64| w.get(((w.len() as f64 * q) as usize).min(w.len().saturating_sub(1)));
+            let m = &mut nerve_now[g];
+            m.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mpick = |q: f64| {
+                m.get(((m.len() as f64 * q) as usize).min(m.len().saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(0.0)
+            };
+            if let (Some(p1), Some(p10)) = (pick(0.01), pick(0.10)) {
+                println!(
+                    "{:>12} delta worst 1% {p1:>8.4} 10% {p10:>8.4} | nerve 10% {:>5.2} 50% {:>5.2} | broke here {}",
+                    "",
+                    mpick(0.10),
+                    mpick(0.50),
+                    broke[g]
+                );
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------ battle --
 
 fn battle(args: &Args) {
@@ -322,8 +426,14 @@ fn battle(args: &Args) {
                 frame += 1;
             }
         }
-        if b.decided() {
-            break;
+        match b.outcome() {
+            // A decision is the end of the battle; the pursuit after it is a
+            // separate thing and the readout does not claim to measure it.
+            Outcome::RedHolds | Outcome::BlueHolds => break,
+            // A mutual break is not a decision, so it does not stop the clock.
+            // It runs until the field empties of fugitives.
+            Outcome::MutualBreak if b.units() == 0 => break,
+            _ => {}
         }
     }
 
@@ -331,12 +441,11 @@ fn battle(args: &Args) {
     // Decided on who is still holding, not on who is still breathing: the
     // battle ends when one army stops contesting the ground, and the men
     // streaming away from it are no longer part of that argument.
-    let holding = [b.army.holding(0), b.army.holding(1)];
-    let winner = match (holding[0], holding[1]) {
-        (0, 0) => "both armies broke",
-        (0, _) => "blue holds the field",
-        (_, 0) => "red holds the field",
-        _ => "undecided",
+    let winner = match b.outcome() {
+        Outcome::MutualBreak => "both armies broke",
+        Outcome::BlueHolds => "blue holds the field",
+        Outcome::RedHolds => "red holds the field",
+        Outcome::Undecided => "undecided",
     };
     if args.quiet {
         println!(
@@ -372,8 +481,9 @@ fn battle(args: &Args) {
             );
         }
         println!(
-            "    peak running at once {peak_routing}, rallied {}",
-            c.rallied
+            "    peak running at once {peak_routing}, rallied {}, got away {}",
+            c.rallied,
+            c.fled[0] + c.fled[1]
         );
         let fighting: u32 = c.killed_fighting.iter().sum();
         let running: u32 = c.killed_routing.iter().sum();
