@@ -148,6 +148,12 @@ pub struct Battle {
     pub view: crate::commander::View,
     /// Each division's position and condition, as of the last set of orders.
     pub divisions: [[crate::commander::DivisionState; crate::army::MAX_DIVISIONS]; TEAMS],
+    /// Fighting strength each side mustered, so "how much of itself has this
+    /// army left" means something.
+    pub started_strength: [f32; TEAMS],
+    /// Share of that strength still standing and not running, per side,
+    /// recomputed every tick. Nerve reads it.
+    pub host: [f32; TEAMS],
     rng: Rng,
     started: [u32; TEAMS],
     pub counters: Counters,
@@ -202,6 +208,8 @@ impl Battle {
             view: crate::commander::View::default(),
             divisions: [[crate::commander::DivisionState::default(); crate::army::MAX_DIVISIONS];
                 TEAMS],
+            started_strength: [0.0; TEAMS],
+            host: [1.0; TEAMS],
             cfg,
             seed,
             tick: 0,
@@ -378,6 +386,12 @@ impl Battle {
                 d.started = d.strength;
             }
         }
+        // What each side put on the field, which is the denominator the
+        // army-wide morale term is measured against for the rest of the battle.
+        for t in 0..TEAMS {
+            self.started_strength[t] = self.divisions[t].iter().map(|d| d.started).sum();
+        }
+        self.host = [1.0; TEAMS];
         self.collect_stats();
     }
 
@@ -386,6 +400,7 @@ impl Battle {
         self.grid
             .rebuild(&self.army.x, &self.army.y, self.army.len());
         self.grid.clear_fields();
+        let mut standing = [0.0f32; TEAMS];
         for i in 0..self.army.len() {
             if !self.army.alive(i) {
                 continue;
@@ -403,11 +418,27 @@ impl Battle {
             // fugitive has got clear -- reads strength, and everything that
             // *touches* -- the blow, the cohesion of a formation -- reads count.
             let seen = 1.0 - self.cfg.cover_hide * self.grid.cover[cell];
-            self.grid.strength[team][cell] += a.worth() * health * seen.max(0.0);
+            let worth = a.worth() * health;
+            self.grid.strength[team][cell] += worth * seen.max(0.0);
+            // What the side still has *standing*, for the army-wide morale term.
+            // Men still holding only: a side whose men are all running is not at
+            // strength, and counting them would let a collapsing army go on
+            // reassuring itself. Not scaled by cover either -- a man knows how
+            // his own army is faring without having to see across the field.
+            if !self.army.routing(i) {
+                standing[team] += worth;
+            }
             self.grid.count[team][cell] += 1.0;
             if self.army.routing(i) {
                 self.grid.routing[team][cell] += 1.0;
             }
+        }
+        for (t, &left) in standing.iter().enumerate() {
+            self.host[t] = if self.started_strength[t] > 1e-3 {
+                clamp(left / self.started_strength[t], 0.0, 1.0)
+            } else {
+                1.0
+            };
         }
     }
 
@@ -536,9 +567,27 @@ impl Battle {
             if self.army.routing(i) {
                 // Away from the enemy, and away fast. A frightened man does not
                 // dress his ranks, so neither the press ahead of him nor the
-                // spacing from his neighbours applies.
-                tx = -tx;
-                ty = -ty;
+                // spacing from his neighbours applies -- and he is not following
+                // anybody's plan either, so his orders play no part in it.
+                //
+                // This used to negate the blend above, which was right when that
+                // blend was purely "toward the enemy" and became wrong the moment
+                // an order was mixed into it. `Withdraw` carries an engage weight
+                // of -0.6 -- already pointing away -- so negating it pointed the
+                // man *at* the enemy at +0.6; and the doctrine orders Withdraw
+                // precisely when a division is full of fugitives. A broken
+                // division therefore turned round and charged the men who had
+                // just broken it.
+                tx = -ex * seen;
+                ty = -ey * seen;
+                if tx == 0.0 && ty == 0.0 {
+                    // Nothing in sight to run from: keep going the way he was
+                    // already going, rather than stopping in the open. He leaves
+                    // the field by the edge in the end.
+                    let (s, c) = sin_cos(self.army.heading[i]);
+                    tx = c;
+                    ty = s;
+                }
             } else {
                 // Advance only if there is room in front. One read of his own
                 // side's head count, one cell along the way he means to go: if
@@ -689,7 +738,23 @@ impl Battle {
             }
             let team = self.army.team[i] as usize;
             let a = self.archetypes[team][self.army.kind[i] as usize];
-            let p = crate::morale::pressure_on(&self.army, &self.grid, &cfg, i, a.hp);
+            // Relative, not absolute. Both sides start whole, so an absolute
+            // "is my army intact" term hands *everybody* the same steadying
+            // bonus from the first tick, and the measured effect was that
+            // nobody broke early and the battle became a grind: the share of
+            // casualties taken in the pursuit fell from about 83% to under 30%,
+            // which throws away the thing morale was built for. Scored against
+            // the enemy's condition it is zero at the outset and only starts to
+            // matter once one side is genuinely ahead, which is when a winner
+            // ought to be hard to panic.
+            let ours = self.host[team];
+            let theirs = self.host[foe(team as u8)];
+            let standing = if ours + theirs > 1e-6 {
+                ours / (ours + theirs)
+            } else {
+                0.5
+            };
+            let p = crate::morale::pressure_on(&self.army, &self.grid, &cfg, i, a.hp, standing);
             let m = clamp(self.army.morale[i] + p.delta(&cfg), 0.0, 1.0);
             self.army.morale[i] = m;
 
@@ -1228,6 +1293,104 @@ mod tests {
                 "division {d} is spread over {band} of the field, which is not a body"
             );
         }
+    }
+
+    #[test]
+    fn a_fugitive_runs_from_the_enemy_under_every_order() {
+        // The test whose absence let a real defect ship. A routing man's heading
+        // used to be the blend of his orders and the enemy gradient, negated
+        // wholesale -- correct only while that blend was purely "toward the
+        // enemy". `Withdraw` carries an engage weight of -0.6, already pointing
+        // away, so negating it pointed him *at* the enemy; and the doctrine
+        // orders Withdraw exactly when a division is full of fugitives. Broken
+        // divisions turned round and charged the men who had just broken them.
+        for posture in crate::commander::POSTURES {
+            let mut c = small();
+            // Fixed orders, so this measures the steering and not the
+            // commander's second thoughts.
+            c.command_interval = 100_000.0;
+            let mut b = Battle::new(c, 71);
+            b.tick_many(220); // let them close, so there is an enemy to sense
+
+            // Break one side outright and put every division under the order
+            // being tested, with its objective *behind* it -- which is what a
+            // rally point is, and what makes this discriminating. Leaving the
+            // objective pointing at the enemy hides the defect entirely: the
+            // buggy code negated the order too, and negating an objective that
+            // lay forwards happened to send men backwards for the wrong reason.
+            let rally = (b.cfg.field_size * 0.1, b.cfg.field_size * 0.5);
+            for d in b.orders[0].iter_mut() {
+                d.posture = posture;
+                d.x = rally.0;
+                d.y = rally.1;
+            }
+            for i in 0..b.army.len() {
+                if b.army.team[i] == 0 {
+                    b.army.flags[i] |= crate::army::ROUTING;
+                }
+            }
+
+            // Measured against where the enemy stood when the rout began, not
+            // against where he is now. He is advancing, so his centre of mass
+            // walks toward the fugitives, and a live reference point shrinks the
+            // distance even while they run -- which made the first version of
+            // this test fail for a reason that had nothing to do with the men
+            // being tested.
+            let enemy_centre = |b: &Battle| {
+                let (mut x, mut y, mut n) = (0.0f64, 0.0f64, 0u32);
+                for i in 0..b.army.len() {
+                    if b.army.alive(i) && b.army.team[i] == 1 {
+                        x += b.army.x[i] as f64;
+                        y += b.army.y[i] as f64;
+                        n += 1;
+                    }
+                }
+                (x / n.max(1) as f64, y / n.max(1) as f64)
+            };
+            let (cx, cy) = enemy_centre(&b);
+            let gap = |b: &Battle| {
+                let (mut ours, mut n) = (0.0f64, 0u32);
+                for i in 0..b.army.len() {
+                    if b.army.alive(i) && b.army.team[i] == 0 {
+                        ours += ((b.army.x[i] as f64 - cx).powi(2)
+                            + (b.army.y[i] as f64 - cy).powi(2))
+                        .sqrt();
+                        n += 1;
+                    }
+                }
+                ours / n.max(1) as f64
+            };
+
+            let before = gap(&b);
+            b.tick_many(60);
+            let after = gap(&b);
+            assert!(
+                after > before,
+                "under {} a broken army closed with the enemy instead of \
+                 fleeing it: {before:.1} to {after:.1}",
+                posture.name()
+            );
+        }
+    }
+
+    #[test]
+    fn an_army_that_is_winning_is_harder_to_break() {
+        // The second half of the same report: a thousand broken men shattering
+        // the army that had just beaten them. Every other term in the morale
+        // rule reads one grid cell, so nothing knew the rest of the army was
+        // intact and nothing opposed a local panic.
+        let c = small();
+        let a = crate::army::Archetype::default();
+        let mut b = Battle::new(c, 73);
+        b.tick_many(1);
+        let sample = (0..b.army.len()).find(|&i| b.army.alive(i)).unwrap();
+
+        let whole = crate::morale::pressure_on(&b.army, &b.grid, &b.cfg, sample, a.hp, 1.0);
+        let wrecked = crate::morale::pressure_on(&b.army, &b.grid, &b.cfg, sample, a.hp, 0.0);
+        assert!(
+            whole.delta(&b.cfg) > wrecked.delta(&b.cfg),
+            "an intact army steadied a man no more than a shattered one"
+        );
     }
 
     #[test]

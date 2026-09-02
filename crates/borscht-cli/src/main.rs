@@ -435,7 +435,7 @@ fn nerve(args: &Args) {
             let cell = b.grid.units.cell_of[i] as usize;
             let in_contact =
                 b.grid.count[borscht_core::grid::foe(b.army.team[i])][cell] > 0.0;
-            let p = borscht_core::morale::pressure_on(&b.army, &b.grid, &b.cfg, i, a.hp);
+            let p = borscht_core::morale::pressure_on(&b.army, &b.grid, &b.cfg, i, a.hp, b.host[team]);
             let g = usize::from(!in_contact);
             let c = &b.cfg;
             let terms = [

@@ -68,6 +68,27 @@ pub struct Pressure {
     pub ascendancy: f32,
     /// How badly hurt he is, in `[0, 1]`, one being at the point of death.
     pub hurt: f32,
+    /// How his side's remaining strength compares with the enemy's, in
+    /// `[0, 1]`: a half is even, one is an army still whole against one
+    /// destroyed.
+    ///
+    /// The one term here that is not about the ground he is standing on, and it
+    /// was missing. Everything else reads his own grid cell and nothing else, so
+    /// a man in an intact army of fifty thousand whose own cell had gone bad
+    /// broke exactly as readily as a man in a beaten one, and a local panic
+    /// cascaded with nothing at all opposing it. That is how a thousand broken
+    /// men could shatter the army that had just beaten them: not because they
+    /// were strong, but because no part of the rule said "we are winning
+    /// everywhere else".
+    ///
+    /// Relative rather than absolute, and that was measured rather than
+    /// assumed. Scored on his own army alone the term is at full strength for
+    /// *both* sides on the first tick, so nobody breaks early and the battle
+    /// turns into a grind -- the share of casualties taken in the pursuit fell
+    /// from about 83% to under 30%, which is the mechanism morale exists to
+    /// produce. Against the enemy's condition it is zero while the sides are
+    /// even and grows only as one of them actually wins.
+    pub host: f32,
     /// Share of the bodies around him that are enemies still fighting, in
     /// `[0, 1]`: none for a man in the rear, a third or so in the front rank,
     /// most of it for a man who has been swallowed.
@@ -99,13 +120,21 @@ impl Pressure {
             + cfg.morale_ascendancy * self.ascendancy
             - cfg.morale_shock * self.losses
             - cfg.morale_panic * self.routing
+            + cfg.morale_host * (self.host - 0.5) * 2.0
             - cfg.morale_wound * self.hurt
             - cfg.morale_melee * self.melee
     }
 }
 
 /// Read one man's circumstances out of the fields.
-pub fn pressure_on(army: &Army, grid: &Grid, cfg: &Config, i: usize, max_hp: f32) -> Pressure {
+pub fn pressure_on(
+    army: &Army,
+    grid: &Grid,
+    cfg: &Config,
+    i: usize,
+    max_hp: f32,
+    host: f32,
+) -> Pressure {
     let team = army.team[i] as usize;
     let cell = grid.units.cell_of[i] as usize;
     let own = grid.strength[team][cell];
@@ -146,6 +175,7 @@ pub fn pressure_on(army: &Army, grid: &Grid, cfg: &Config, i: usize, max_hp: f32
             0.0
         },
         hurt: clamp(1.0 - army.hp[i] / max_hp.max(1e-3), 0.0, 1.0),
+        host: clamp(host, 0.0, 1.0),
         melee: {
             let fighting = (facing - facing_running).max(0.0);
             if fighting > 0.0 {
@@ -208,6 +238,9 @@ mod tests {
             ascendancy: 0.0,
             hurt: 0.0,
             melee: 0.0,
+            // An army that has lost nothing, which is the neutral point of the
+            // host term rather than its top: a full army is a *bonus*.
+            host: 0.5,
         }
     }
 
@@ -329,7 +362,7 @@ mod tests {
         let mut grid = Grid::new(16, 160.0);
         grid.rebuild(&army.x, &army.y, army.len());
         grid.clear_fields();
-        let p = pressure_on(&army, &grid, &c, 0, a.hp);
+        let p = pressure_on(&army, &grid, &c, 0, a.hp, 1.0);
         assert_eq!(p.odds, 0.5, "an empty field is not a defeat");
         assert_eq!(p.cohesion, 0.0);
     }
@@ -348,11 +381,11 @@ mod tests {
         // His own side present, no enemy anywhere: neutral, not triumphant.
         grid.strength[0][cell] = 40.0;
         grid.strength[1][cell] = 0.0;
-        assert_eq!(pressure_on(&army, &grid, &c, 0, a.hp).odds, 0.5);
+        assert_eq!(pressure_on(&army, &grid, &c, 0, a.hp, 1.0).odds, 0.5);
 
         // With an enemy present and outnumbered, it reads as winning.
         grid.strength[1][cell] = 10.0;
-        assert!(pressure_on(&army, &grid, &c, 0, a.hp).odds > 0.5);
+        assert!(pressure_on(&army, &grid, &c, 0, a.hp, 1.0).odds > 0.5);
     }
 
     #[test]
@@ -371,8 +404,20 @@ mod tests {
         let cell = grid.units.cell_of[0] as usize;
         grid.count[0][cell] = 1.0;
         grid.routing[0][cell] = 1.0;
-        let p = pressure_on(&army, &grid, &c, 0, a.hp);
-        assert!(p.delta(&c) <= 0.0, "he steadied himself out of thin air");
+        // With his army gone with him there is nothing to draw on, and his
+        // nerve must not climb out of thin air.
+        let wrecked = pressure_on(&army, &grid, &c, 0, a.hp, 0.0);
+        assert!(wrecked.delta(&c) <= 0.0, "he steadied himself out of thin air");
+
+        // With his army still whole behind him it *may* climb -- that is what
+        // the host term is for, and it is not the thing the flicker pathology
+        // was about. What stops him re-forming alone in a field is `may_rally`,
+        // which wants somebody to fall in with, and that is asserted here so the
+        // guarantee lives somewhere after this test stopped carrying it.
+        assert!(
+            !may_rally(&grid, &army, 0, 1.0, a.nerve, c.rally_margin),
+            "he re-formed as a company of one"
+        );
     }
 
     #[test]
@@ -390,13 +435,13 @@ mod tests {
         grid.routing[0][cell] = 2.0;
 
         // Still standing among fugitives: frightening.
-        let standing = pressure_on(&army, &grid, &c, 0, a.hp);
+        let standing = pressure_on(&army, &grid, &c, 0, a.hp, 1.0);
         assert!(standing.routing > 0.0);
 
         // Already running among the same fugitives: nothing more to fear from
         // them, or he could never pull himself together again.
         army.flags[0] |= ROUTING;
-        let broken = pressure_on(&army, &grid, &c, 0, a.hp);
+        let broken = pressure_on(&army, &grid, &c, 0, a.hp, 1.0);
         assert_eq!(broken.routing, 0.0);
         assert!(broken.delta(&c) > standing.delta(&c));
     }
@@ -414,9 +459,9 @@ mod tests {
         grid.count[0][cell] = 8.0;
 
         grid.routing[0][cell] = 0.0;
-        let among_steady = pressure_on(&army, &grid, &c, 0, a.hp).cohesion;
+        let among_steady = pressure_on(&army, &grid, &c, 0, a.hp, 1.0).cohesion;
         grid.routing[0][cell] = 8.0;
-        let among_runners = pressure_on(&army, &grid, &c, 0, a.hp).cohesion;
+        let among_runners = pressure_on(&army, &grid, &c, 0, a.hp, 1.0).cohesion;
         assert!(among_steady > among_runners, "only steady men steady you");
         assert_eq!(among_runners, 0.0);
     }

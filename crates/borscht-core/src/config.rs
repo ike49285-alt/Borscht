@@ -264,6 +264,29 @@ config_params! {
     /// falling beside him -- still decide which part of the line drains
     /// fastest, because that is what makes a collapse start somewhere.
     morale_melee: f32 = 0.015, "morale", 0.0, 2.0;
+    /// Steadying from your own army being whole, per tick at full strength.
+    ///
+    /// Signed about a half-strength army: intact is a bonus, wrecked is a
+    /// penalty. This is the only term in the rule that is not about the ground a
+    /// man is standing on, and without it nothing opposed a local panic -- a
+    /// thousand broken men could shatter the army that had just beaten them,
+    /// because no part of a man's nerve knew his side was winning everywhere
+    /// else.
+    ///
+    /// It has to be large enough to matter against panic, which reaches 0.12,
+    /// and small enough that an army which gets slightly ahead does not become
+    /// unbreakable and turn every battle into a foregone conclusion.
+    /// Swept at twenty thousand men over thirty-two battles a point. Off, the
+    /// winner shatters too in 10 of 32 and only 21 of 32 battles are won
+    /// decisively; at 0.02 that is 2 and 29, with battles slightly shorter and
+    /// the share of casualties taken in the pursuit unchanged at about four
+    /// fifths.
+    ///
+    /// Not turned higher, though it looks tempting: 0.05 leaves no mutual ruin
+    /// at all and 0.10 makes every one of thirty-two battles a decisive win,
+    /// which is not a better simulation but a foregone conclusion -- an army a
+    /// little ahead can no longer be broken by anything.
+    morale_host: f32 = 0.02, "morale", 0.0, 1.0;
     /// Shock from your own wounds, per tick at the point of death.
     morale_wound: f32 = 0.004, "morale", 0.0, 0.5;
     /// Men in a cell at which cohesion counts as full, quoted at the reference
