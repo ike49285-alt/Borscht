@@ -94,6 +94,27 @@ config_params! {
     units_per_side: u32 = 40_000, "field", 10.0, 2_000_000.0;
     /// Kinds of unit each side fields.
     kinds: u32 = 4, "field", 1.0, 8.0;
+    /// Bodies each side is divided into, each with its own orders.
+    divisions: u32 = 6, "command", 1.0, 8.0;
+    /// Of those, how many are drawn up behind the line and held back.
+    ///
+    /// A reserve is the thing an army with one order point cannot have, and
+    /// committing one where the line is bending is the first decision worth
+    /// calling a decision.
+    reserve_divisions: u32 = 2, "command", 0.0, 4.0;
+    /// Ticks between one set of orders and the next.
+    ///
+    /// Long, deliberately. A commander who re-decides every tick produces
+    /// divisions that jitter between objectives and never arrive anywhere, and
+    /// real orders take time to write, carry and act on.
+    command_interval: f32 = 60.0, "command", 1.0, 600.0;
+    /// How much the commander's choice of objective is a draw rather than the
+    /// best sector outright.
+    ///
+    /// Zero would make the same weights give the same battle every time, and
+    /// would make a search over those weights snap between sectors instead of
+    /// improving smoothly.
+    command_temperature: f32 = 0.35, "command", 0.01, 4.0;
 
     /// How far apart the two musters are drawn up, as a fraction of the field.
     deploy_separation: f32 = 0.45, "deployment", 0.05, 0.95;
@@ -332,6 +353,11 @@ impl Config {
             .units_per_side
             .clamp(1, (self.max_units / crate::grid::TEAMS as u32).max(1));
         self.kinds = self.kinds.clamp(1, crate::army::MAX_ARCHETYPES as u32);
+        self.divisions = self.divisions.clamp(1, crate::army::MAX_DIVISIONS as u32);
+        // A side that is all reserve never fights.
+        self.reserve_divisions = self.reserve_divisions.min(self.divisions.saturating_sub(1));
+        self.command_interval = self.command_interval.max(1.0);
+        self.command_temperature = self.command_temperature.max(1e-3);
         self.turn_rate = self.turn_rate.max(1e-4);
         self.drag = self.drag.clamp(0.0, 0.99);
         self.loss_memory = self.loss_memory.clamp(0.0, 0.999);

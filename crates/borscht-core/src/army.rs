@@ -36,6 +36,13 @@ pub const NO_TARGET: u32 = u32::MAX;
 /// How many kinds of unit an army can field.
 pub const MAX_ARCHETYPES: usize = 8;
 
+/// How many bodies a side can be divided into.
+///
+/// Fixed and small so orders live in a plain array on the battle rather than in
+/// an allocation, and so a division index fits in the byte that is already
+/// padding out the unit record.
+pub const MAX_DIVISIONS: usize = 8;
+
 /// What a kind of unit is made of.
 ///
 /// Deliberately small and flat: these are read constantly in the combat loop,
@@ -100,6 +107,10 @@ pub struct Army {
     pub morale: Vec<f32>,
     pub team: Vec<u8>,
     pub kind: Vec<u8>,
+    /// Which body of his own side a man belongs to, and therefore whose orders
+    /// he follows. Set at deployment and never changed: a division is an
+    /// identity, not a position.
+    pub division: Vec<u8>,
     /// Ticks until this unit can strike again.
     pub cooldown: Vec<u8>,
     /// Ticks since this man broke, while he is still running.
@@ -134,6 +145,7 @@ impl Army {
             morale: f(1.0),
             team: vec![0u8; capacity],
             kind: vec![0u8; capacity],
+            division: vec![0u8; capacity],
             cooldown: vec![0u8; capacity],
             broken_for: vec![0u8; capacity],
             flags: vec![0u8; capacity],
@@ -201,6 +213,7 @@ impl Army {
         heading: f32,
         team: u8,
         kind: u8,
+        division: u8,
         archetype: &Archetype,
     ) -> bool {
         if self.is_full() {
@@ -215,6 +228,7 @@ impl Army {
         self.morale[i] = 1.0;
         self.team[i] = team;
         self.kind[i] = kind;
+        self.division[i] = division;
         self.cooldown[i] = 0;
         self.broken_for[i] = 0;
         self.flags[i] = 0;
@@ -280,6 +294,7 @@ impl Army {
                 self.morale[i] = self.morale[last];
                 self.team[i] = self.team[last];
                 self.kind[i] = self.kind[last];
+                self.division[i] = self.division[last];
                 self.cooldown[i] = self.cooldown[last];
                 self.broken_for[i] = self.broken_for[last];
                 self.flags[i] = self.flags[last];
@@ -347,7 +362,7 @@ mod tests {
         let a = Archetype::default();
         let mut army = Army::new(16);
         for i in 0..10 {
-            army.push(i as f32, 0.0, 0.0, (i % 2) as u8, 0, &a);
+            army.push(i as f32, 0.0, 0.0, (i % 2) as u8, 0, (i % 3) as u8, &a);
         }
         army
     }
@@ -356,9 +371,9 @@ mod tests {
     fn a_full_pool_refuses_rather_than_growing() {
         let a = Archetype::default();
         let mut army = Army::new(2);
-        assert!(army.push(0.0, 0.0, 0.0, 0, 0, &a));
-        assert!(army.push(0.0, 0.0, 0.0, 0, 0, &a));
-        assert!(!army.push(0.0, 0.0, 0.0, 0, 0, &a));
+        assert!(army.push(0.0, 0.0, 0.0, 0, 0, 0, &a));
+        assert!(army.push(0.0, 0.0, 0.0, 0, 0, 0, &a));
+        assert!(!army.push(0.0, 0.0, 0.0, 0, 0, 0, &a));
         assert_eq!(army.len(), 2);
     }
 
@@ -394,7 +409,7 @@ mod tests {
     fn armour_turns_damage_aside_but_never_all_of_it() {
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(0.0, 0.0, 0.0, 0, 0, &a);
+        army.push(0.0, 0.0, 0.0, 0, 0, 0, &a);
         assert!(!army.wound(0, 10.0, 0.5));
         assert!((army.hp[0] - 95.0).abs() < 1e-3);
         // Armour beyond the cap is still not immunity.
@@ -406,7 +421,7 @@ mod tests {
     fn a_unit_dies_when_its_health_runs_out() {
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(0.0, 0.0, 0.0, 0, 0, &a);
+        army.push(0.0, 0.0, 0.0, 0, 0, 0, &a);
         assert!(army.wound(0, 1000.0, 0.0));
         assert!(!army.alive(0));
         assert_eq!(army.target[0], NO_TARGET);

@@ -50,6 +50,10 @@ pub enum ColorMode {
     Health = 2,
     /// How close to breaking.
     Morale = 3,
+    /// Which body of his own side a man belongs to. The one mode in which a
+    /// commander's work is visible at all: divisions read as divisions, and a
+    /// wing that swings or a reserve that waits can be watched doing it.
+    Division = 4,
 }
 
 impl ColorMode {
@@ -58,6 +62,7 @@ impl ColorMode {
             1 => ColorMode::Kind,
             2 => ColorMode::Health,
             3 => ColorMode::Morale,
+            4 => ColorMode::Division,
             _ => ColorMode::Team,
         }
     }
@@ -123,9 +128,15 @@ pub struct Battle {
     pub stats: Stats,
     /// One entry per side per kind.
     pub archetypes: [[Archetype; crate::army::MAX_ARCHETYPES]; TEAMS],
-    /// Where each side is ordered to go. Hard-coded to the enemy's muster point
-    /// until a commander exists to decide it.
-    pub order_point: [(f32, f32); TEAMS],
+    /// What each division has been told to do.
+    pub orders: [[crate::commander::Order; crate::army::MAX_DIVISIONS]; TEAMS],
+    /// The commander of each side.
+    pub doctrine: [crate::brain::Net; TEAMS],
+    /// The coarse picture the commanders decide from, kept between decisions so
+    /// it is not reallocated sixty times a battle.
+    pub view: crate::commander::View,
+    /// Each division's position and condition, as of the last set of orders.
+    pub divisions: [[crate::commander::DivisionState; crate::army::MAX_DIVISIONS]; TEAMS],
     rng: Rng,
     started: [u32; TEAMS],
     pub counters: Counters,
@@ -175,7 +186,11 @@ impl Battle {
             grid,
             stats: Stats::default(),
             archetypes: [[Archetype::default(); crate::army::MAX_ARCHETYPES]; TEAMS],
-            order_point: [(0.0, 0.0); TEAMS],
+            orders: [[crate::commander::Order::default(); crate::army::MAX_DIVISIONS]; TEAMS],
+            doctrine: [crate::brain::Net::default(); TEAMS],
+            view: crate::commander::View::default(),
+            divisions: [[crate::commander::DivisionState::default(); crate::army::MAX_DIVISIONS];
+                TEAMS],
             cfg,
             seed,
             tick: 0,
@@ -259,47 +274,99 @@ impl Battle {
             } else {
                 size * 0.5 + size * cfg.deploy_separation * 0.5
             };
-            // Kinds go in as bodies, in bands across the front, and the order
-            // of the bands is drawn afresh for each side.
+            // The army goes in as divisions: contiguous bodies side by side
+            // across the front, each drawing one kind.
             //
-            // Shuffling the kinds man by man reads as variety and is in fact
-            // the opposite: every cell gets the same mix, so every part of the
-            // line has the same nerve, meets the same odds, and arrives at the
-            // breaking point at the same moment. Both armies then dissolve
-            // together within twenty ticks whatever the morale rule says --
-            // measured across every setting of shock, panic and ascendancy.
-            // Banding gives the line a weak part and a strong part and gives
-            // the two sides different ones, which is where a local collapse
-            // starts and what it rolls along.
+            // This keeps a property that was measured rather than assumed.
+            // Shuffling kinds man by man reads as variety and is the opposite of
+            // it: every cell then gets the same mix, so every part of the line
+            // has the same nerve, meets the same odds, and arrives at the
+            // breaking point at the same moment. Bodies give the line a weak
+            // part and a strong part -- and now a name for each, which is what
+            // there has to be before anyone can be given an order.
             let kinds = cfg.kinds.max(1) as usize;
-            let mut band = [0u8; crate::army::MAX_ARCHETYPES];
-            for (k, slot) in band.iter_mut().enumerate().take(kinds) {
-                *slot = k as u8;
+            let divisions = (cfg.divisions.max(1) as usize).min(crate::army::MAX_DIVISIONS);
+            let reserves = (cfg.reserve_divisions as usize).min(divisions.saturating_sub(1));
+            let in_line = divisions - reserves;
+
+            let mut kind_of = [0u8; crate::army::MAX_DIVISIONS];
+            for (d, slot) in kind_of.iter_mut().enumerate().take(divisions) {
+                slot.clone_from(&((d % kinds) as u8));
             }
-            for k in (1..kinds).rev() {
-                band.swap(k, rng.below(k as u32 + 1) as usize);
+            for d in (1..divisions).rev() {
+                kind_of.swap(d, rng.below(d as u32 + 1) as usize);
             }
 
-            for _ in 0..per_side {
-                let x = clamp_field(cx + rng.range(-depth * 0.5, depth * 0.5), size);
-                let across = rng.range(-0.5, 0.5);
-                let y = clamp_field(size * 0.5 + across * width, size);
-                let slot = ((across + 0.5) * kinds as f32) as usize;
-                let kind = band[slot.min(kinds - 1)];
+            let per_division = per_side / divisions.max(1);
+            for (d, &kind) in kind_of.iter().enumerate().take(divisions) {
                 let a = self.archetypes[team][kind as usize];
-                if !self
-                    .army
-                    .push(x, y, facing + rng.range(-0.2, 0.2), team as u8, kind, &a)
-                {
-                    break;
+                // Divisions in the line take a band of the front each. The
+                // reserve stands behind the centre, which is where a reserve is
+                // of use to any part of the line it may be sent to.
+                let reserve = d >= in_line;
+                let (band_lo, band_hi) = if reserve {
+                    (-0.25, 0.25)
+                } else {
+                    let step = 1.0 / in_line as f32;
+                    (-0.5 + d as f32 * step, -0.5 + (d as f32 + 1.0) * step)
+                };
+                let back = if reserve { depth * 1.6 } else { 0.0 };
+                let cx = if team == 0 { cx - back } else { cx + back };
+
+                for _ in 0..per_division {
+                    let x = clamp_field(cx + rng.range(-depth * 0.5, depth * 0.5), size);
+                    let across = rng.range(band_lo, band_hi);
+                    let y = clamp_field(size * 0.5 + across * width, size);
+                    if !self.army.push(
+                        x,
+                        y,
+                        facing + rng.range(-0.2, 0.2),
+                        team as u8,
+                        kind,
+                        d as u8,
+                        &a,
+                    ) {
+                        break;
+                    }
                 }
+
+                // Opening orders: the line goes forward, the reserve stands
+                // where it was drawn up.
+                //
+                // The reserve's objective is its own ground, not the enemy's.
+                // Giving it the line's objective and merely a different posture
+                // marched it straight through the line it was meant to be
+                // waiting behind -- it ended up nearer the enemy than the men it
+                // was supporting.
+                self.orders[team][d] = crate::commander::Order {
+                    sector: 0,
+                    x: if reserve {
+                        cx
+                    } else if team == 0 {
+                        size * 0.72
+                    } else {
+                        size * 0.28
+                    },
+                    y: size * 0.5 + (band_lo + band_hi) * 0.5 * width,
+                    posture: if reserve {
+                        crate::commander::Posture::Reserve
+                    } else {
+                        crate::commander::Posture::Advance
+                    },
+                };
             }
-            // Until a commander exists, the order is "at them".
-            self.order_point[team] = (if team == 0 { size * 0.9 } else { size * 0.1 }, size * 0.5);
         }
 
         self.started = self.army.muster();
         self.rebuild_fields();
+        // What each division mustered, so "how much of itself has it left" means
+        // something later.
+        crate::commander::survey(&self.army, &self.grid, &self.archetypes, &mut self.divisions);
+        for team in self.divisions.iter_mut() {
+            for d in team.iter_mut() {
+                d.started = d.strength;
+            }
+        }
         self.collect_stats();
     }
 
@@ -333,9 +400,50 @@ impl Battle {
         }
     }
 
+    /// Ask both commanders for orders.
+    ///
+    /// Costs one pass over the cells and one over the units, and runs once every
+    /// `command_interval` ticks -- so against the tick it sits inside it does
+    /// not register.
+    fn command(&mut self) {
+        self.view.gather(&self.grid);
+        let started: Vec<[f32; crate::army::MAX_DIVISIONS]> = self
+            .divisions
+            .iter()
+            .map(|t| core::array::from_fn(|d| t[d].started))
+            .collect();
+        crate::commander::survey(&self.army, &self.grid, &self.archetypes, &mut self.divisions);
+        for (team, keep) in self.divisions.iter_mut().zip(started) {
+            for (d, slot) in team.iter_mut().enumerate() {
+                slot.started = keep[d];
+            }
+        }
+
+        let divisions = (self.cfg.divisions.max(1) as usize).min(crate::army::MAX_DIVISIONS);
+        for team in 0..TEAMS {
+            crate::commander::decide(
+                &self.doctrine[team],
+                &self.view,
+                team,
+                divisions,
+                &self.divisions[team],
+                &mut self.orders[team],
+                self.cfg.command_temperature,
+                &mut self.rng,
+            );
+        }
+    }
+
     pub fn tick(&mut self) {
         self.grid.decay_losses(self.cfg.loss_memory);
         self.rebuild_fields();
+        // Not on the first tick. Orders take time to write and carry, and the
+        // deployment's own dispositions -- a line forward, a reserve behind --
+        // should stand for at least as long as any other set of orders. Asking
+        // at tick zero threw them away before a shot was fired.
+        if self.tick > 0 && self.tick % (self.cfg.command_interval.max(1.0) as u64) == 0 {
+            self.command();
+        }
         self.steer_and_move();
         self.fight();
         self.steady_or_break();
@@ -381,12 +489,25 @@ impl Battle {
             // rather than inside.
             let (_, ogx, ogy) = geom.sample(&self.grid.strength[team], cx, cy);
 
-            let (mut tx, mut ty) = if foe_here > 0.0 || fgx != 0.0 || fgy != 0.0 {
-                (fgx, fgy)
+            // Orders and the enemy, blended -- not the enemy with orders as a
+            // fallback, which is what made an army converge on one point and
+            // stay there. The objective is a standing pull; how hard it pulls
+            // against the enemy in front of him is what a posture *is*, and it
+            // is the only reason a reserve division can exist at all.
+            let order = self.orders[team][(self.army.division[i] as usize)
+                .min(crate::army::MAX_DIVISIONS - 1)];
+            let (pull, engage) = order.posture.steering();
+            let (ox, oy) = unit(order.x - self.army.x[i], order.y - self.army.y[i]);
+            let (ex, ey) = unit(fgx, fgy);
+            let seen = if foe_here > 0.0 || fgx != 0.0 || fgy != 0.0 {
+                1.0
             } else {
-                let (ox, oy) = self.order_point[team];
-                (ox - self.army.x[i], oy - self.army.y[i])
+                0.0
             };
+            let (mut tx, mut ty) = (
+                ex * engage * seen + ox * pull,
+                ey * engage * seen + oy * pull,
+            );
 
             // Both directions are normalised first: the enemy gradient and the
             // friendly one have unrelated magnitudes, and combining them raw
@@ -712,6 +833,20 @@ impl Battle {
                     crate::color::hsv_to_rgb(hue, 0.75, 0.55 + 0.45 * health)
                 }
                 ColorMode::Health => crate::color::lerp_rgb((210, 60, 55), (90, 220, 110), health),
+                ColorMode::Division => {
+                    // Hue by division, but each side kept to its own half of the
+                    // wheel: warm for red, cool for blue. Spreading all sixteen
+                    // over the whole wheel would make the divisions legible and
+                    // the sides not, and which side a man is on is the thing you
+                    // must never lose track of.
+                    let d = self.army.division[i] as f32 / crate::army::MAX_DIVISIONS as f32;
+                    let hue = if team == 0 {
+                        0.94 + 0.20 * d
+                    } else {
+                        0.44 + 0.20 * d
+                    };
+                    crate::color::hsv_to_rgb(hue % 1.0, 0.8, 0.45 + 0.5 * health)
+                }
                 ColorMode::Morale => {
                     let m = clamp(self.army.morale[i], 0.0, 1.0);
                     if self.army.routing(i) {
@@ -1035,6 +1170,92 @@ mod tests {
         assert!(b.grid.height.iter().all(|&h| h == 0.0));
         assert!(b.grid.cover.iter().all(|&v| v == 0.0));
         assert_eq!(b.grid.grade(4, 4, 1.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn every_man_belongs_to_a_division_and_divisions_deploy_as_bodies() {
+        let b = Battle::new(small(), 61);
+        let divisions = b.cfg.divisions as usize;
+        // Men of one division stand together, not scattered through the army.
+        // Bands are what let one part of a line break before another, and they
+        // are also the only thing that makes an order to a division mean
+        // anything.
+        let mut men = [0u32; crate::army::MAX_DIVISIONS];
+        let mut spread = [(f32::MAX, f32::MIN); crate::army::MAX_DIVISIONS];
+        for i in 0..b.army.len() {
+            if !b.army.alive(i) || b.army.team[i] != 0 {
+                continue;
+            }
+            let d = b.army.division[i] as usize;
+            assert!(d < divisions, "unit {i} is in division {d} of {divisions}");
+            men[d] += 1;
+            spread[d].0 = spread[d].0.min(b.army.y[i]);
+            spread[d].1 = spread[d].1.max(b.army.y[i]);
+        }
+        for d in 0..divisions {
+            assert!(men[d] > 0, "division {d} mustered nobody");
+            let band = spread[d].1 - spread[d].0;
+            assert!(
+                band < b.cfg.field_size * 0.6,
+                "division {d} is spread over {band} of the field, which is not a body"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reserve_division_does_not_close_with_the_enemy() {
+        // What a reserve is *for*, and the thing no unit could express when
+        // there was one order point for the whole side.
+        let mut c = small();
+        c.divisions = 4;
+        c.reserve_divisions = 1;
+        // Long enough that the commander never gets to change its mind inside
+        // the window this measures.
+        c.command_interval = 100_000.0;
+        let mut b = Battle::new(c, 67);
+        let reserve = 3u8;
+        assert_eq!(b.orders[0][reserve as usize].posture, crate::commander::Posture::Reserve);
+
+        let gap = |b: &Battle| {
+            // How far the reserve is from the enemy, against how far the rest of
+            // its own side is.
+            let mut r = (0.0f64, 0u32);
+            let mut line = (0.0f64, 0u32);
+            let mut foe = (0.0f64, 0.0f64, 0u32);
+            for i in 0..b.army.len() {
+                if !b.army.alive(i) {
+                    continue;
+                }
+                if b.army.team[i] == 1 {
+                    foe.0 += b.army.x[i] as f64;
+                    foe.1 += b.army.y[i] as f64;
+                    foe.2 += 1;
+                }
+            }
+            let (fx, fy) = (foe.0 / foe.2.max(1) as f64, foe.1 / foe.2.max(1) as f64);
+            for i in 0..b.army.len() {
+                if !b.army.alive(i) || b.army.team[i] != 0 {
+                    continue;
+                }
+                let d = ((b.army.x[i] as f64 - fx).powi(2) + (b.army.y[i] as f64 - fy).powi(2)).sqrt();
+                if b.army.division[i] == reserve {
+                    r.0 += d;
+                    r.1 += 1;
+                } else {
+                    line.0 += d;
+                    line.1 += 1;
+                }
+            }
+            (r.0 / r.1.max(1) as f64, line.0 / line.1.max(1) as f64)
+        };
+
+        b.tick_many(400);
+        let (held_back, in_line) = gap(&b);
+        assert!(
+            held_back > in_line * 1.1,
+            "the reserve closed with the enemy: it stands {held_back:.0} away \
+             against the line's {in_line:.0}"
+        );
     }
 
     #[test]

@@ -1,273 +1,331 @@
-//! A small fixed-topology feedforward network, one per animal.
+//! The small network a commander decides with.
 //!
-//! Weights are stored as `i8`. At f32 a single 1M-animal population would spend
-//! ~780 MB on weights alone, which is the difference between the target
-//! population fitting comfortably in a browser tab and not running at all. At
-//! `i8` the same population costs ~194 MB, and the quantisation noise is far
-//! below the noise a mutating genome introduces anyway.
+//! Two of these exist in a battle, one per side, and each is asked a question
+//! once every command interval. That is a completely different budget from the
+//! ecology this engine grew out of, where every animal carried its own network
+//! and the weights had to be `i8` to fit a million of them in a browser tab.
+//! Here the whole thing is three hundred `f32` and is evaluated a couple of
+//! hundred times a minute of battle, so it can be plain and readable instead.
 //!
-//! Topology is fixed (no NEAT-style structural evolution) so that every brain is
-//! the same size and can live in one flat array with no per-animal allocation.
+//! # Why there is a skip connection
+//!
+//! Outputs are the sum of a linear path straight from the inputs and a
+//! non-linear path through the hidden layer. That is not decoration: it makes
+//! the hand-written doctrine *a member of this family*. A doctrine is a list of
+//! preferences -- go where the enemy is giving way, prefer the high ground,
+//! do not march across the field, do not pile onto a sector a sister division
+//! has already taken -- and a list of preferences is a linear scorer. With the
+//! skip path it can be written down as weights, with the hidden layer zeroed,
+//! and then there is one code path rather than a learned one and a fallback,
+//! and the baseline training has to beat is the same shape as the thing being
+//! trained.
 
 use crate::fastmath::tanh_fast;
 use crate::rng::Rng;
 
-pub const N_IN: usize = 16;
+/// Features describing one (division, sector) pair.
+pub const N_IN: usize = 17;
 pub const N_HID: usize = 10;
-pub const N_OUT: usize = 3;
+/// One score for the sector, then a logit per posture.
+pub const N_OUT: usize = 6;
 
-const W1: usize = N_IN * N_HID;
-const W2: usize = N_HID * N_OUT;
-const B1: usize = W1 + W2;
-const B2: usize = B1 + N_HID;
+const W_HID: usize = N_IN * N_HID;
+const W_OUT: usize = N_HID * N_OUT;
+const W_SKIP: usize = N_IN * N_OUT;
+const B_HID: usize = N_HID;
 
-/// Weights, then hidden biases, then output biases: 194 bytes.
-pub const BRAIN_LEN: usize = B2 + N_OUT;
+const OFF_OUT: usize = W_HID;
+const OFF_SKIP: usize = OFF_OUT + W_OUT;
+const OFF_BHID: usize = OFF_SKIP + W_SKIP;
+const OFF_BOUT: usize = OFF_BHID + B_HID;
 
-/// `i8` range maps onto `[-4, 4]`. Wide enough for a neuron to saturate on a
-/// single strong input, narrow enough that quantisation steps stay fine.
-const WEIGHT_SCALE: f32 = 4.0 / 127.0;
+/// Hidden weights, output weights, skip weights, hidden biases, output biases.
+pub const LEN: usize = OFF_BOUT + N_OUT;
 
-/// Input indices. Kept as named constants because a mislabelled sense is
-/// invisible at runtime -- the animal just behaves oddly and evolution routes
-/// around it.
+/// Input indices.
+///
+/// Named, because a mislabelled feature is invisible at runtime -- the
+/// commander simply plays badly, and no amount of staring at a battle says
+/// which of fourteen numbers went into the wrong slot.
 pub mod input {
-    pub const ENERGY: usize = 0;
-    pub const AGE: usize = 1;
-    pub const PLANT_DENSITY: usize = 2;
-    pub const PLANT_GRAD_X: usize = 3;
-    pub const PLANT_GRAD_Y: usize = 4;
-    pub const PREY_DENSITY: usize = 5;
-    pub const PREY_GRAD_X: usize = 6;
-    pub const PREY_GRAD_Y: usize = 7;
-    pub const THREAT_DENSITY: usize = 8;
-    pub const THREAT_GRAD_X: usize = 9;
-    pub const THREAT_GRAD_Y: usize = 10;
-    pub const CROWDING: usize = 11;
-    /// Direction toward other animals, in the body frame.
+    /// Share of our army's strength standing in this sector.
+    pub const OWN_STRENGTH: usize = 0;
+    /// Share of theirs.
+    pub const FOE_STRENGTH: usize = 1;
+    /// Of our men in this sector, the share who are running.
+    pub const OWN_ROUTING: usize = 2;
+    /// Of theirs.
+    pub const FOE_ROUTING: usize = 3;
+    /// How much dying has happened here lately.
+    pub const LOSSES: usize = 4;
+    /// How high this sector is, against the field's relief.
+    pub const HEIGHT: usize = 5;
+    /// How much higher than the ground this division is standing on now.
     ///
-    /// Crowding on its own is a scalar: it says how many others are about but
-    /// not which way they lie, so nothing that requires *approaching* a
-    /// conspecific can evolve. With sexual reproduction that is fatal rather
-    /// than merely limiting -- an animal has to find a mate, and a population
-    /// with no way to sense its own kind is left relying on bumping into one
-    /// another by chance, which fails as soon as density drops.
-    pub const KIN_GRAD_X: usize = 12;
-    pub const KIN_GRAD_Y: usize = 13;
-    pub const TEMP_MISMATCH: usize = 14;
-    pub const OSCILLATOR: usize = 15;
+    /// The one that makes the high ground worth taking rather than merely worth
+    /// being on: a division already on a hill is not paid again for it.
+    pub const HEIGHT_GAIN: usize = 6;
+    /// How wooded.
+    pub const COVER: usize = 7;
+    /// How far, against the field's diagonal.
+    pub const DISTANCE: usize = 8;
+    /// Share of our own divisions already ordered here.
+    pub const CLAIMED: usize = 9;
+    /// What this division has left, against what it mustered.
+    pub const OWN_KEPT: usize = 10;
+    /// Share of this division that is running.
+    pub const OWN_BROKEN: usize = 11;
+    /// Whether this division is in contact at all.
+    pub const IN_CONTACT: usize = 12;
+    /// What our whole side has left, against what it mustered.
+    pub const ARMY_KEPT: usize = 13;
+    /// Share of our whole side that is running.
+    pub const ARMY_BROKEN: usize = 14;
+    /// How far back this division stands compared to the rest of our army.
+    ///
+    /// Positive means further from the enemy than its sister divisions -- which
+    /// is what being a reserve *is*, read off the field rather than stamped on a
+    /// division as a label. Without it a commander cannot tell the body he is
+    /// holding back from the bodies he has sent forward, and every division is
+    /// ordered to advance on the first tick.
+    pub const DEPTH: usize = 15;
+    /// Always one, so the skip path carries a per-output bias in the same
+    /// weights the doctrine is written in.
+    pub const BIAS: usize = 16;
 }
 
-/// Output indices, each squashed to `[-1, 1]` by the final tanh.
+/// Output indices. Index 0 scores the sector; the rest are posture logits and
+/// are in the order of [`crate::commander::Posture`].
 pub mod output {
-    /// Signed turn rate.
-    pub const TURN: usize = 0;
-    /// Forward drive; negative values are read as "coast".
-    pub const THRUST: usize = 1;
-    /// Willingness to eat or attack whatever is in reach.
-    pub const CONSUME: usize = 2;
+    pub const SCORE: usize = 0;
+    pub const ADVANCE: usize = 1;
+    pub const HOLD: usize = 2;
+    pub const FLANK: usize = 3;
+    pub const RESERVE: usize = 4;
+    pub const WITHDRAW: usize = 5;
 }
 
-// There is deliberately no reproduction output. Making breeding contingent on
-// a neural vote is not how organisms work -- reproduction is physiological,
-// triggered by condition, with life-history *genes* (maturity age, investment,
-// threshold) setting the strategy that selection acts on. A neural veto also
-// produces a pathology with no counterpart in biology: a lineage that is
-// perfectly fit in every other respect but never breeds, and so never produces
-// the offspring selection would need in order to remove it.
+/// A commander's weights.
+#[derive(Clone, Copy)]
+pub struct Net {
+    pub w: [f32; LEN],
+}
 
-/// Evaluate one brain.
-///
-/// The `i8 -> f32` scale is deliberately *not* applied per weight. Because the
-/// accumulation is linear, `sum(w_i * s * x_i) == s * sum(w_i * x_i)`, so the
-/// scale factors out to a single multiply per neuron instead of one per
-/// connection -- roughly a third off the cost of the hot loop.
-#[inline]
-pub fn eval(w: &[i8], inputs: &[f32; N_IN]) -> [f32; N_OUT] {
-    debug_assert_eq!(w.len(), BRAIN_LEN);
-    let mut hidden = [0.0f32; N_HID];
-    for h in 0..N_HID {
-        let row = &w[h * N_IN..h * N_IN + N_IN];
-        let mut acc = 0.0f32;
-        for i in 0..N_IN {
-            acc += row[i] as f32 * inputs[i];
+impl Default for Net {
+    fn default() -> Self {
+        Net::doctrine()
+    }
+}
+
+impl core::fmt::Debug for Net {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Net({} weights)", LEN)
+    }
+}
+
+impl Net {
+    pub fn zeroed() -> Self {
+        Net { w: [0.0; LEN] }
+    }
+
+    /// Weights drawn at random. Plays badly, but plays: every order it gives is
+    /// still a real sector and a real posture, which is what makes the first
+    /// generation of a search worth scoring.
+    pub fn random(rng: &mut Rng) -> Self {
+        let mut net = Net::zeroed();
+        for v in net.w.iter_mut() {
+            *v = rng.gauss() * 0.5;
         }
-        hidden[h] = tanh_fast(acc * WEIGHT_SCALE + w[B1 + h] as f32 * WEIGHT_SCALE);
+        net
     }
-    let mut out = [0.0f32; N_OUT];
-    for (o, slot) in out.iter_mut().enumerate() {
-        let row = &w[W1 + o * N_HID..W1 + o * N_HID + N_HID];
-        let mut acc = 0.0f32;
-        for h in 0..N_HID {
-            acc += row[h] as f32 * hidden[h];
-        }
-        *slot = tanh_fast(acc * WEIGHT_SCALE + w[B2 + o] as f32 * WEIGHT_SCALE);
-    }
-    out
-}
 
-/// Seed a founder brain.
-///
-/// Weights start small rather than uniform over the full `i8` range: a network
-/// initialised near saturation produces animals that spin or sprint in a
-/// straight line forever, and selection has nothing to grade.
-pub fn randomize(w: &mut [i8], rng: &mut Rng) {
-    debug_assert_eq!(w.len(), BRAIN_LEN);
-    for slot in w.iter_mut() {
-        *slot = (rng.gauss() * 22.0).clamp(-127.0, 127.0) as i8;
-    }
-}
-
-/// Recombine two brains and mutate the result.
-///
-/// Uniform crossover: each weight is taken from one parent or the other. Real
-/// recombination happens between chromosomes rather than between individual
-/// synapses, but the network has no genetic architecture to respect, and
-/// uniform crossover is the standard choice where there is no linkage to model.
-pub fn recombine_into(a: &[i8], b: &[i8], child: &mut [i8], rate: f32, rng: &mut Rng) {
-    debug_assert_eq!(a.len(), BRAIN_LEN);
-    debug_assert_eq!(b.len(), BRAIN_LEN);
-    debug_assert_eq!(child.len(), BRAIN_LEN);
-    for i in 0..BRAIN_LEN {
-        let mut w = if rng.chance(0.5) { a[i] } else { b[i] };
-        if rng.chance(rate) {
-            w = (w as f32 + rng.gauss() * 12.0).clamp(-127.0, 127.0) as i8;
-        }
-        child[i] = w;
-    }
-}
-
-/// Copy a brain with mutation. `rate` is per weight.
-pub fn mutate_into(parent: &[i8], child: &mut [i8], rate: f32, rng: &mut Rng) {
-    debug_assert_eq!(parent.len(), BRAIN_LEN);
-    debug_assert_eq!(child.len(), BRAIN_LEN);
-    child.copy_from_slice(parent);
-    for slot in child.iter_mut() {
-        if rng.chance(rate) {
-            let v = *slot as f32 + rng.gauss() * 12.0;
-            *slot = v.clamp(-127.0, 127.0) as i8;
+    /// Perturb every weight. The mutation operator for the search.
+    pub fn mutate(&mut self, rng: &mut Rng, sigma: f32) {
+        for v in self.w.iter_mut() {
+            *v += rng.gauss() * sigma;
         }
     }
-}
 
-/// Mean absolute weight difference, used as a tiebreaker when deciding whether
-/// two lineages have drifted into separate species.
-pub fn distance(a: &[i8], b: &[i8]) -> f32 {
-    let mut acc = 0.0f32;
-    for i in 0..BRAIN_LEN {
-        acc += (a[i] as f32 - b[i] as f32).abs();
+    #[inline]
+    fn skip(&mut self, i: usize, o: usize, v: f32) {
+        self.w[OFF_SKIP + i * N_OUT + o] = v;
     }
-    acc / (BRAIN_LEN as f32 * 255.0)
+
+    /// The hand-written doctrine, as weights.
+    ///
+    /// Purely linear -- the hidden layer is left at zero -- because that is what
+    /// a doctrine is: a list of things worth preferring, added up. Training
+    /// starts here and has to beat it.
+    pub fn doctrine() -> Self {
+        use input as i;
+        use output as o;
+        let mut n = Net::zeroed();
+
+        // What makes a sector worth marching to.
+        n.skip(i::FOE_STRENGTH, o::SCORE, 1.0); // there is a battle there
+        n.skip(i::OWN_STRENGTH, o::SCORE, 0.8); // and we have men at hand
+        n.skip(i::FOE_ROUTING, o::SCORE, 1.6); // and they are giving way
+        n.skip(i::OWN_ROUTING, o::SCORE, -0.7); // not into our own collapse
+        n.skip(i::HEIGHT_GAIN, o::SCORE, 1.0); // ground above us is worth having
+        n.skip(i::COVER, o::SCORE, -0.4); // a formed body wants open ground
+        n.skip(i::DISTANCE, o::SCORE, -2.2); // and does not cross the field for it
+        // Without this last one every division scores the same sector highest
+        // and marches to it, which is the single order point this replaced,
+        // wearing six times the machinery.
+        n.skip(i::CLAIMED, o::SCORE, -1.5);
+
+        // And what to do when it gets there. These are logits, so only their
+        // differences matter; advancing is the default and the rest have to
+        // earn their way past it.
+        n.skip(i::BIAS, o::ADVANCE, 0.6);
+        n.skip(i::FOE_ROUTING, o::ADVANCE, 1.5);
+        n.skip(i::OWN_KEPT, o::ADVANCE, 0.5);
+
+        n.skip(i::BIAS, o::HOLD, 0.2);
+        n.skip(i::IN_CONTACT, o::HOLD, 0.7);
+        n.skip(i::FOE_STRENGTH, o::HOLD, 0.8);
+
+        n.skip(i::DISTANCE, o::FLANK, 1.8);
+        n.skip(i::IN_CONTACT, o::FLANK, -0.8);
+
+        // A reserve holds while it is standing behind an army that is still
+        // whole, and goes in when the line in front of it starts to give. Both
+        // halves of that are needed: without the depth term every division reads
+        // as a reserve on the first tick, and without the breaking terms the one
+        // that does hold back never comes in at all.
+        n.skip(i::DEPTH, o::RESERVE, 5.0);
+        n.skip(i::ARMY_KEPT, o::RESERVE, 0.6);
+        n.skip(i::ARMY_BROKEN, o::RESERVE, -3.0);
+        n.skip(i::IN_CONTACT, o::RESERVE, -1.5);
+
+        n.skip(i::OWN_BROKEN, o::WITHDRAW, 3.0);
+        n.skip(i::OWN_KEPT, o::WITHDRAW, -1.2);
+
+        n
+    }
+
+    /// Score one (division, sector) pair.
+    pub fn eval(&self, x: &[f32; N_IN]) -> [f32; N_OUT] {
+        let mut hidden = [0.0f32; N_HID];
+        for (j, h) in hidden.iter_mut().enumerate() {
+            let mut sum = self.w[OFF_BHID + j];
+            for (i, &v) in x.iter().enumerate() {
+                sum += self.w[i * N_HID + j] * v;
+            }
+            *h = tanh_fast(sum);
+        }
+
+        let mut out = [0.0f32; N_OUT];
+        for (o, slot) in out.iter_mut().enumerate() {
+            let mut sum = self.w[OFF_BOUT + o];
+            for (i, &v) in x.iter().enumerate() {
+                sum += self.w[OFF_SKIP + i * N_OUT + o] * v;
+            }
+            for (j, &h) in hidden.iter().enumerate() {
+                sum += self.w[OFF_OUT + j * N_OUT + o] * h;
+            }
+            *slot = sum;
+        }
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn a_brain(seed: u64) -> Vec<i8> {
-        let mut w = vec![0i8; BRAIN_LEN];
-        randomize(&mut w, &mut Rng::new(seed, 1));
-        w
+    fn features() -> [f32; N_IN] {
+        let mut x = [0.0f32; N_IN];
+        x[input::BIAS] = 1.0;
+        x
     }
 
     #[test]
-    fn layout_is_the_documented_size() {
-        assert_eq!(BRAIN_LEN, 3 * N_HID + N_IN * N_HID + N_HID + N_OUT);
-        assert_eq!(BRAIN_LEN, 3 * 10 + 16 * 10 + 10 + 3);
+    fn the_doctrine_is_purely_linear() {
+        // If the hidden path were not zero the doctrine would not be the linear
+        // scorer it is documented as, and the baseline would drift from the
+        // thing it is written down as.
+        let d = Net::doctrine();
+        assert!(d.w[..W_HID].iter().all(|&v| v == 0.0));
+        assert!(d.w[OFF_OUT..OFF_OUT + W_OUT].iter().all(|&v| v == 0.0));
     }
 
     #[test]
-    fn outputs_are_bounded_for_any_input() {
-        let w = a_brain(1);
-        let mut rng = Rng::new(2, 2);
-        for _ in 0..10_000 {
-            let mut inputs = [0.0f32; N_IN];
-            for slot in inputs.iter_mut() {
-                // Deliberately far outside the range the sim actually produces.
-                *slot = rng.signed() * 50.0;
-            }
-            for v in eval(&w, &inputs) {
-                assert!((-1.0..=1.0).contains(&v), "output escaped: {v}");
-                assert!(v.is_finite());
-            }
-        }
+    fn the_doctrine_prefers_what_it_says_it_prefers() {
+        let d = Net::doctrine();
+        let score = |f: &[f32; N_IN]| d.eval(f)[output::SCORE];
+        let base = features();
+
+        let mut breaking = base;
+        breaking[input::FOE_ROUTING] = 1.0;
+        assert!(score(&breaking) > score(&base), "should go where they break");
+
+        let mut uphill = base;
+        uphill[input::HEIGHT_GAIN] = 1.0;
+        assert!(score(&uphill) > score(&base), "should want the high ground");
+
+        let mut far = base;
+        far[input::DISTANCE] = 1.0;
+        assert!(score(&far) < score(&base), "should not cross the field");
+
+        let mut taken = base;
+        taken[input::CLAIMED] = 1.0;
+        assert!(
+            score(&taken) < score(&base),
+            "should leave a sister division its objective"
+        );
     }
 
     #[test]
-    fn eval_is_deterministic() {
-        let w = a_brain(5);
-        let inputs = [0.3f32; N_IN];
-        assert_eq!(eval(&w, &inputs), eval(&w, &inputs));
+    fn a_broken_division_is_told_to_withdraw() {
+        let d = Net::doctrine();
+        let mut x = features();
+        x[input::OWN_BROKEN] = 1.0;
+        let out = d.eval(&x);
+        let best = (1..N_OUT).max_by(|&a, &b| out[a].partial_cmp(&out[b]).unwrap()).unwrap();
+        assert_eq!(best, output::WITHDRAW, "logits were {out:?}");
     }
 
     #[test]
-    fn zero_weights_give_zero_output() {
-        let w = vec![0i8; BRAIN_LEN];
-        assert_eq!(eval(&w, &[1.0; N_IN]), [0.0; N_OUT]);
+    fn a_fresh_division_out_of_contact_does_not_pick_withdraw() {
+        let d = Net::doctrine();
+        let mut x = features();
+        x[input::OWN_KEPT] = 1.0;
+        let out = d.eval(&x);
+        let best = (1..N_OUT).max_by(|&a, &b| out[a].partial_cmp(&out[b]).unwrap()).unwrap();
+        assert_ne!(best, output::WITHDRAW, "logits were {out:?}");
     }
 
     #[test]
-    fn different_brains_behave_differently() {
-        let inputs = [0.5f32; N_IN];
-        assert_ne!(eval(&a_brain(1), &inputs), eval(&a_brain(2), &inputs));
-    }
-
-    #[test]
-    fn mutation_touches_about_the_requested_fraction() {
-        let parent = a_brain(9);
-        let mut child = vec![0i8; BRAIN_LEN];
-        let mut rng = Rng::new(4, 4);
-        let mut changed = 0usize;
-        let trials = 200;
-        for _ in 0..trials {
-            mutate_into(&parent, &mut child, 0.1, &mut rng);
-            changed += (0..BRAIN_LEN).filter(|&i| child[i] != parent[i]).count();
-        }
-        let fraction = changed as f32 / (trials * BRAIN_LEN) as f32;
-        // Slightly below 0.1 because a small gaussian step can round back to the
-        // same i8.
-        assert!((0.07..0.11).contains(&fraction), "fraction {fraction}");
-    }
-
-    #[test]
-    fn zero_rate_is_a_faithful_copy() {
-        let parent = a_brain(3);
-        let mut child = vec![0i8; BRAIN_LEN];
-        mutate_into(&parent, &mut child, 0.0, &mut Rng::new(1, 1));
-        assert_eq!(child, parent);
-        assert_eq!(distance(&parent, &child), 0.0);
-    }
-
-    #[test]
-    fn distance_grows_with_divergence() {
-        let a = a_brain(1);
-        let mut near = vec![0i8; BRAIN_LEN];
-        mutate_into(&a, &mut near, 0.05, &mut Rng::new(6, 1));
-        let far = a_brain(2);
-        assert!(distance(&a, &near) < distance(&a, &far));
-    }
-
-    /// Founder brains must not start saturated, or every founder behaves
-    /// identically and there is nothing for selection to grade.
-    #[test]
-    fn founders_are_not_saturated() {
-        let mut rng = Rng::new(8, 1);
-        let mut saturated = 0;
-        let mut total = 0;
-        for _ in 0..200 {
-            let mut w = vec![0i8; BRAIN_LEN];
-            randomize(&mut w, &mut rng);
-            let inputs = [0.4f32; N_IN];
-            for v in eval(&w, &inputs) {
-                total += 1;
-                if v.abs() > 0.99 {
-                    saturated += 1;
+    fn a_random_net_still_answers_with_finite_numbers() {
+        // The property that makes generation zero of a search worth scoring: a
+        // net of noise plays badly, but it plays.
+        let mut rng = Rng::new(4, 7);
+        for _ in 0..64 {
+            let n = Net::random(&mut rng);
+            let mut x = features();
+            for (k, slot) in x.iter_mut().enumerate() {
+                if k != input::BIAS {
+                    *slot = rng.signed();
                 }
             }
+            assert!(n.eval(&x).iter().all(|v| v.is_finite()));
         }
-        assert!(
-            saturated * 4 < total,
-            "{saturated}/{total} outputs saturated"
-        );
+    }
+
+    #[test]
+    fn mutation_moves_the_weights_and_keeps_them_finite() {
+        let mut rng = Rng::new(9, 1);
+        let before = Net::doctrine();
+        let mut after = before;
+        after.mutate(&mut rng, 0.1);
+        assert!(after.w.iter().all(|v| v.is_finite()));
+        let moved = before
+            .w
+            .iter()
+            .zip(after.w.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(moved > LEN / 2, "mutation barely touched anything");
     }
 }

@@ -180,7 +180,7 @@ mod tests {
         let a = Archetype::default();
         let mut army = Army::new(64);
         for &(x, y, team) in units {
-            army.push(x, y, 0.0, team, 0, &a);
+            army.push(x, y, 0.0, team, 0, 0, &a);
         }
         let mut grid = Grid::new(16, 160.0);
         grid.rebuild(&army.x, &army.y, army.len());

@@ -21,6 +21,7 @@ USAGE:
     borscht battle  [--muster N] [--ticks N] [--seed N] [--out DIR]
                     [--frames N] [--image-size N] [--color MODE] [--set key=value]...
     borscht nerve   [--muster N] [--ticks N] [--seed N] [--set key=value]...
+    borscht orders  [--muster N] [--ticks N] [--seed N] [--set key=value]...
     borscht params  [--json]
 
 OPTIONS:
@@ -31,7 +32,7 @@ OPTIONS:
     --out DIR        write stats.csv and frames here (default: no output)
     --frames N       number of PNG frames to write, spread over the battle
     --image-size N   frame edge in pixels
-    --color MODE     team | kind | health | morale (default team)
+    --color MODE     team | kind | health | morale | division (default team)
     --set key=value  override any parameter; repeatable (`borscht params` lists them)
     --quiet          print one summary line of key=value pairs, for sweeps"
     );
@@ -88,6 +89,7 @@ fn parse() -> Args {
                     "kind" => ColorMode::Kind,
                     "health" => ColorMode::Health,
                     "morale" => ColorMode::Morale,
+                    "division" => ColorMode::Division,
                     _ => ColorMode::Team,
                 }
             }
@@ -144,6 +146,7 @@ fn main() {
         "bench" => bench(&args),
         "battle" | "run" => battle(&args),
         "nerve" => nerve(&args),
+        "orders" => orders(&args),
         "params" if args.json => emit_params_js(),
         "params" => list_params(),
         other => {
@@ -258,6 +261,90 @@ fn bench(args: &Args) {
             1000.0 / ms,
             bytes / (1 << 20)
         );
+    }
+}
+
+// ------------------------------------------------------------------ orders --
+
+/// What the commanders decided, and whether the divisions are still divisions.
+///
+/// Two questions this exists to answer, and neither is visible in a battle
+/// summary. Does the doctrine send every division to the same sector -- in
+/// which case this is the old single order point wearing six times the
+/// machinery? And is a reserve ever actually committed, or does it stand behind
+/// the line for the whole battle?
+fn orders(args: &Args) {
+    let cfg = build_config(args.musters.first().copied(), &args.overrides);
+    let divisions = (cfg.divisions as usize).min(borscht_core::army::MAX_DIVISIONS);
+    let mut b = Battle::new(cfg, args.seed);
+    let every = (args.ticks / 16).max(1);
+
+    // When each division first stopped being a reserve.
+    let mut committed = [[None::<u32>; borscht_core::army::MAX_DIVISIONS]; 2];
+
+    println!(
+        "{:>6} {:>5} {:>7} {:>28} {:>9}",
+        "tick", "side", "spread", "postures", "sectors"
+    );
+    for tick in 0..args.ticks {
+        b.tick();
+        for (team, marks) in committed.iter_mut().enumerate() {
+            for (d, mark) in marks.iter_mut().enumerate().take(divisions) {
+                if mark.is_none()
+                    && b.orders[team][d].posture != borscht_core::Posture::Reserve
+                    && tick > 0
+                {
+                    *mark = Some(tick);
+                }
+            }
+        }
+        if tick % every != 0 {
+            continue;
+        }
+        for (team, name) in ["red", "blue"].iter().enumerate() {
+            // Mean distance between division centroids, against the field. This
+            // is the number that says whether the army is still an army of
+            // bodies or has melted into one crowd.
+            let s = &b.divisions[team];
+            let (mut sum, mut pairs) = (0.0f32, 0u32);
+            for a in 0..divisions {
+                for c in a + 1..divisions {
+                    if s[a].men == 0 || s[c].men == 0 {
+                        continue;
+                    }
+                    let (dx, dy) = (s[a].x - s[c].x, s[a].y - s[c].y);
+                    sum += (dx * dx + dy * dy).sqrt();
+                    pairs += 1;
+                }
+            }
+            let spread = sum / pairs.max(1) as f32 / b.field_size();
+            let postures: Vec<&str> = (0..divisions)
+                .map(|d| &b.orders[team][d].posture.name()[..4])
+                .collect();
+            let sectors: Vec<String> = (0..divisions)
+                .map(|d| b.orders[team][d].sector.to_string())
+                .collect();
+            let distinct: std::collections::HashSet<u8> =
+                (0..divisions).map(|d| b.orders[team][d].sector).collect();
+            println!(
+                "{tick:>6} {name:>5} {spread:>7.3} {:>28} {:>3} of {}",
+                postures.join(","),
+                distinct.len(),
+                divisions
+            );
+            let _ = sectors;
+        }
+    }
+
+    println!("
+  RESERVES");
+    for (team, name) in ["red", "blue"].iter().enumerate() {
+        let when: Vec<String> = committed[team]
+            .iter()
+            .take(divisions)
+            .map(|m| m.map_or("never".to_string(), |t| t.to_string()))
+            .collect();
+        println!("    {name:<5} committed at {}", when.join(", "));
     }
 }
 

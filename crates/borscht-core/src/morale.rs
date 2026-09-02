@@ -325,7 +325,7 @@ mod tests {
         let c = cfg();
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(10.0, 10.0, 0.0, 0, 0, &a);
+        army.push(10.0, 10.0, 0.0, 0, 0, 0, &a);
         let mut grid = Grid::new(16, 160.0);
         grid.rebuild(&army.x, &army.y, army.len());
         grid.clear_fields();
@@ -339,7 +339,7 @@ mod tests {
         let c = cfg();
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(10.0, 10.0, 0.0, 0, 0, &a);
+        army.push(10.0, 10.0, 0.0, 0, 0, 0, &a);
         let mut grid = Grid::new(16, 160.0);
         grid.rebuild(&army.x, &army.y, army.len());
         grid.clear_fields();
@@ -363,7 +363,7 @@ mod tests {
         let c = cfg();
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(10.0, 10.0, 0.0, 0, 0, &a);
+        army.push(10.0, 10.0, 0.0, 0, 0, 0, &a);
         army.flags[0] |= ROUTING;
         let mut grid = Grid::new(16, 160.0);
         grid.rebuild(&army.x, &army.y, army.len());
@@ -380,8 +380,8 @@ mod tests {
         let c = cfg();
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(10.0, 10.0, 0.0, 0, 0, &a);
-        army.push(10.1, 10.0, 0.0, 0, 0, &a);
+        army.push(10.0, 10.0, 0.0, 0, 0, 0, &a);
+        army.push(10.1, 10.0, 0.0, 0, 0, 0, &a);
         let mut grid = Grid::new(16, 160.0);
         grid.rebuild(&army.x, &army.y, army.len());
         grid.clear_fields();
@@ -406,7 +406,7 @@ mod tests {
         let c = cfg();
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(10.0, 10.0, 0.0, 0, 0, &a);
+        army.push(10.0, 10.0, 0.0, 0, 0, 0, &a);
         let mut grid = Grid::new(16, 160.0);
         grid.rebuild(&army.x, &army.y, army.len());
         grid.clear_fields();
@@ -426,7 +426,7 @@ mod tests {
         let c = cfg();
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(10.0, 10.0, 0.0, 0, 0, &a);
+        army.push(10.0, 10.0, 0.0, 0, 0, 0, &a);
         army.flags[0] |= ROUTING;
         let mut grid = Grid::new(16, 160.0);
         grid.rebuild(&army.x, &army.y, army.len());

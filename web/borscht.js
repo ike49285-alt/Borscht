@@ -15,6 +15,7 @@ export const ColorMode = Object.freeze({
   kind: 1,
   health: 2,
   morale: 3,
+  division: 4,
 });
 
 
