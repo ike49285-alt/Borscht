@@ -282,6 +282,23 @@ const narrow = await page.evaluate(() => {
 });
 await page.screenshot({ path: `${OUT}/narrow.png` });
 
+// The unit-type key must describe the army that is actually on the field: one
+// row per kind, each with a name rather than a bare number, and two swatches --
+// the same build is a different colour on each side, which is the whole reason
+// the key carries the renderer's own colours instead of computing its own.
+const kindsCard = await page.evaluate(() => {
+  const rows = [...document.querySelectorAll('#kinds tr')].slice(1);
+  return {
+    rows: rows.length,
+    named: rows.every((r) => /#\d+ \w+/.test(r.children[1]?.textContent ?? '')),
+    swatches: rows.map((r) => r.querySelectorAll('.chip').length),
+    colours: new Set(
+      rows.flatMap((r) => [...r.querySelectorAll('.chip')].map((c) => c.style.background)),
+    ).size,
+    note: (document.getElementById('kinds-note')?.textContent ?? '').length,
+  };
+});
+
 // Nothing here serves the artifact runtime, so `claude.use` does not exist and
 // the verdict card must simply not be part of the page. This is the assertion
 // that the feature degrades by disappearing rather than by throwing: a card
@@ -299,6 +316,9 @@ console.log(`ms/tick:    ${ms}    fps: ${fps}`);
 console.log(`pixels lit: ${(drawn.fraction * 100).toFixed(1)}% of the field`);
 console.log(`inspector:  ${inspected ? 'opened' : 'did not open'}`);
 console.log(`report:     ${((treeDrawn.lit / treeDrawn.total) * 100).toFixed(1)}% drawn — ${treeSummary}`);
+console.log(
+  `kinds:      ${kindsCard.rows} builds, ${kindsCard.named ? 'all named' : 'SOME UNNAMED'}, ${kindsCard.colours} distinct swatches`,
+);
 console.log(
   `verdict:    ${verdict.present ? 'card in the markup' : 'card MISSING from markup'}, ${verdict.offered ? 'OFFERED with no store' : 'not offered without a store'}`,
 );
@@ -325,6 +345,17 @@ if (treeDrawn.lit < treeDrawn.total * 0.002) failures.push('the battle report re
 if (narrow.overflows) failures.push('page scrolls sideways at 400px wide');
 if (narrow.stageHeight < 300) failures.push(`world is only ${narrow.stageHeight}px tall at 400px wide`);
 if (!narrow.resetVisible || !narrow.playVisible) failures.push('controls unreachable at 400px wide');
+if (kindsCard.rows < 1) failures.push('the unit-type key lists no builds');
+if (!kindsCard.named) failures.push('a build in the key has no name, only a number');
+if (kindsCard.swatches.some((n) => n !== 2)) {
+  failures.push('a build in the key does not show a colour for each side');
+}
+// Every build on every side is its own colour: 2 per row, none repeated. A key
+// with a duplicate is a key that cannot be used to tell two things apart.
+if (kindsCard.colours !== kindsCard.rows * 2) {
+  failures.push(`the key shows ${kindsCard.colours} distinct colours for ${kindsCard.rows * 2} builds`);
+}
+if (kindsCard.note < 10) failures.push('the unit-type key says nothing about how the builds differ');
 if (!verdict.present) failures.push('the verdict card is missing from the markup');
 if (verdict.offered) failures.push('the verdict control is offered with no store to record into');
 if (problems.length) failures.push(...problems);

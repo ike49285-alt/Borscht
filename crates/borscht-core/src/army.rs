@@ -82,7 +82,48 @@ impl Default for Archetype {
     }
 }
 
+/// What each step of the build ramp is called.
+///
+/// Names rather than numbers, because `#2` tells a viewer nothing and "heavy"
+/// tells them most of what there is to know. Deliberately descriptive of where
+/// a kind sits on the ramp rather than a taxonomy: the kinds are variations on
+/// a soldier, the count is configurable from one to eight, and inventing five
+/// species to fill eight slots would be claiming a distinction the simulation
+/// does not make.
+pub const BUILD_NAMES: [&str; 5] = ["skirmisher", "light", "line", "heavy", "armoured"];
+
+/// Which of [`BUILD_NAMES`] describes a build at ramp position `t`.
+pub fn build_name(t: f32) -> &'static str {
+    let at = (t * BUILD_NAMES.len() as f32) as usize;
+    BUILD_NAMES[at.min(BUILD_NAMES.len() - 1)]
+}
+
 impl Archetype {
+    /// The kind of soldier `t` of the way along the build ramp.
+    ///
+    /// `t` runs 0 to 1: fast, fragile and hard-hitting at one end, slow,
+    /// armoured and enduring at the other. The spread is deliberately modest —
+    /// these are variations on a soldier, not separate species — and every
+    /// figure is a multiple of [`Archetype::default`], so the ramp has one
+    /// centre of gravity rather than eight hand-tuned tables.
+    ///
+    /// Lives here rather than inside `Battle::deploy` because the page draws a
+    /// key from it. A key computed from a second copy of these numbers would go
+    /// quietly wrong the first time one of them changed.
+    pub fn for_build(t: f32) -> Archetype {
+        let base = Archetype::default();
+        Archetype {
+            hp: base.hp * (0.7 + 0.8 * t),
+            damage: base.damage * (1.25 - 0.5 * t),
+            reach: base.reach * (0.9 + 0.5 * t),
+            cooldown: (base.cooldown as f32 * (0.8 + 0.5 * t)) as u8,
+            speed: base.speed * (1.25 - 0.55 * t),
+            armour: crate::fastmath::clamp(base.armour + 0.35 * t, 0.0, 0.9),
+            nerve: crate::fastmath::clamp(base.nerve + 0.15 * t, 0.0, 0.95),
+            radius: base.radius * (0.85 + 0.5 * t),
+        }
+    }
+
     /// What one unit of this kind is worth to the side that owns it.
     ///
     /// Used to weight the per-cell strength field, so a line of heavy infantry
@@ -427,5 +468,66 @@ mod tests {
         let army = army();
         assert_eq!(army.muster(), [5, 5]);
         assert_eq!(army.holding(0), 5);
+    }
+
+    /// The four builds an army actually fields, pinned to the values they have.
+    ///
+    /// This exists because the ramp was moved out of `Battle::deploy` so the
+    /// page could draw a key from it, and a move that quietly changed a number
+    /// would change the game a commander was trained against without changing
+    /// anything that looks like the game. The numbers below were read off the
+    /// code before the move; if one of them is meant to change, this test is
+    /// the place to say so on purpose.
+    #[test]
+    fn the_build_ramp_is_where_it_has_always_been() {
+        let want = [
+            // t,    hp,    damage, reach, cooldown, speed,  armour, nerve
+            (0.00, 70.0, 15.00, 1.080, 9u8, 0.3750, 0.1500, 0.3000),
+            (0.25, 90.0, 13.50, 1.230, 11, 0.3337, 0.2375, 0.3375),
+            (0.50, 110.0, 12.00, 1.380, 12, 0.2925, 0.3250, 0.3750),
+            (0.75, 130.0, 10.50, 1.530, 14, 0.2512, 0.4125, 0.4125),
+        ];
+        for (t, hp, damage, reach, cooldown, speed, armour, nerve) in want {
+            let a = Archetype::for_build(t);
+            let close = |got: f32, want: f32, what: &str| {
+                assert!(
+                    (got - want).abs() < 5e-3,
+                    "build {t}: {what} is {got}, was {want}"
+                );
+            };
+            close(a.hp, hp, "hp");
+            close(a.damage, damage, "damage");
+            close(a.reach, reach, "reach");
+            close(a.speed, speed, "speed");
+            close(a.armour, armour, "armour");
+            close(a.nerve, nerve, "nerve");
+            assert_eq!(a.cooldown, cooldown, "build {t}: cooldown");
+        }
+    }
+
+    /// Heavier is slower, tougher and hits less often. If the ramp ever stops
+    /// meaning that, the names on the key are lying.
+    #[test]
+    fn the_ramp_runs_from_quick_and_fragile_to_slow_and_armoured() {
+        let light = Archetype::for_build(0.0);
+        let heavy = Archetype::for_build(0.75);
+        assert!(heavy.hp > light.hp);
+        assert!(heavy.armour > light.armour);
+        assert!(heavy.nerve > light.nerve);
+        assert!(heavy.speed < light.speed);
+        assert!(heavy.damage < light.damage);
+        assert!(heavy.cooldown > light.cooldown);
+    }
+
+    #[test]
+    fn every_build_has_a_name_and_the_ends_differ() {
+        assert_eq!(build_name(0.0), "skirmisher");
+        assert_eq!(build_name(1.0), "armoured");
+        // Off the end rather than panicking: `t` comes from a configurable
+        // count and a name is not worth a crash.
+        assert_eq!(build_name(9.0), "armoured");
+        for kind in 0..8 {
+            assert!(!build_name(kind as f32 / 8.0).is_empty());
+        }
     }
 }

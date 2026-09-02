@@ -257,6 +257,44 @@ impl Battle {
         self.deploy();
     }
 
+    /// The colour a man of this kind, on this side, at this health is drawn in.
+    ///
+    /// Hue says which build, and which half of the wheel says which army: warm
+    /// for red, cool for blue, exactly as [`ColorMode::Division`] does it and
+    /// for the same reason it gives — which side a man is on is the thing you
+    /// must never lose track of. This mode used to key hue off the build alone,
+    /// which painted both armies the same four colours and made the one view
+    /// that is *about* telling units apart the one view where the two sides
+    /// were indistinguishable.
+    ///
+    /// Stepped over the builds actually in the field rather than over all eight
+    /// archetype slots, so four kinds use the whole warm range instead of
+    /// crowding into half of it.
+    ///
+    /// Public because the page draws a key from it. A key that computed its own
+    /// swatches would be a second copy of this, drifting quietly from what is
+    /// actually on screen.
+    pub fn kind_color(cfg: Config, team: usize, kind: usize, health: f32) -> (u8, u8, u8) {
+        let k = kind as f32 / cfg.kinds.max(1) as f32;
+        let hue = if team == 0 {
+            0.94 + 0.20 * k
+        } else {
+            0.44 + 0.20 * k
+        };
+        crate::color::hsv_to_rgb(hue % 1.0, 0.75, 0.55 + 0.45 * health)
+    }
+
+    /// Where kind `kind` sits on the build ramp, 0 to 1.
+    ///
+    /// Note this divides by the number of kinds rather than by the last index,
+    /// so with four kinds the ramp runs 0, 0.25, 0.5, 0.75 and the heaviest
+    /// build stops short of the top. That is the behaviour the armies have
+    /// always had and the key on the page has to describe the army that exists,
+    /// not a tidier one.
+    pub fn build_ramp(cfg: Config, kind: usize) -> f32 {
+        kind as f32 / cfg.kinds.max(1) as f32
+    }
+
     /// Put both armies on the field, facing each other.
     fn deploy(&mut self) {
         let cfg = self.cfg;
@@ -268,18 +306,7 @@ impl Battle {
         // separate species.
         for team in 0..TEAMS {
             for kind in 0..cfg.kinds.min(crate::army::MAX_ARCHETYPES as u32) as usize {
-                let t = kind as f32 / cfg.kinds.max(1) as f32;
-                let base = Archetype::default();
-                self.archetypes[team][kind] = Archetype {
-                    hp: base.hp * (0.7 + 0.8 * t),
-                    damage: base.damage * (1.25 - 0.5 * t),
-                    reach: base.reach * (0.9 + 0.5 * t),
-                    cooldown: (base.cooldown as f32 * (0.8 + 0.5 * t)) as u8,
-                    speed: base.speed * (1.25 - 0.55 * t),
-                    armour: clamp(base.armour + 0.35 * t, 0.0, 0.9),
-                    nerve: clamp(base.nerve + 0.15 * t, 0.0, 0.95),
-                    radius: base.radius * (0.85 + 0.5 * t),
-                };
+                self.archetypes[team][kind] = Archetype::for_build(Self::build_ramp(cfg, kind));
             }
         }
 
@@ -389,7 +416,12 @@ impl Battle {
         self.rebuild_fields();
         // What each division mustered, so "how much of itself has it left" means
         // something later.
-        crate::commander::survey(&self.army, &self.grid, &self.archetypes, &mut self.divisions);
+        crate::commander::survey(
+            &self.army,
+            &self.grid,
+            &self.archetypes,
+            &mut self.divisions,
+        );
         for team in self.divisions.iter_mut() {
             for d in team.iter_mut() {
                 d.started = d.strength;
@@ -463,7 +495,12 @@ impl Battle {
             .iter()
             .map(|t| core::array::from_fn(|d| t[d].started))
             .collect();
-        crate::commander::survey(&self.army, &self.grid, &self.archetypes, &mut self.divisions);
+        crate::commander::survey(
+            &self.army,
+            &self.grid,
+            &self.archetypes,
+            &mut self.divisions,
+        );
         for (team, keep) in self.divisions.iter_mut().zip(started) {
             for (d, slot) in team.iter_mut().enumerate() {
                 slot.started = keep[d];
@@ -550,8 +587,8 @@ impl Battle {
             // stay there. The objective is a standing pull; how hard it pulls
             // against the enemy in front of him is what a posture *is*, and it
             // is the only reason a reserve division can exist at all.
-            let order = self.orders[team][(self.army.division[i] as usize)
-                .min(crate::army::MAX_DIVISIONS - 1)];
+            let order = self.orders[team]
+                [(self.army.division[i] as usize).min(crate::army::MAX_DIVISIONS - 1)];
             let (pull, engage) = order.posture.steering();
             let (ox, oy) = unit(order.x - self.army.x[i], order.y - self.army.y[i]);
             let (ex, ey) = unit(fgx, fgy);
@@ -908,7 +945,10 @@ impl Battle {
     /// is fought over or the armies that turn up. That is exactly the comparison
     /// a trainer needs: the same problem, posed twice.
     pub fn restream(&mut self, trial: u64) {
-        self.rng = Rng::new(self.seed, 0x9E37_79B9 ^ trial.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        self.rng = Rng::new(
+            self.seed,
+            0x9E37_79B9 ^ trial.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+        );
     }
 
     pub fn rng_bits(&self) -> (u64, u64) {
@@ -978,8 +1018,7 @@ impl Battle {
                     }
                 }
                 ColorMode::Kind => {
-                    let hue = self.army.kind[i] as f32 / crate::army::MAX_ARCHETYPES as f32;
-                    crate::color::hsv_to_rgb(hue, 0.75, 0.55 + 0.45 * health)
+                    Self::kind_color(self.cfg, team, self.army.kind[i] as usize, health)
                 }
                 ColorMode::Health => crate::color::lerp_rgb((210, 60, 55), (90, 220, 110), health),
                 ColorMode::Division => {
@@ -1465,7 +1504,10 @@ mod tests {
         c.command_interval = 100_000.0;
         let mut b = Battle::new(c, 67);
         let reserve = 3u8;
-        assert_eq!(b.orders[0][reserve as usize].posture, crate::commander::Posture::Reserve);
+        assert_eq!(
+            b.orders[0][reserve as usize].posture,
+            crate::commander::Posture::Reserve
+        );
 
         let gap = |b: &Battle| {
             // How far the reserve is from the enemy, against how far the rest of
@@ -1488,7 +1530,8 @@ mod tests {
                 if !b.army.alive(i) || b.army.team[i] != 0 {
                     continue;
                 }
-                let d = ((b.army.x[i] as f64 - fx).powi(2) + (b.army.y[i] as f64 - fy).powi(2)).sqrt();
+                let d =
+                    ((b.army.x[i] as f64 - fx).powi(2) + (b.army.y[i] as f64 - fy).powi(2)).sqrt();
                 if b.army.division[i] == reserve {
                     r.0 += d;
                     r.1 += 1;
@@ -1518,6 +1561,29 @@ mod tests {
         assert_eq!(b.tick, 0);
         assert_eq!(b.started(), started);
         assert_eq!(b.army.muster(), started);
+    }
+
+    /// The two armies must never be the same colour, in any mode, at any health.
+    ///
+    /// This is a regression test with a specific bug behind it: the kind mode
+    /// keyed hue off the build alone, so red's heavy infantry and blue's heavy
+    /// infantry were drawn identically and the view meant to tell units apart
+    /// was the one view in which you could not tell the armies apart.
+    #[test]
+    fn every_kind_is_a_different_colour_on_each_side() {
+        let cfg = Config::default();
+        let mut seen = std::collections::HashSet::new();
+        for kind in 0..cfg.kinds as usize {
+            let red = Battle::kind_color(cfg, 0, kind, 1.0);
+            let blue = Battle::kind_color(cfg, 1, kind, 1.0);
+            assert_ne!(red, blue, "kind {kind} is the same colour on both sides");
+            // Red reads warm and blue cool, so a glance still says which army
+            // it is before it says which build.
+            assert!(red.0 > red.2, "red's kind {kind} is not warm: {red:?}");
+            assert!(blue.2 > blue.0, "blue's kind {kind} is not cool: {blue:?}");
+            assert!(seen.insert(red), "two red builds share a colour");
+            assert!(seen.insert(blue), "two blue builds share a colour");
+        }
     }
 
     #[test]

@@ -141,6 +141,7 @@ export function createEngine({ post, schedule }) {
             params: PARAMS,
             statNames: STAT_NAMES,
             commander: sim.commander,
+            kinds: sim.kinds(),
           });
           // Autoplay belongs here rather than in a 'play' the host sends after
           // 'init'. Loading the module is asynchronous, so that message would
@@ -158,6 +159,9 @@ export function createEngine({ post, schedule }) {
         case 'reset':
           running = false;
           build(msg.seed, msg.overrides);
+          // The table depends on the `kinds` parameter, so a rebuilt world can
+          // have a different one. Sent again rather than assumed unchanged.
+          post({ type: 'kinds', kinds: sim.kinds() });
           publish();
           break;
         case 'play':

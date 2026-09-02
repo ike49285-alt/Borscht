@@ -30,6 +30,8 @@ use borscht_core::{Battle, ColorMode};
 static mut BATTLE: Option<Battle> = None;
 /// Packed detail for one inspected unit.
 static mut INSPECT: Vec<f32> = Vec::new();
+/// Packed detail for every kind of unit in the field.
+static mut KINDS: Vec<f32> = Vec::new();
 
 #[allow(static_mut_refs)]
 fn battle() -> Option<&'static mut Battle> {
@@ -268,6 +270,63 @@ pub extern "C" fn world_size() -> f32 {
     battle().map_or(0.0, |b| b.field_size())
 }
 
+// ------------------------------------------------------------------ kinds --
+
+/// Numbers per kind in the buffer [`kinds`] fills.
+pub const KIND_FIELDS: usize = 15;
+
+/// Describe every kind of unit in the field: what it is made of, and the two
+/// colours it is actually drawn in.
+///
+/// Returns how many kinds were written, each `KIND_FIELDS` floats:
+/// name index, hp, damage, reach, cooldown, speed, armour, nerve, radius, then
+/// red's RGB and blue's RGB at full health.
+///
+/// The colours are carried across rather than left for the host to work out.
+/// The host could compute them -- the formula is not a secret -- but then a key
+/// on the page would be a second implementation of what the renderer does, and
+/// the first time one changed the key would start quietly lying about what is
+/// on screen. Same argument as the commander's fingerprint: the answer travels,
+/// not the recipe.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn kinds() -> u32 {
+    let Some(b) = battle() else { return 0 };
+    let out = unsafe { &mut KINDS };
+    out.clear();
+    let count = b.cfg.kinds.min(borscht_core::army::MAX_ARCHETYPES as u32);
+    for kind in 0..count as usize {
+        let t = Battle::build_ramp(b.cfg, kind);
+        let a = b.archetypes[0][kind];
+        let name = borscht_core::army::BUILD_NAMES
+            .iter()
+            .position(|n| *n == borscht_core::army::build_name(t))
+            .unwrap_or(0);
+        out.extend_from_slice(&[
+            name as f32,
+            a.hp,
+            a.damage,
+            a.reach,
+            a.cooldown as f32,
+            a.speed,
+            a.armour,
+            a.nerve,
+            a.radius,
+        ]);
+        for team in 0..2 {
+            let (r, g, bl) = Battle::kind_color(b.cfg, team, kind, 1.0);
+            out.extend_from_slice(&[r as f32, g as f32, bl as f32]);
+        }
+    }
+    count
+}
+
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn kinds_ptr() -> *const f32 {
+    unsafe { KINDS.as_ptr() }
+}
+
 // ---------------------------------------------------------------- inspect --
 
 /// Fields returned by [`inspect`], in order.
@@ -338,6 +397,76 @@ mod tests {
             set_param(i as u32, cfg.get_param(i as u32));
         }
         world_create(7, 0);
+    }
+
+    /// The key the page draws must be the colours on the page.
+    ///
+    /// Not a tautology: `kinds` and `prepare_render` reach the colour by
+    /// different routes -- one asks for it directly, the other goes through the
+    /// render buffer for a particular man -- and this is the assertion that
+    /// keeps the two answers the same. If a legend ever shows a swatch that is
+    /// not what is being drawn, it is worse than no legend, because it is
+    /// believed.
+    #[test]
+    fn the_kind_table_reports_the_colours_that_are_drawn() {
+        let _g = lock();
+        fresh();
+        let count = kinds();
+        assert!(count > 0, "an army with no kinds of unit in it");
+        let table =
+            unsafe { core::slice::from_raw_parts(kinds_ptr(), count as usize * KIND_FIELDS) };
+
+        // Colour by kind, then read back what a man of each kind on each side
+        // was actually painted.
+        let n = prepare_render(ColorMode::Kind as u32) as usize;
+        let stride = render_stride() as usize;
+        let drawn = unsafe { core::slice::from_raw_parts(render_ptr(), n * stride) };
+        let b = battle().expect("a battle");
+
+        let mut checked = 0;
+        for i in 0..n {
+            let record = &drawn[i * stride..(i + 1) * stride];
+            let kind = record[borscht_core::battle::render_field::KIND] as usize;
+            let team = b.army.team[i] as usize;
+            // Only men at full health: the table reports the undamaged colour,
+            // and the renderer dims by health.
+            let a = b.archetypes[team][kind];
+            if (b.army.hp[i] - a.hp).abs() > 1e-3 {
+                continue;
+            }
+            let at = kind * KIND_FIELDS + 9 + team * 3;
+            let want = [table[at] as u8, table[at + 1] as u8, table[at + 2] as u8];
+            let got = &record[borscht_core::battle::render_field::COLOR..][..3];
+            assert_eq!(
+                got,
+                &want[..],
+                "kind {kind} on side {team}: the key says {want:?}, the field shows {got:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no undamaged man to compare against");
+    }
+
+    /// Every kind carries a name and a build, and heavier really is heavier.
+    #[test]
+    fn the_kind_table_describes_a_real_ramp() {
+        let _g = lock();
+        fresh();
+        let count = kinds() as usize;
+        let table = unsafe { core::slice::from_raw_parts(kinds_ptr(), count * KIND_FIELDS) };
+        let names = borscht_core::army::BUILD_NAMES;
+        let field = |kind: usize, at: usize| table[kind * KIND_FIELDS + at];
+
+        for kind in 0..count {
+            assert!(
+                (field(kind, 0) as usize) < names.len(),
+                "no name for kind {kind}"
+            );
+            assert!(field(kind, 1) > 0.0, "kind {kind} has no health");
+        }
+        // hp climbs and speed falls across the ramp.
+        assert!(field(count - 1, 1) > field(0, 1));
+        assert!(field(count - 1, 5) < field(0, 5));
     }
 
     #[test]

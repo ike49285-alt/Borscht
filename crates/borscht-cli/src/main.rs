@@ -7,6 +7,7 @@
 mod png;
 mod render;
 
+use borscht_core::brain::Net;
 use borscht_core::config::{Config, PARAMS};
 use borscht_core::stats::STAT_NAMES;
 use borscht_core::{Battle, ColorMode, Outcome};
@@ -33,6 +34,7 @@ USAGE:
                     [--verdicts PATH]
     borscht replay  DIR --match ID [--out DIR] [--frames N] [--color MODE]
     borscht params  [--json]
+    borscht match    [--muster N] [--seeds N] [--ticks N]
     borscht commander
 
 OPTIONS:
@@ -227,6 +229,7 @@ fn main() {
             log: args.log.clone(),
             verdicts: args.verdicts.clone(),
         }),
+        "match" => versus(&args),
         // Which commander does this build actually ship? The page reports the
         // same name from the WebAssembly module, and a verdict recorded there
         // is worthless if the two ever disagree -- so it is checkable from the
@@ -305,6 +308,14 @@ fn emit_params_js() {
     println!("];");
     println!("export const STAT_NAMES = [");
     for name in STAT_NAMES {
+        println!("  {name:?},");
+    }
+    println!("];");
+    // What each step of the build ramp is called. Generated rather than typed
+    // into the page for the same reason the parameters are: one definition, in
+    // the core, and no second copy to fall behind it.
+    println!("export const BUILD_NAMES = [");
+    for name in borscht_core::army::BUILD_NAMES {
         println!("  {name:?},");
     }
     println!("];");
@@ -440,6 +451,72 @@ fn replay(args: &Args) {
     }
     if !faithful {
         std::process::exit(1);
+    }
+}
+
+// ------------------------------------------------------------------- match --
+
+/// The commander this build ships against the doctrine, at whatever muster is
+/// asked for.
+///
+/// This exists because of a gap between where a commander is trained and where
+/// it is watched. Training happens at a few thousand a side, because that is
+/// what fits in an afternoon; the page opens at a hundred thousand. Conclusions
+/// here are already known not to carry between musters -- twelve and twenty
+/// thousand disagreed at four standard errors -- so "it won the battles it was
+/// trained on" is a different claim from "it is better", and only one of them is
+/// worth shipping on.
+fn versus(args: &Args) {
+    let cfg = build_config(
+        args.musters.first().copied().or(Some(8_000)),
+        &args.overrides,
+    );
+    let ticks = if args.ticks == 2000 {
+        12_000
+    } else {
+        args.ticks
+    };
+    let trained = Net::trained();
+    let doctrine = Net::doctrine();
+    let name = matchlog::name_of(&trained);
+    if name == matchlog::name_of(&doctrine) {
+        println!("this build ships the doctrine, so there is nothing to compare it against.");
+        return;
+    }
+
+    let seeds: Vec<u64> = (0..args.seeds).map(|i| 700_000 + i).collect();
+    println!(
+        "commander {name} against the doctrine: {} battles of {} men, mirrored",
+        seeds.len() * 2,
+        cfg.units_per_side * 2
+    );
+
+    let scores: Vec<f32> = seeds
+        .iter()
+        .map(|&s| train::duel(&cfg, s, &trained, &doctrine, ticks))
+        .collect();
+    let mean = scores.iter().sum::<f32>() / scores.len().max(1) as f32;
+    let won = scores.iter().filter(|v| **v > 0.0).count();
+
+    // The bar is the same one the trainer's own verdict uses, and for the same
+    // reason: this is a mean over seeds, so what it has to clear is the
+    // uncertainty of a mean, not the spread of a single battle.
+    let (_, sd) = train::noise_floor(&cfg, &doctrine, &seeds, ticks);
+    let se = sd / (seeds.len() as f32).sqrt();
+    let bar = 2.0 * se;
+    println!(
+        "  margin {mean:+.4} over {} seeds, ahead on {won} of them",
+        seeds.len()
+    );
+    println!(
+        "  noise: single battles spread {sd:.4}, so this mean carries {se:.4}; the bar is {bar:.4}"
+    );
+    if mean > bar {
+        println!("  -> better than the doctrine here.");
+    } else if mean < -bar {
+        println!("  -> WORSE than the doctrine here.");
+    } else {
+        println!("  -> not distinguishable from the doctrine here.");
     }
 }
 

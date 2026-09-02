@@ -10,6 +10,8 @@
 // through `#bytes`/`#floats`, which re-create their views whenever the buffer
 // identity changes.
 
+import { BUILD_NAMES } from './params.js';
+
 export const ColorMode = Object.freeze({
   team: 0,
   kind: 1,
@@ -205,6 +207,43 @@ export class Borscht {
     const n = this.#exports.inspect(x, y, radius);
     if (n === 0) return null;
     return Array.from(this.#floats(this.#exports.inspect_ptr(), n));
+  }
+
+  /**
+   * Every kind of unit in the field: what it is made of, and the colours it is
+   * drawn in on each side.
+   *
+   * The colours come from the module rather than being worked out here on
+   * purpose. A key that computed its own swatches would be a second copy of the
+   * renderer, and the first time one of them changed the key would start
+   * quietly lying about what is on screen.
+   */
+  kinds() {
+    if (!this.#exports.kinds) return [];
+    const count = this.#exports.kinds();
+    if (count === 0) return [];
+    const FIELDS = 15;
+    const raw = this.#floats(this.#exports.kinds_ptr(), count * FIELDS);
+    const rgb = (at) => `rgb(${raw[at] | 0}, ${raw[at + 1] | 0}, ${raw[at + 2] | 0})`;
+    const out = [];
+    for (let i = 0; i < count; i += 1) {
+      const at = i * FIELDS;
+      out.push({
+        id: i,
+        name: BUILD_NAMES[raw[at]] ?? `#${i}`,
+        hp: raw[at + 1],
+        damage: raw[at + 2],
+        reach: raw[at + 3],
+        cooldown: raw[at + 4],
+        speed: raw[at + 5],
+        armour: raw[at + 6],
+        nerve: raw[at + 7],
+        radius: raw[at + 8],
+        red: rgb(at + 9),
+        blue: rgb(at + 12),
+      });
+    }
+    return out;
   }
 
 

@@ -222,6 +222,59 @@ function drawChart(canvasEl, keys, colors, { stacked = false } = {}) {
   });
 }
 
+// ------------------------------------------------------------- unit types --
+//
+// What a `#2` actually is. The page drew four kinds of soldier and named them
+// nowhere: the inspector said "type #2", the kind colour mode painted four hues
+// with no key, and nothing anywhere said that a #0 is quick and fragile and a #3
+// is slow and armoured -- which is most of what there is to know about them.
+//
+// Everything here arrives from the module. The stats are the archetype table the
+// battle is actually fighting with, and the swatches are the colours the
+// renderer actually paints, neither recomputed from a second copy of the
+// formula. See `kinds()` in the wasm ABI for why.
+
+let kinds = [];
+
+/// The distinguishing numbers, in the order they tell the story: what it can
+/// take, what it deals out, and how it moves.
+const KIND_COLUMNS = [
+  ['hp', (k) => Math.round(k.hp)],
+  ['dmg', (k) => k.damage.toFixed(1)],
+  ['reach', (k) => k.reach.toFixed(2)],
+  ['every', (k) => `${Math.round(k.cooldown)}t`],
+  ['speed', (k) => k.speed.toFixed(2)],
+  ['armour', (k) => `${Math.round(k.armour * 100)}%`],
+  ['nerve', (k) => k.nerve.toFixed(2)],
+];
+
+function showKinds(table) {
+  kinds = table ?? [];
+  const body = $('kinds');
+  if (!kinds.length) {
+    body.innerHTML = '';
+    $('kinds-note').textContent = '';
+    return;
+  }
+  const head = `<tr><td></td><td></td>${KIND_COLUMNS.map(
+    ([name]) => `<td class="nu">${name}</td>`,
+  ).join('')}</tr>`;
+  const rows = kinds.map((k) => {
+    const chips = `<span class="chip" style="background:${k.red}"></span><span class="chip" style="background:${k.blue}"></span>`;
+    const cells = KIND_COLUMNS.map(([, get]) => `<td class="nu">${get(k)}</td>`).join('');
+    return `<tr><td class="sw">${chips}</td><td class="nm">#${k.id} ${k.name}</td>${cells}</tr>`;
+  });
+  body.innerHTML = head + rows.join('');
+  const light = kinds[0];
+  const heavy = kinds[kinds.length - 1];
+  $('kinds-note').textContent =
+    kinds.length > 1
+      ? `A ${light.name} is ${(light.speed / heavy.speed).toFixed(1)}x the speed of ` +
+        `a ${heavy.name} and hits ${(heavy.cooldown / light.cooldown).toFixed(1)}x as often; ` +
+        `the ${heavy.name} takes ${(heavy.hp / light.hp).toFixed(1)}x the punishment.`
+      : 'One kind of soldier on the field.';
+}
+
 /// Matches `Outcome` in the core, and the `outcome` export in the wasm ABI.
 const OUTCOME = [
   'both lines holding',
@@ -268,7 +321,10 @@ function showInspector(unit) {
     let v = unit[i];
     if (name === 'side') v = v === 0 ? 'red' : 'blue';
     else if (name === 'routing') v = v > 0.5 ? 'yes' : 'no';
-    else if (name === 'type') v = `#${Math.round(v)}`;
+    else if (name === 'type') {
+      const kind = kinds[Math.round(v)];
+      v = kind ? `#${kind.id} ${kind.name}` : `#${Math.round(v)}`;
+    }
     else v = Number(v).toFixed(2);
     return `<tr><td class="k">${name}</td><td>${v}</td></tr>`;
   });
@@ -387,7 +443,11 @@ worker.onmessage = (event) => {
       // The name of the commander this build fights with, so a verdict can say
       // which one it is about rather than "whatever was shipped that week".
       commander = msg.commander ?? null;
+      showKinds(msg.kinds);
       openVerdicts();
+      break;
+    case 'kinds':
+      showKinds(msg.kinds);
       break;
     case 'frame': {
       worldSize = msg.worldSize || 1;
