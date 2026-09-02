@@ -104,6 +104,18 @@ export class Borscht {
     return this.#exports.world_size();
   }
 
+  /**
+   * The name of the commander this build fights with, as the same sixteen hex
+   * digits the match log writes for it. A verdict recorded against a battle
+   * carries this so it can be tied to the commander that was actually playing.
+   */
+  get commander() {
+    if (!this.#exports.commander_lo) return null;
+    const lo = this.#exports.commander_lo() >>> 0;
+    const hi = this.#exports.commander_hi() >>> 0;
+    return hi.toString(16).padStart(8, '0') + lo.toString(16).padStart(8, '0');
+  }
+
   // ----------------------------------------------------------- parameters --
 
   setParam(id, value) {

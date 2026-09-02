@@ -27,20 +27,14 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-/// Content hash of a set of weights, as a short hex string.
+/// What a commander is called, here and everywhere else.
 ///
-/// FNV-1a over the raw bits. Not a cryptographic hash and does not need to be:
-/// it names a file in a directory this program wrote, and a collision would have
-/// to be between two weight vectors produced by the same run.
-pub fn digest(values: &[f32]) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for v in values {
-        for byte in v.to_bits().to_le_bytes() {
-            h ^= byte as u64;
-            h = h.wrapping_mul(0x100_0000_01b3);
-        }
-    }
-    format!("{h:016x}")
+/// The name comes from the core rather than from this file so that a log row, a
+/// replay and the build playing in a browser all say the same thing about the
+/// same commander — which is what lets a verdict passed on a watched battle be
+/// checked against the commander that was actually on the field.
+pub fn name_of(net: &Net) -> String {
+    format!("{:016x}", net.fingerprint())
 }
 
 /// One battle, in the form that can rebuild it.
@@ -162,7 +156,7 @@ impl Log {
 
     /// Store a commander if it is not already stored, and return its name.
     pub fn remember(&mut self, net: &Net) -> String {
-        let id = digest(&net.w);
+        let id = name_of(net);
         if self.seen.insert(id.clone()) {
             let body: Vec<String> = net.w.iter().map(|v| format!("{v:?}")).collect();
             let _ = fs::write(
@@ -403,7 +397,7 @@ mod tests {
         let a = Net::doctrine();
         let mut b = a;
         b.mutate(&mut rng, 0.1);
-        assert_ne!(digest(&a.w), digest(&b.w));
-        assert_eq!(digest(&a.w), digest(&Net::doctrine().w));
+        assert_ne!(name_of(&a), name_of(&b));
+        assert_eq!(name_of(&a), name_of(&Net::doctrine()));
     }
 }

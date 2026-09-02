@@ -239,6 +239,25 @@ impl Net {
         }
     }
 
+    /// A short, stable name for this exact set of weights.
+    ///
+    /// FNV-1a over the raw bits. Not a cryptographic hash and does not need to
+    /// be: it names a commander in a record this program wrote. What it must do
+    /// is be the *same* name everywhere — a match log row, a replay, and the
+    /// build playing in a browser all say `a8c67e0f3f9986e3` about the same
+    /// commander, so a verdict passed on what someone watched can be matched
+    /// against what was actually shipped rather than assumed to be it.
+    pub fn fingerprint(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for v in &self.w {
+            for byte in v.to_bits().to_le_bytes() {
+                h ^= byte as u64;
+                h = h.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        h
+    }
+
     /// Score one (division, sector) pair.
     pub fn eval(&self, x: &[f32; N_IN]) -> [f32; N_OUT] {
         let mut hidden = [0.0f32; N_HID];

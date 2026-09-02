@@ -134,7 +134,14 @@ export function createEngine({ post, schedule }) {
         case 'init': {
           sim = await Borscht.load(msg.wasm);
           build(msg.seed, msg.overrides);
-          post({ type: 'ready', params: PARAMS, statNames: STAT_NAMES });
+          // The commander goes out with `ready` rather than with every frame:
+          // it is a property of the build, not of the battle.
+          post({
+            type: 'ready',
+            params: PARAMS,
+            statNames: STAT_NAMES,
+            commander: sim.commander,
+          });
           // Autoplay belongs here rather than in a 'play' the host sends after
           // 'init'. Loading the module is asynchronous, so that message would
           // arrive while `sim` was still null and be dropped by the guard

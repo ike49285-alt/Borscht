@@ -123,6 +123,21 @@
     background: #1d2432; color: var(--ink); border: 1px solid var(--line);
     border-radius: 6px; padding: 4px 6px; width: 86px; font: inherit; font-family: var(--mono);
   }
+  /* The verdict control. Present only when the page has somewhere to record
+     one -- see openVerdicts() -- so it is hidden in the stylesheet rather than
+     shown and then disabled. */
+  #verdict-note {
+    background: #1d2432; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 7px; width: 100%; font: inherit; font-size: 12px;
+    margin: 7px 0;
+  }
+  #verdict-sides { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  #verdict-sides .seg { flex: 1; text-align: center; }
+  #verdict-sides .seg.on { background: var(--accent); color: #05130d; font-weight: 600; }
+  #verdict-good { border-color: #2f6d52; }
+  #verdict-bad { border-color: #6d3a2f; }
+  #verdict-status { margin-top: 7px; min-height: 1.5em; }
+  #verdict-status.bad { color: var(--warn); }
   canvas.chart { width: 100%; height: 76px; display: block; }
   .legend { display: flex; flex-direction: column; gap: 3px; font-family: var(--mono); font-size: 11px; }
   .legend .item { display: flex; align-items: center; gap: 6px; }
@@ -238,6 +253,23 @@
     </div>
 
     
+
+    <!-- Hidden until a store answers. A viewer who cannot record a verdict is
+         shown no control for recording one, rather than a broken one. -->
+    <div class="card" id="verdict-card" hidden>
+      <h2>Your verdict</h2>
+      <div class="hint" id="verdict-what">watch a while first &mdash; there is nothing to judge yet</div>
+      <div id="verdict-sides" style="margin-top:8px">
+        <button class="seg on" data-side="0">Red</button>
+        <button class="seg" data-side="1">Blue</button>
+      </div>
+      <input id="verdict-note" maxlength="280" placeholder="what you saw (optional)">
+      <div class="controls">
+        <button id="verdict-good" style="flex:1">Well fought</button>
+        <button id="verdict-bad" style="flex:1">Badly fought</button>
+      </div>
+      <div class="hint" id="verdict-status"></div>
+    </div>
 
     <div class="card">
       <h2>Evolved traits</h2>

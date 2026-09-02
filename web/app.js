@@ -384,6 +384,10 @@ worker.onmessage = (event) => {
   switch (msg.type) {
     case 'ready':
       buildParamUI();
+      // The name of the commander this build fights with, so a verdict can say
+      // which one it is about rather than "whatever was shipped that week".
+      commander = msg.commander ?? null;
+      openVerdicts();
       break;
     case 'frame': {
       worldSize = msg.worldSize || 1;
@@ -420,6 +424,7 @@ worker.onmessage = (event) => {
       // happens and it is the half worth watching, so the battle ends when the
       // viewer pauses it, not when the engine decides it has seen enough.
       $('tree-summary').textContent = OUTCOME[msg.outcome] ?? OUTCOME[0];
+      describeVerdict();
       break;
     }
     case 'terrain':
@@ -469,6 +474,119 @@ function currentSetup() {
 }
 
 let latestTick = 0;
+
+// ------------------------------------------------------------------ verdict --
+//
+// Self-play can generate unlimited battles and has no taste: it cannot tell
+// itself that a battle it won was won stupidly. Judgement is the scarce thing,
+// and it is the one part of a watched match that carries information nothing
+// else can supply -- so it is what gets recorded and sent back to the trainer.
+//
+// A verdict names a *situation* rather than a score: this seed, this muster,
+// this commander, played in a way somebody watched and called good or bad. That
+// is what a later training run can act on, because no candidate in a later
+// generation is these weights any more, but the ground is still the same ground.
+
+let db = null;
+let commander = null;
+let judging = 0;
+
+/// Ask for somewhere to record verdicts, and show the control only if there is.
+///
+/// `claude.use` resolves null whenever this view cannot run the store -- not
+/// served, not granted, failed to load -- and those are deliberately
+/// indistinguishable. There is nothing useful to say about which, so the page
+/// simply stays the page it is without the card.
+async function openVerdicts() {
+  if (typeof globalThis.claude?.use !== 'function') return;
+  try {
+    db = await globalThis.claude.use('db');
+  } catch {
+    db = null;
+  }
+  if (!db) return;
+  $('verdict-card').hidden = false;
+  describeVerdict();
+}
+
+/// Whether there is anything to pass judgement on yet.
+///
+/// Before the lines meet, nothing has been fought and a verdict would be about
+/// the deployment at most. The first blood is the honest gate.
+function joined() {
+  const s = latest?.stats;
+  return Boolean(s && (s.red_killed ?? 0) + (s.blue_killed ?? 0) > 0);
+}
+
+const SIDE_NAME = ['red', 'blue'];
+
+function describeVerdict() {
+  if (!db) return;
+  const ready = joined();
+  $('verdict-good').disabled = !ready;
+  $('verdict-bad').disabled = !ready;
+  $('verdict-what').textContent = ready
+    ? `judging ${SIDE_NAME[judging]} on seed ${$('seed').value}, tick ${fmt(latestTick)}`
+    : 'watch a while first — there is nothing to judge yet';
+}
+
+for (const button of document.querySelectorAll('#verdict-sides .seg')) {
+  button.addEventListener('click', () => {
+    judging = Number(button.dataset.side);
+    for (const other of document.querySelectorAll('#verdict-sides .seg')) {
+      other.classList.toggle('on', other === button);
+    }
+    describeVerdict();
+  });
+}
+
+/// Record what the viewer thought of how this side played.
+///
+/// Everything needed to fight the battle again goes in beside the judgement:
+/// the seed and the parameter overrides are what `borscht` needs to rebuild
+/// this exact ground, and the commander's name is what says whose play was
+/// being judged. A verdict without those is an opinion about nothing in
+/// particular.
+async function submitVerdict(verdict) {
+  if (!db || !joined()) return;
+  const status = $('verdict-status');
+  const setup = currentSetup();
+  const body = {
+    verdict,
+    side: SIDE_NAME[judging],
+    note: $('verdict-note').value.slice(0, 280),
+    commander,
+    seed: setup.seed,
+    scale: Number($('scale').value),
+    overrides: setup.overrides,
+    tick: latestTick,
+    outcome: OUTCOME[latest?.outcome ?? 0],
+    red: latest?.red ?? 0,
+    blue: latest?.blue ?? 0,
+    red_holding: latest?.stats?.red_holding ?? 0,
+    blue_holding: latest?.stats?.blue_holding ?? 0,
+    at: new Date().toISOString(),
+  };
+  status.classList.remove('bad');
+  status.textContent = 'recording…';
+  try {
+    await db.collection('verdicts').add(body);
+    status.textContent = `recorded: ${SIDE_NAME[judging]} ${verdict} on seed ${setup.seed}`;
+    $('verdict-note').value = '';
+  } catch (error) {
+    status.classList.add('bad');
+    // The store's own codes are the useful thing here; `quota_exceeded` and
+    // `invalid_argument` will not come right on a retry, so say so rather than
+    // inviting the viewer to click again.
+    status.textContent =
+      error?.code === 'quota_exceeded'
+        ? 'the verdict store is full; nothing was recorded'
+        : `not recorded (${error?.code ?? 'unknown'})`;
+  }
+}
+
+$('verdict-good').addEventListener('click', () => submitVerdict('well fought'));
+$('verdict-bad').addEventListener('click', () => submitVerdict('badly fought'));
 
 /** Paint the play button to match whatever the engine is actually doing. */
 function showRunning(next) {

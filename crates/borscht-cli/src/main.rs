@@ -31,6 +31,7 @@ USAGE:
                     [--population N] [--sigma F] [--out FILE] [--log DIR]
     borscht replay  DIR --match ID [--out DIR] [--frames N] [--color MODE]
     borscht params  [--json]
+    borscht commander
 
 OPTIONS:
     --muster N       total units on the field, both sides; the field is scaled
@@ -211,6 +212,11 @@ fn main() {
             out: args.out.clone(),
             log: args.log.clone(),
         }),
+        // Which commander does this build actually ship? The page reports the
+        // same name from the WebAssembly module, and a verdict recorded there
+        // is worthless if the two ever disagree -- so it is checkable from the
+        // shell rather than only inferable.
+        "commander" => println!("{}", matchlog::name_of(&borscht_core::brain::Net::trained())),
         "params" if args.json => emit_params_js(),
         "params" => list_params(),
         other => {

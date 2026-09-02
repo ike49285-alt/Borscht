@@ -282,6 +282,16 @@ const narrow = await page.evaluate(() => {
 });
 await page.screenshot({ path: `${OUT}/narrow.png` });
 
+// Nothing here serves the artifact runtime, so `claude.use` does not exist and
+// the verdict card must simply not be part of the page. This is the assertion
+// that the feature degrades by disappearing rather than by throwing: a card
+// showing with dead buttons, or an exception during startup that takes the rest
+// of the controller down with it, both fail here.
+const verdict = await page.evaluate(() => ({
+  present: !!document.getElementById('verdict-card'),
+  offered: !document.getElementById('verdict-card')?.hidden,
+}));
+
 console.log(`ticks:      ${tickAfter} running, ${tickAtReadout} at the readout below`);
 console.log(`red/blue:   ${await page.textContent('#h-plants')} / ${await readAnimals()}`);
 console.log(`holding:    ${species}   routing: ${carn}`);
@@ -289,6 +299,9 @@ console.log(`ms/tick:    ${ms}    fps: ${fps}`);
 console.log(`pixels lit: ${(drawn.fraction * 100).toFixed(1)}% of the field`);
 console.log(`inspector:  ${inspected ? 'opened' : 'did not open'}`);
 console.log(`report:     ${((treeDrawn.lit / treeDrawn.total) * 100).toFixed(1)}% drawn — ${treeSummary}`);
+console.log(
+  `verdict:    ${verdict.present ? 'card in the markup' : 'card MISSING from markup'}, ${verdict.offered ? 'OFFERED with no store' : 'not offered without a store'}`,
+);
 console.log(
   `narrow:     stage ${narrow.stageWidth}x${narrow.stageHeight} at 400px wide, controls ${narrow.resetVisible && narrow.playVisible ? 'reachable' : 'MISSING'}`,
 );
@@ -312,6 +325,8 @@ if (treeDrawn.lit < treeDrawn.total * 0.002) failures.push('the battle report re
 if (narrow.overflows) failures.push('page scrolls sideways at 400px wide');
 if (narrow.stageHeight < 300) failures.push(`world is only ${narrow.stageHeight}px tall at 400px wide`);
 if (!narrow.resetVisible || !narrow.playVisible) failures.push('controls unreachable at 400px wide');
+if (!verdict.present) failures.push('the verdict card is missing from the markup');
+if (verdict.offered) failures.push('the verdict control is offered with no store to record into');
 if (problems.length) failures.push(...problems);
 if (failures.length) {
   console.error(`\nFAILED:\n  ${failures.join('\n  ')}`);
