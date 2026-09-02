@@ -12,7 +12,7 @@
 // produces a page that looks right and quietly runs the wrong world.
 //
 // Usage: node tools/build-artifact.mjs [--out FILE] [--seed N] [--scale N] [--speed N]
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, statSync, readdirSync } from 'node:fs';
 
 const root = new URL('..', import.meta.url).pathname;
 const arg = (name, fallback) => {
@@ -100,7 +100,44 @@ const renderer = strip(read('renderer.js'));
 const engine = strip(read('worker.js'));
 const app = strip(read('app.js'));
 
-const wasm = readFileSync(`${root}web/borscht.wasm`).toString('base64');
+// Refuse to bundle a module older than the code it was built from.
+//
+// This is here because it happened: `tools/build-web.sh` was run with its output
+// piped to `head`, which closed the pipe, sent SIGPIPE to cargo and aborted the
+// script under `set -e` -- before the line that copies the module into web/. The
+// build looked fine, this bundler ran happily on the stale module, the page
+// checks passed against it, and two commits' worth of work was published as an
+// artifact that behaved exactly like the one before it. Nothing anywhere
+// noticed, because every step was individually successful.
+//
+// The same argument as every `sub()` below: a step that silently does nothing is
+// worse than one that fails.
+function newestSource() {
+  let newest = 0;
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) walk(path);
+      else if (entry.name.endsWith('.rs')) newest = Math.max(newest, statSync(path).mtimeMs);
+    }
+  };
+  walk(`${root}crates`);
+  return newest;
+}
+
+const wasmPath = `${root}web/borscht.wasm`;
+const builtAt = statSync(wasmPath).mtimeMs;
+const sourceAt = newestSource();
+if (builtAt < sourceAt) {
+  const behind = ((sourceAt - builtAt) / 60000).toFixed(0);
+  throw new Error(
+    `web/borscht.wasm is ${behind} minutes older than the newest Rust source. ` +
+      'Run tools/build-web.sh and check that it exited cleanly -- do not pipe it ' +
+      'to head, which kills it partway through under set -e.',
+  );
+}
+
+const wasm = readFileSync(wasmPath).toString('base64');
 
 // The shim standing in for a Worker. Same surface as the real one, so app.js
 // does not know or care which it is talking to.
