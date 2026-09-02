@@ -372,6 +372,7 @@ pub fn decide(
     state: &[DivisionState; MAX_DIVISIONS],
     orders: &mut [Order; MAX_DIVISIONS],
     temperature: f32,
+    inertia: f32,
     rng: &mut Rng,
 ) {
     let army = &ArmyState::of(state, divisions);
@@ -397,6 +398,16 @@ pub fn decide(
                 *slot = out[output::ADVANCE + k];
             }
             best = best.max(scores[s]);
+        }
+
+        // A standing order counts for something. Re-drawing from scratch every
+        // interval makes a division oscillate between objectives and arrive at
+        // none of them, which costs almost nothing when the sectors are a
+        // stone's throw apart and the whole battle when they are not.
+        let holding = orders[d].sector as usize;
+        if holding < CELLS {
+            scores[holding] += inertia;
+            best = best.max(scores[holding]);
         }
 
         // A softmax draw rather than the best sector outright. Two reasons, and
@@ -483,7 +494,7 @@ mod tests {
                 Net::random(&mut rng)
             };
             let mut orders = [Order::default(); MAX_DIVISIONS];
-            decide(&net, &view(), 0, 6, &state(), &mut orders, 0.5, &mut rng);
+            decide(&net, &view(), 0, 6, &state(), &mut orders, 0.5, 0.0, &mut rng);
             for o in orders.iter().take(6) {
                 assert!((o.sector as usize) < CELLS, "sector {} is off the map", o.sector);
                 assert!(o.x.is_finite() && o.y.is_finite());
@@ -503,7 +514,7 @@ mod tests {
         // One sector made obviously attractive, so the pull to converge is real.
         v.routing[1][14] = 50.0;
         let mut orders = [Order::default(); MAX_DIVISIONS];
-        decide(&Net::doctrine(), &v, 0, 6, &state(), &mut orders, 0.35, &mut rng);
+        decide(&Net::doctrine(), &v, 0, 6, &state(), &mut orders, 0.35, 0.0, &mut rng);
         let distinct: std::collections::HashSet<u8> =
             orders.iter().take(6).map(|o| o.sector).collect();
         assert!(
@@ -521,7 +532,7 @@ mod tests {
         s[0].routing = 0.9;
         s[0].strength = 10.0;
         let mut orders = [Order::default(); MAX_DIVISIONS];
-        decide(&Net::doctrine(), &view(), 0, 6, &s, &mut orders, 0.3, &mut rng);
+        decide(&Net::doctrine(), &view(), 0, 6, &s, &mut orders, 0.3, 0.0, &mut rng);
         assert_eq!(orders[0].posture, Posture::Withdraw);
     }
 
@@ -537,8 +548,43 @@ mod tests {
             y: 2.0,
             posture: Posture::Hold,
         };
-        decide(&Net::doctrine(), &view(), 0, 6, &s, &mut orders, 0.3, &mut rng);
+        decide(&Net::doctrine(), &view(), 0, 6, &s, &mut orders, 0.3, 0.0, &mut rng);
         assert_eq!(orders[2].sector, 30);
+    }
+
+    #[test]
+    fn a_standing_order_is_not_thrown_away_every_interval() {
+        // The defect this was added for. Re-deciding from scratch made
+        // divisions oscillate between objectives; at a hundred thousand men the
+        // armies took 3715 ticks to come to blows against 275 with the
+        // commander frozen, because they spent the battle countermarching.
+        let mut rng = Rng::new(13, 4);
+        let v = view();
+        let s = state();
+        let settled = |inertia: f32| {
+            let mut orders = [Order::default(); MAX_DIVISIONS];
+            let mut rng = Rng::new(13, 4);
+            decide(&Net::doctrine(), &v, 0, 6, &s, &mut orders, 0.5, inertia, &mut rng);
+            let first: Vec<u8> = orders.iter().take(6).map(|o| o.sector).collect();
+            let mut same = 0;
+            for _ in 0..20 {
+                decide(&Net::doctrine(), &v, 0, 6, &s, &mut orders, 0.5, inertia, &mut rng);
+                same += orders
+                    .iter()
+                    .take(6)
+                    .zip(&first)
+                    .filter(|(o, f)| o.sector == **f)
+                    .count();
+            }
+            same
+        };
+        let _ = &mut rng;
+        assert!(
+            settled(3.0) > settled(0.0) * 2,
+            "inertia kept {} of 120 orders against {} without it",
+            settled(3.0),
+            settled(0.0)
+        );
     }
 
     #[test]

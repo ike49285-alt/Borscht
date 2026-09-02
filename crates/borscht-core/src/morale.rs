@@ -129,7 +129,7 @@ pub fn pressure_on(army: &Army, grid: &Grid, cfg: &Config, i: usize, max_hp: f32
         // single term was enough to make men rally in the middle of a rout and
         // break again seconds later, over and over.
         odds: if enemy > 1e-6 { own / total } else { 0.5 },
-        cohesion: clamp(steady / cfg.cohesion_full, 0.0, 1.0),
+        cohesion: clamp(steady / cfg.cohesion_per_cell(), 0.0, 1.0),
         losses: fallen / (fallen + here),
         // Panic is what breaks a man who is still standing. It is not what
         // keeps a broken one broken -- once he is running, what governs him is

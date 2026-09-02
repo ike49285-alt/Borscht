@@ -440,6 +440,7 @@ impl Battle {
                 &self.divisions[team],
                 &mut self.orders[team],
                 self.cfg.command_temperature,
+                self.cfg.order_inertia,
                 &mut self.rng,
             );
         }
@@ -482,6 +483,10 @@ impl Battle {
         let cfg = self.cfg;
         let size = cfg.field_size;
         let geom = self.grid.geom;
+        // Hoisted: a men-per-cell figure has to be converted for the cell size
+        // this battle happens to have, and doing it per man per tick would be a
+        // division a million times over for a constant.
+        let press_full = cfg.press_per_cell();
 
         for i in 0..self.army.len() {
             if !self.army.alive(i) {
@@ -546,7 +551,7 @@ impl Battle {
                 // once, and the whole army breaks in the same instant with no
                 // steady rear to rally on.
                 let ahead = self.grid.count[team][geom.cell_at(cx + pace(tx), cy + pace(ty))];
-                let room = clamp(1.0 - ahead / cfg.press_limit.max(1e-3), 0.0, 1.0);
+                let room = clamp(1.0 - ahead / press_full, 0.0, 1.0);
                 tx *= room;
                 ty *= room;
                 // Push out of the crush, which is also what dresses him on his
@@ -1092,12 +1097,14 @@ mod tests {
             crush(&flat)
         );
         // And it holds it open at roughly the density it was asked for, rather
-        // than at whatever the crush happens to settle at.
+        // than at whatever the crush happens to settle at. A generous multiple:
+        // men still pile up locally where two fronts meet, so this guards
+        // against the limit doing nothing rather than pinning an occupancy.
         assert!(
-            crush(&deep) < deep.cfg.press_limit * 4.0,
+            crush(&deep) < deep.cfg.press_per_cell() * 6.0,
             "{} men in a cell against a press limit of {}",
             crush(&deep),
-            deep.cfg.press_limit
+            deep.cfg.press_per_cell()
         );
     }
 

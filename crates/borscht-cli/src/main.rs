@@ -177,7 +177,11 @@ fn main() {
         "sweep" => sweep::run(
             &build_config(args.musters.first().copied().or(Some(8_000)), &args.overrides),
             args.seeds,
-            if args.ticks == 2000 { 3000 } else { args.ticks },
+            // Battles stop the moment they are decided, so a generous cap costs
+            // nothing on the ones that end and prevents the ones that do not
+            // from being scored as though they had. A cap that truncates
+            // quietly turns "still fighting" into "nobody won".
+            if args.ticks == 2000 { 8000 } else { args.ticks },
             args.doctrine,
         ),
         "train" => train::run(&train::Plan {

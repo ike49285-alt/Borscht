@@ -108,6 +108,19 @@ config_params! {
     /// divisions that jitter between objectives and never arrive anywhere, and
     /// real orders take time to write, carry and act on.
     command_interval: f32 = 60.0, "command", 1.0, 600.0;
+    /// How much a division prefers the objective it has already been given.
+    ///
+    /// Added to the incumbent sector's score before the draw. Without it a
+    /// commander re-decides from scratch every interval and divisions oscillate:
+    /// a fresh draw over thirty-six sectors sends a body somewhere else every
+    /// sixty ticks, and it spends the battle marching between objectives rather
+    /// than arriving at one. The cost is invisible at a small muster, where the
+    /// sectors are close together, and enormous at a large one -- at a hundred
+    /// thousand men the armies took 3715 ticks to come to blows, against 275
+    /// with the commander frozen entirely.
+    ///
+    /// Real orders are not reversed every minute either.
+    order_inertia: f32 = 1.2, "command", 0.0, 8.0;
     /// How much the commander's choice of objective is a draw rather than the
     /// best sector outright.
     ///
@@ -253,7 +266,9 @@ config_params! {
     morale_melee: f32 = 0.015, "morale", 0.0, 2.0;
     /// Shock from your own wounds, per tick at the point of death.
     morale_wound: f32 = 0.004, "morale", 0.0, 0.5;
-    /// Men in a cell at which cohesion counts as full.
+    /// Men in a cell at which cohesion counts as full, quoted at the reference
+    /// cell size and converted for the cell size in use -- see
+    /// [`Config::cohesion_per_cell`].
     cohesion_full: f32 = 6.0, "morale", 1.0, 64.0;
     /// How far above its nerve a broken unit must recover before it will rally.
     ///
@@ -277,7 +292,9 @@ config_params! {
     /// converge on a point, which leaves the local odds and local density that
     /// morale reads nearly uniform everywhere.
     spacing: f32 = 0.55, "movement", 0.0, 4.0;
-    /// Men per cell at which the ground in front of you counts as full.
+    /// Men per cell at which the ground in front of you counts as full,
+    /// quoted at the reference cell size and converted for the cell size in
+    /// use -- see [`Config::press_per_cell`].
     ///
     /// A man advances on the enemy only while the cell he is walking into holds
     /// fewer of his own side than this; past it he holds his place and dresses
@@ -296,6 +313,11 @@ config_params! {
     /// without separating the breaks any more.
     press_limit: f32 = 4.0, "movement", 1.0, 64.0;
 }
+
+/// The cell size the per-cell parameters are quoted against: the default field
+/// over the default grid. Everything denominated in men per cell is written for
+/// this and converted by [`Config::cell_occupancy_scale`].
+pub const REFERENCE_CELL_SIZE: f32 = 900.0 / 256.0;
 
 impl ParamInfo {
     /// The doc comment as plain prose.
@@ -339,6 +361,40 @@ impl Config {
     #[inline(always)]
     pub fn cell_size(&self) -> f32 {
         self.field_size / self.grid_dim as f32
+    }
+
+    /// Turns a men-per-cell figure quoted at the reference cell size into a
+    /// men-per-cell figure for *this* configuration.
+    ///
+    /// Two parameters -- how thick a front counts as full, and how many men at
+    /// your shoulder count as a formation -- are naturally quantities per unit
+    /// of *ground*, but the code can only count them per grid cell, and the grid
+    /// is not a fixed fraction of the field. [`Config::for_muster`] scales the
+    /// field smoothly while the grid must stay a power of two, so cell size
+    /// jumps: across musters from eight to forty thousand it runs from 2.49 to
+    /// 4.45 units, which is a 3.2-fold swing in how many men a cell holds at the
+    /// same density.
+    ///
+    /// Left uncorrected, `press_limit` and `cohesion_full` therefore meant
+    /// something different at every muster, and a conclusion drawn at one
+    /// scale did not transfer to another. Measured over sixty-four battles a
+    /// side, eight, twelve, sixteen, thirty-two and forty thousand left the
+    /// winner most of an army while twenty and twenty-four left him almost
+    /// nothing -- and there is no reason a battle twice the size should be
+    /// fought differently.
+    pub fn cell_occupancy_scale(&self) -> f32 {
+        let ratio = self.cell_size() / REFERENCE_CELL_SIZE;
+        ratio * ratio
+    }
+
+    /// Men per cell at which a front counts as full, for this cell size.
+    pub fn press_per_cell(&self) -> f32 {
+        (self.press_limit * self.cell_occupancy_scale()).max(1e-3)
+    }
+
+    /// Men at your shoulder that count as a whole formation, for this cell size.
+    pub fn cohesion_per_cell(&self) -> f32 {
+        (self.cohesion_full * self.cell_occupancy_scale()).max(1e-3)
     }
 
     /// Repair anything that would make the battle impossible to set up, so that
@@ -498,5 +554,46 @@ mod tests {
                 "target {target}: cell size ratio {ratio}"
             );
         }
+    }
+
+    #[test]
+    fn a_front_is_the_same_thickness_of_men_at_every_muster() {
+        // The test the one above was mistaken for. Cell size is allowed to
+        // wander by a factor of two, which is a factor of *four* in how many men
+        // a cell holds -- and the front's density and a formation's cohesion are
+        // both quoted in men per cell. Left uncorrected they meant something
+        // different at every scale, and battles at twenty thousand came out
+        // unlike battles at sixteen or thirty-two for no reason but the
+        // rounding of a grid dimension.
+        //
+        // What has to hold is the density on the ground, not the count per cell.
+        let base = Config::default();
+        let want = base.press_limit / (base.cell_size() * base.cell_size());
+        let want_cohesion = base.cohesion_full / (base.cell_size() * base.cell_size());
+        for target in [2_000u32, 8_000, 12_000, 20_000, 24_000, 40_000, 200_000, 1_000_000] {
+            let c = Config::for_muster(target);
+            let area = c.cell_size() * c.cell_size();
+            let got = c.press_per_cell() / area;
+            let got_cohesion = c.cohesion_per_cell() / area;
+            assert!(
+                (got / want - 1.0).abs() < 1e-3,
+                "target {target}: a full front is {got} men per square unit against {want}"
+            );
+            assert!(
+                (got_cohesion / want_cohesion - 1.0).abs() < 1e-3,
+                "target {target}: full cohesion is {got_cohesion} against {want_cohesion}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reference_configuration_needs_no_correction() {
+        // The parameters are quoted at the default's cell size, so the default
+        // must convert to itself -- otherwise every documented value silently
+        // means something else.
+        let base = Config::default();
+        assert!((base.cell_occupancy_scale() - 1.0).abs() < 1e-4);
+        assert!((base.press_per_cell() - base.press_limit).abs() < 1e-4);
+        assert!((base.cohesion_per_cell() - base.cohesion_full).abs() < 1e-4);
     }
 }
