@@ -57,12 +57,6 @@ fn play(cfg: &Config, seed: u64, trial: u64, red: &Net, blue: &Net, ticks: u32) 
     // Holding the field is what winning *is*, but on its own it is a brutally
     // noisy signal: outcomes here are bimodal -- a real victory or mutual ruin
     // with a technical winner -- so the margin jumps between extremes on
-    // accidents. Half the score is therefore the difference in fighting
-    // strength left standing, which moves smoothly and says the same thing more
-    // quietly. A search cannot climb a cliff.
-    // Holding the field is what winning *is*, but on its own it is a brutally
-    // noisy signal: outcomes here are bimodal -- a real victory or mutual ruin
-    // with a technical winner -- so the margin jumps between extremes on
     // accidents. Half the score is therefore the butcher's bill, which
     // accumulates over a whole battle instead of being an endpoint and says the
     // same thing more quietly. Measured over 24 mirrored seeds, the spread of a
@@ -211,7 +205,9 @@ pub fn run(plan: &Plan) {
         .collect();
 
     let mut archive: Vec<Net> = vec![doctrine];
-    let mut seeds: Vec<u64> = (0..6).map(|i| plan.seed.wrapping_mul(1_000_003) + i).collect();
+    let mut seeds: Vec<u64> = (0..6)
+        .map(|i| plan.seed.wrapping_mul(1_000_003) + i)
+        .collect();
 
     // Ground somebody watched and found wanting, added to what the search works
     // on. See `verdict.rs` for why a judgement steers the training set rather
@@ -227,11 +223,20 @@ pub fn run(plan: &Plan) {
         None => crate::verdict::Judged::default(),
     };
     if !judged.is_empty() {
-        crate::verdict::report(&judged, &plan.cfg, &crate::matchlog::name_of(&Net::trained()));
+        crate::verdict::report(
+            &judged,
+            &plan.cfg,
+            &crate::matchlog::name_of(&Net::trained()),
+        );
         seeds.extend(judged.training_seeds(FLAGGED_WEIGHT));
     }
 
-    let (floor_mean, floor_sd) = noise_floor(&plan.cfg, &doctrine, &(0..24).map(|i| i as u64 + 1).collect::<Vec<_>>(), plan.ticks);
+    let (floor_mean, floor_sd) = noise_floor(
+        &plan.cfg,
+        &doctrine,
+        &(0..24).map(|i| i as u64 + 1).collect::<Vec<_>>(),
+        plan.ticks,
+    );
     println!(
         "noise floor: the doctrine against itself over 24 mirrored seeds is {floor_mean:+.4} \
          with a spread of {floor_sd:.4}"
@@ -326,8 +331,13 @@ pub fn run(plan: &Plan) {
     // all, which is where this started, sets one anything passes.
     let se = sd / (held_out.len() as f32).sqrt();
     let bar = 2.0 * se;
-    println!("\n  champion against the doctrine on {} held-out mirrored seeds: {verdict:+.4}", held_out.len());
-    println!("  noise: single battles spread {sd:.4}, so this mean carries {se:.4}; the bar is {bar:.4}");
+    println!(
+        "\n  champion against the doctrine on {} held-out mirrored seeds: {verdict:+.4}",
+        held_out.len()
+    );
+    println!(
+        "  noise: single battles spread {sd:.4}, so this mean carries {se:.4}; the bar is {bar:.4}"
+    );
     let beat = verdict > bar;
     if beat {
         println!("  -> better than the doctrine by more than twice the noise in the measurement.");
@@ -389,9 +399,8 @@ pub fn run(plan: &Plan) {
                 }
             );
             if on_approved < -bar {
-                println!(
-                    "  -> the champion plays the battles you liked WORSE than the doctrine does.                      Whatever it gained, it gained by giving that up."
-                );
+                println!("  -> the champion plays the battles you liked WORSE than the doctrine.");
+                println!("     Whatever it gained, it gained by giving that up.");
             }
         }
     }

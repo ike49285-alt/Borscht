@@ -201,7 +201,10 @@ fn main() {
         "orders" => orders(&args),
         "replay" => replay(&args),
         "sweep" => sweep::run(
-            &build_config(args.musters.first().copied().or(Some(8_000)), &args.overrides),
+            &build_config(
+                args.musters.first().copied().or(Some(8_000)),
+                &args.overrides,
+            ),
             args.seeds,
             // Battles stop the moment they are decided, so a generous cap costs
             // nothing on the ones that end and prevents the ones that do not
@@ -211,7 +214,10 @@ fn main() {
             args.doctrine,
         ),
         "train" => train::run(&train::Plan {
-            cfg: build_config(Some(args.musters.first().copied().unwrap_or(4_000)), &args.overrides),
+            cfg: build_config(
+                Some(args.musters.first().copied().unwrap_or(4_000)),
+                &args.overrides,
+            ),
             seed: args.seed,
             ticks: if args.ticks == 2000 { 1500 } else { args.ticks },
             generations: args.generations,
@@ -225,7 +231,10 @@ fn main() {
         // same name from the WebAssembly module, and a verdict recorded there
         // is worthless if the two ever disagree -- so it is checkable from the
         // shell rather than only inferable.
-        "commander" => println!("{}", matchlog::name_of(&borscht_core::brain::Net::trained())),
+        "commander" => println!(
+            "{}",
+            matchlog::name_of(&borscht_core::brain::Net::trained())
+        ),
         "params" if args.json => emit_params_js(),
         "params" => list_params(),
         other => {
@@ -351,7 +360,9 @@ fn bench(args: &Args) {
 /// being a number and become a list you can pull any line out of and watch.
 fn replay(args: &Args) {
     let Some(dir) = &args.log else {
-        eprintln!("error: replay needs a log directory, e.g. `borscht replay runs/today --match 12`");
+        eprintln!(
+            "error: replay needs a log directory, e.g. `borscht replay runs/today --match 12`"
+        );
         std::process::exit(2);
     };
     let Some(id) = args.match_id else {
@@ -375,14 +386,10 @@ fn replay(args: &Args) {
     // Frames are spread over the battle's recorded length rather than a tick
     // cap: a replay is the one case where how long the fight ran is known
     // before it is fought again.
-    let mut canvas = args
-        .out
-        .as_ref()
-        .filter(|_| args.frames > 0)
-        .map(|out| {
-            let _ = std::fs::create_dir_all(out);
-            render::Canvas::new(args.image_size)
-        });
+    let mut canvas = args.out.as_ref().filter(|_| args.frames > 0).map(|out| {
+        let _ = std::fs::create_dir_all(out);
+        render::Canvas::new(args.image_size)
+    });
     let frame_every = (row.ticks / args.frames.max(1) as u64).max(1);
     let mut frames_written = 0u32;
 
@@ -508,8 +515,10 @@ fn orders(args: &Args) {
         }
     }
 
-    println!("
-  RESERVES");
+    println!(
+        "
+  RESERVES"
+    );
     for (team, name) in ["red", "blue"].iter().enumerate() {
         let when: Vec<String> = committed[team]
             .iter()
@@ -559,9 +568,9 @@ fn nerve(args: &Args) {
             let team = b.army.team[i] as usize;
             let a = b.archetypes[team][b.army.kind[i] as usize];
             let cell = b.grid.units.cell_of[i] as usize;
-            let in_contact =
-                b.grid.count[borscht_core::grid::foe(b.army.team[i])][cell] > 0.0;
-            let p = borscht_core::morale::pressure_on(&b.army, &b.grid, &b.cfg, i, a.hp, b.host[team]);
+            let in_contact = b.grid.count[borscht_core::grid::foe(b.army.team[i])][cell] > 0.0;
+            let p =
+                borscht_core::morale::pressure_on(&b.army, &b.grid, &b.cfg, i, a.hp, b.host[team]);
             let g = usize::from(!in_contact);
             let c = &b.cfg;
             let terms = [
@@ -601,7 +610,8 @@ fn nerve(args: &Args) {
             // the army over the edge.
             let w = &mut worst[g];
             w.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let pick = |q: f64| w.get(((w.len() as f64 * q) as usize).min(w.len().saturating_sub(1)));
+            let pick =
+                |q: f64| w.get(((w.len() as f64 * q) as usize).min(w.len().saturating_sub(1)));
             let m = &mut nerve_now[g];
             m.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let mpick = |q: f64| {

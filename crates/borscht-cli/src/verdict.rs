@@ -174,19 +174,20 @@ pub fn read(path: &Path) -> Result<Judged, String> {
 /// one muster and trained on at another is about different ground than the
 /// person watching thought they were judging.
 pub fn report(judged: &Judged, cfg: &Config, playing: &str) {
+    let battles = |n: usize| if n == 1 { "battle" } else { "battles" };
     println!(
-        "verdicts: {} battles found wanting, {} found well fought",
+        "verdicts: {} {} found wanting, {} found well fought",
         judged.flagged.len(),
+        battles(judged.flagged.len()),
         judged.approved.len()
     );
     for v in judged.flagged.iter().chain(judged.approved.iter()) {
         let mark = if v.badly { "badly " } else { "well  " };
-        let note = if v.note.is_empty() {
-            String::new()
-        } else {
-            format!("  \"{}\"", v.note)
-        };
-        println!("  {mark} {} on seed {:<10}{note}", v.side, v.seed);
+        let line = format!("  {mark} {} on seed {}", v.side, v.seed);
+        match v.note.is_empty() {
+            true => println!("{line}"),
+            false => println!("{line:<34}\"{}\"", v.note),
+        }
     }
 
     let mismatched = judged
@@ -199,7 +200,7 @@ pub fn report(judged: &Judged, cfg: &Config, playing: &str) {
         println!(
             "  warning: {mismatched} of these were watched at a different muster than this run \
              fights at ({} a side).",
-        cfg.units_per_side
+            cfg.units_per_side
         );
         println!(
             "  the seed names different ground at a different muster, so those judgements are \
@@ -218,9 +219,9 @@ pub fn report(judged: &Judged, cfg: &Config, playing: &str) {
         .filter(|v| v.commander != "unknown" && v.commander != playing)
         .count();
     if elsewhere > 0 {
-        println!(
-            "  note: {elsewhere} of these judged a commander other than the one this build              ships ({playing}). The ground still counts; the judgement was about different play."
-        );
+        println!("  note: {elsewhere} of these judged a commander other than the one this build");
+        println!("  ships ({playing}). The ground still counts, but the judgement was");
+        println!("  passed on different play.");
     }
 
     // The count is the thing that decides whether any of this means anything,
@@ -230,7 +231,11 @@ pub fn report(judged: &Judged, cfg: &Config, playing: &str) {
             "  {} flagged seed{} few enough to overfit to. The final report covers them \
              separately for exactly that reason.\n",
             judged.flagged.len(),
-            if judged.flagged.len() == 1 { " is" } else { "s are" }
+            if judged.flagged.len() == 1 {
+                " is"
+            } else {
+                "s are"
+            }
         );
     } else {
         println!();

@@ -180,9 +180,9 @@ impl Net {
         n.skip(i::HEIGHT_GAIN, o::SCORE, 1.0); // ground above us is worth having
         n.skip(i::COVER, o::SCORE, -0.4); // a formed body wants open ground
         n.skip(i::DISTANCE, o::SCORE, -2.2); // and does not cross the field for it
-        // Without this last one every division scores the same sector highest
-        // and marches to it, which is the single order point this replaced,
-        // wearing six times the machinery.
+                                             // Without this last one every division scores the same sector highest
+                                             // and marches to it, which is the single order point this replaced,
+                                             // wearing six times the machinery.
         n.skip(i::CLAIMED, o::SCORE, -1.5);
 
         // And what to do when it gets there. These are logits, so only their
@@ -312,7 +312,10 @@ mod tests {
 
         let mut breaking = base;
         breaking[input::FOE_ROUTING] = 1.0;
-        assert!(score(&breaking) > score(&base), "should go where they break");
+        assert!(
+            score(&breaking) > score(&base),
+            "should go where they break"
+        );
 
         let mut uphill = base;
         uphill[input::HEIGHT_GAIN] = 1.0;
@@ -336,7 +339,9 @@ mod tests {
         let mut x = features();
         x[input::OWN_BROKEN] = 1.0;
         let out = d.eval(&x);
-        let best = (1..N_OUT).max_by(|&a, &b| out[a].partial_cmp(&out[b]).unwrap()).unwrap();
+        let best = (1..N_OUT)
+            .max_by(|&a, &b| out[a].partial_cmp(&out[b]).unwrap())
+            .unwrap();
         assert_eq!(best, output::WITHDRAW, "logits were {out:?}");
     }
 
@@ -346,7 +351,9 @@ mod tests {
         let mut x = features();
         x[input::OWN_KEPT] = 1.0;
         let out = d.eval(&x);
-        let best = (1..N_OUT).max_by(|&a, &b| out[a].partial_cmp(&out[b]).unwrap()).unwrap();
+        let best = (1..N_OUT)
+            .max_by(|&a, &b| out[a].partial_cmp(&out[b]).unwrap())
+            .unwrap();
         assert_ne!(best, output::WITHDRAW, "logits were {out:?}");
     }
 
@@ -409,7 +416,11 @@ mod tests {
             }
             None => {
                 let d = Net::doctrine();
-                assert_eq!(Net::trained().w, d.w, "no trained weights should mean the doctrine plays");
+                assert_eq!(
+                    Net::trained().w,
+                    d.w,
+                    "no trained weights should mean the doctrine plays"
+                );
             }
         }
     }
