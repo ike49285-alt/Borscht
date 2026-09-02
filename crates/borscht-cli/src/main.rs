@@ -12,6 +12,7 @@ use borscht_core::stats::STAT_NAMES;
 use borscht_core::{Battle, ColorMode, Outcome};
 use std::time::Instant;
 
+mod matchlog;
 mod sweep;
 mod train;
 
@@ -27,7 +28,8 @@ USAGE:
     borscht orders  [--muster N] [--ticks N] [--seed N] [--set key=value]...
     borscht sweep   [--muster N] [--ticks N] [--seeds N] [--set key=value]...
     borscht train   [--muster N] [--ticks N] [--seed N] [--generations N]
-                    [--population N] [--sigma F] [--out FILE]
+                    [--population N] [--sigma F] [--out FILE] [--log DIR]
+    borscht replay  DIR --match ID [--out DIR] [--frames N] [--color MODE]
     borscht params  [--json]
 
 OPTIONS:
@@ -40,6 +42,9 @@ OPTIONS:
     --image-size N   frame edge in pixels
     --color MODE     team | kind | health | morale | division (default team)
     --set key=value  override any parameter; repeatable (`borscht params` lists them)
+    --log DIR        record every battle a training run plays, so any of them
+                     can be replayed afterwards
+    --match ID       which recorded battle to replay
     --seeds N        battles in a sweep, run across cores (default 24)
     --doctrine       sweep with the hand-written commander instead of the
                      trained one, for comparing the two
@@ -68,6 +73,8 @@ struct Args {
     sigma: f32,
     seeds: u64,
     doctrine: bool,
+    log: Option<String>,
+    match_id: Option<u64>,
 }
 
 fn parse() -> Args {
@@ -88,6 +95,8 @@ fn parse() -> Args {
         sigma: 0.08,
         seeds: 24,
         doctrine: false,
+        log: None,
+        match_id: None,
     };
     let mut it = std::env::args().skip(1);
     args.command = it.next().unwrap_or_else(|| usage());
@@ -131,10 +140,17 @@ fn parse() -> Args {
             "--generations" => args.generations = value().parse().unwrap_or(30),
             "--population" => args.population = value().parse().unwrap_or(16),
             "--sigma" => args.sigma = value().parse().unwrap_or(0.08),
+            "--log" => args.log = Some(value()),
+            "--match" => args.match_id = value().parse().ok(),
             "--doctrine" => args.doctrine = true,
             "--quiet" => args.quiet = true,
             "--json" => args.json = true,
             "--help" | "-h" => usage(),
+            // `replay` names its log directory positionally, the way one
+            // reaches for a path: `borscht replay runs/today --match 12`.
+            other if !other.starts_with("--") && args.log.is_none() => {
+                args.log = Some(other.to_string())
+            }
             other => {
                 eprintln!("error: unknown option {other:?}");
                 usage()
@@ -174,6 +190,7 @@ fn main() {
         "battle" | "run" => battle(&args),
         "nerve" => nerve(&args),
         "orders" => orders(&args),
+        "replay" => replay(&args),
         "sweep" => sweep::run(
             &build_config(args.musters.first().copied().or(Some(8_000)), &args.overrides),
             args.seeds,
@@ -192,6 +209,7 @@ fn main() {
             population: args.population,
             sigma: args.sigma,
             out: args.out.clone(),
+            log: args.log.clone(),
         }),
         "params" if args.json => emit_params_js(),
         "params" => list_params(),
@@ -307,6 +325,99 @@ fn bench(args: &Args) {
             1000.0 / ms,
             bytes / (1 << 20)
         );
+    }
+}
+
+// ------------------------------------------------------------------ replay --
+
+/// Fight a recorded battle again and report what happened.
+///
+/// The point of the match log: a training run's twenty thousand battles stop
+/// being a number and become a list you can pull any line out of and watch.
+fn replay(args: &Args) {
+    let Some(dir) = &args.log else {
+        eprintln!("error: replay needs a log directory, e.g. `borscht replay runs/today --match 12`");
+        std::process::exit(2);
+    };
+    let Some(id) = args.match_id else {
+        eprintln!("error: replay needs --match ID");
+        std::process::exit(2);
+    };
+    let recorded = match matchlog::find(std::path::Path::new(dir), id) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let row = recorded.row.clone();
+    println!(
+        "match {id} from {}: seed {}, stream {}, red {} against blue {}",
+        row.phase, row.seed, row.stream, row.red, row.blue
+    );
+
+    // Frames are spread over the battle's recorded length rather than a tick
+    // cap: a replay is the one case where how long the fight ran is known
+    // before it is fought again.
+    let mut canvas = args
+        .out
+        .as_ref()
+        .filter(|_| args.frames > 0)
+        .map(|out| {
+            let _ = std::fs::create_dir_all(out);
+            render::Canvas::new(args.image_size)
+        });
+    let frame_every = (row.ticks / args.frames.max(1) as u64).max(1);
+    let mut frames_written = 0u32;
+
+    let mut b = matchlog::replay(&recorded, |b| {
+        let Some(canvas) = canvas.as_mut() else {
+            return;
+        };
+        if b.tick % frame_every != 0 || frames_written >= args.frames {
+            return;
+        }
+        canvas.draw(b, args.color);
+        let out = args.out.as_ref().expect("a canvas implies an output dir");
+        let _ = std::fs::write(
+            format!("{out}/match{id:06}-{frames_written:03}.png"),
+            canvas.encode(),
+        );
+        frames_written += 1;
+    });
+    let alive = b.army.muster();
+    // The claim the whole record rests on. If a replay disagrees with the row it
+    // came from, the log is decoration and had better say so out loud.
+    let faithful = alive == row.alive && b.tick == row.ticks;
+    println!(
+        "  recorded: {} ticks, red {} blue {}",
+        row.ticks, row.alive[0], row.alive[1]
+    );
+    println!(
+        "  replayed: {} ticks, red {} blue {}   {}",
+        b.tick,
+        alive[0],
+        alive[1],
+        if faithful {
+            "-- identical"
+        } else {
+            "-- DIFFERENT, the log cannot be trusted"
+        }
+    );
+
+    // The last frame is the one worth having whatever else was asked for: it
+    // is how the battle actually ended.
+    if let Some(out) = &args.out {
+        let _ = std::fs::create_dir_all(out);
+        let mut canvas = render::Canvas::new(args.image_size);
+        canvas.draw(&mut b, args.color);
+        let path = format!("{out}/match{id:06}-end.png");
+        let _ = std::fs::write(&path, canvas.encode());
+        println!("  wrote {frames_written} frames and {path}");
+    }
+    if !faithful {
+        std::process::exit(1);
     }
 }
 

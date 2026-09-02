@@ -23,6 +23,7 @@
 //! doctrine it started from, on mirrored seeds, by more than the noise floor" is
 //! the claim that has to be earned.
 
+use crate::matchlog::Log;
 use borscht_core::brain::{Net, LEN};
 use borscht_core::{Battle, Config};
 use rayon::prelude::*;
@@ -32,7 +33,7 @@ use rayon::prelude::*;
 /// Scored on men still holding rather than men still breathing: an army that
 /// has broken has lost the field whether or not it has been caught. The margin
 /// is a share of what a side mustered, so it means the same at any scale.
-fn play(cfg: &Config, seed: u64, trial: u64, red: &Net, blue: &Net, ticks: u32) -> f32 {
+fn play(cfg: &Config, seed: u64, trial: u64, red: &Net, blue: &Net, ticks: u32) -> (f32, Battle) {
     let mut b = Battle::new(*cfg, seed);
     b.doctrine = [*red, *blue];
     // Same ground, same muster, different accidents. Without this the two halves
@@ -51,7 +52,7 @@ fn play(cfg: &Config, seed: u64, trial: u64, red: &Net, blue: &Net, ticks: u32) 
     // A battle where the two sides never came to blows scores nothing, so
     // keeping out of the way is not a strategy that can be learnt.
     if b.stats.red_killed + b.stats.blue_killed < per_side * 0.02 {
-        return 0.0;
+        return (0.0, b);
     }
     // Holding the field is what winning *is*, but on its own it is a brutally
     // noisy signal: outcomes here are bimodal -- a real victory or mutual ruin
@@ -70,7 +71,8 @@ fn play(cfg: &Config, seed: u64, trial: u64, red: &Net, blue: &Net, ticks: u32) 
     // commander to grind rather than to break anybody.
     let hold = (b.stats.red_holding - b.stats.blue_holding) / per_side;
     let butcher = (b.stats.blue_killed - b.stats.red_killed) / per_side;
-    0.5 * hold + 0.5 * butcher
+    let margin = 0.5 * hold + 0.5 * butcher;
+    (margin, b)
 }
 
 /// `a` against `b` on the same ground twice, sides swapped.
@@ -79,20 +81,66 @@ fn play(cfg: &Config, seed: u64, trial: u64, red: &Net, blue: &Net, ticks: u32) 
 /// on which end of the field it was given, and on ground drawn at random that
 /// is most of the variance.
 pub fn duel(cfg: &Config, seed: u64, a: &Net, b: &Net, ticks: u32) -> f32 {
-    (play(cfg, seed, seed * 2, a, b, ticks) - play(cfg, seed, seed * 2 + 1, b, a, ticks)) * 0.5
+    fought(cfg, seed, a, b, ticks).0
+}
+
+/// A mirrored pairing: the same two commanders on the same ground, having
+/// swapped sides, as `(stream, margin to whoever was red, the battle)` each.
+///
+/// Both halves are kept rather than just their average so a match log can name
+/// each battle individually and replay it.
+pub type Pair = [(u64, f32, Battle); 2];
+
+/// The same as [`duel`], handing back both halves so they can be written to a
+/// match log.
+pub fn fought(cfg: &Config, seed: u64, a: &Net, b: &Net, ticks: u32) -> (f32, Pair) {
+    let (first, one) = play(cfg, seed, seed * 2, a, b, ticks);
+    let (second, two) = play(cfg, seed, seed * 2 + 1, b, a, ticks);
+    (
+        (first - second) * 0.5,
+        [(seed * 2, first, one), (seed * 2 + 1, second, two)],
+    )
 }
 
 /// Mean score of `net` against a set of opponents over a set of seeds.
-fn evaluate(cfg: &Config, net: &Net, foes: &[Net], seeds: &[u64], ticks: u32) -> f32 {
+///
+/// Every battle it plays is handed to `log`, if there is one. The battles run
+/// across cores and the log is a single file, so they are collected first and
+/// written after: a record that interleaved rows from four threads would be a
+/// record of nothing in particular.
+fn evaluate(
+    cfg: &Config,
+    net: &Net,
+    foes: &[Net],
+    seeds: &[u64],
+    ticks: u32,
+    mut log: Option<(&mut Log, &str)>,
+) -> f32 {
     let jobs: Vec<(usize, u64)> = foes
         .iter()
         .enumerate()
         .flat_map(|(f, _)| seeds.iter().map(move |&s| (f, s)))
         .collect();
-    let total: f32 = jobs
+    let played: Vec<(usize, f32, Pair)> = jobs
         .par_iter()
-        .map(|&(f, s)| duel(cfg, s, net, &foes[f], ticks))
-        .sum();
+        .map(|&(f, s)| {
+            let (score, halves) = fought(cfg, s, net, &foes[f], ticks);
+            (f, score, halves)
+        })
+        .collect();
+
+    let total: f32 = played.iter().map(|p| p.1).sum();
+    if let Some((log, phase)) = log.as_mut() {
+        for (f, _, halves) in &played {
+            let foe = &foes[*f];
+            // The sides swap between the halves of a mirrored pair, and the row
+            // records who actually fought as red -- otherwise a replay would put
+            // the wrong commander on the wrong end of the field.
+            let [(s1, m1, b1), (s2, m2, b2)] = halves;
+            log.record(phase, *s1 / 2, *s1, net, foe, b1, *m1);
+            log.record(phase, *s2 / 2, *s2, foe, net, b2, *m2);
+        }
+    }
     total / jobs.len().max(1) as f32
 }
 
@@ -116,6 +164,8 @@ pub fn noise_floor(cfg: &Config, net: &Net, seeds: &[u64], ticks: u32) -> (f32, 
 
 pub struct Plan {
     pub cfg: Config,
+    /// Where to keep a record of every battle the run plays, if anywhere.
+    pub log: Option<String>,
     pub seed: u64,
     pub ticks: u32,
     pub generations: u32,
@@ -127,6 +177,16 @@ pub struct Plan {
 pub fn run(plan: &Plan) {
     let mut rng = borscht_core::rng::Rng::new(plan.seed, 0x5EED_C0DE_0001_0007);
     let doctrine = Net::doctrine();
+
+    let mut log = plan.log.as_ref().and_then(|dir| {
+        match Log::create(std::path::Path::new(dir), &plan.cfg, plan.ticks) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                eprintln!("could not open the match log at {dir}: {e}");
+                None
+            }
+        }
+    });
 
     // The population starts as the doctrine and mutations of it rather than as
     // noise. Not to save the search work -- to make the comparison meaningful:
@@ -163,11 +223,23 @@ pub fn run(plan: &Plan) {
         let mut foes = archive.clone();
         foes.push(champion);
 
-        let scored: Vec<(f32, usize)> = population
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (evaluate(&plan.cfg, n, &foes, &seeds, plan.ticks), i))
-            .collect();
+        // Sequential over candidates rather than the iterator chain this used
+        // to be: `evaluate` now borrows the log mutably, and the parallelism
+        // that matters is inside it, across the hundreds of battles one
+        // candidate fights.
+        let phase = format!("gen{gen}");
+        let mut scored: Vec<(f32, usize)> = Vec::with_capacity(population.len());
+        for (i, n) in population.iter().enumerate() {
+            let score = evaluate(
+                &plan.cfg,
+                n,
+                &foes,
+                &seeds,
+                plan.ticks,
+                log.as_mut().map(|l| (l, phase.as_str())),
+            );
+            scored.push((score, i));
+        }
         let mut ranked = scored.clone();
         ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
 
@@ -179,6 +251,7 @@ pub fn run(plan: &Plan) {
             &[doctrine],
             &(0..12).map(|i| 500_000 + i as u64).collect::<Vec<_>>(),
             plan.ticks,
+            log.as_mut().map(|l| (l, "yardstick")),
         );
         println!(
             "{gen:>4} {:>9.4} {:>9.4} {against_doctrine:>+9.4}{}",
@@ -211,7 +284,14 @@ pub fn run(plan: &Plan) {
 
     // The claim, on seeds the search never saw.
     let held_out: Vec<u64> = (0..64).map(|i| 900_000 + i as u64).collect();
-    let verdict = evaluate(&plan.cfg, &champion, &[doctrine], &held_out, plan.ticks);
+    let verdict = evaluate(
+        &plan.cfg,
+        &champion,
+        &[doctrine],
+        &held_out,
+        plan.ticks,
+        log.as_mut().map(|l| (l, "final")),
+    );
     let (_, sd) = noise_floor(&plan.cfg, &doctrine, &held_out, plan.ticks);
     // The verdict is a *mean* over held-out seeds, so what it has to clear is
     // the uncertainty of a mean -- the spread divided by the root of the count
@@ -258,5 +338,12 @@ pub fn run(plan: &Plan) {
             Ok(()) => println!("  wrote {path} ({LEN} weights)"),
             Err(e) => eprintln!("  could not write {path}: {e}"),
         }
+    }
+
+    if let (Some(log), Some(dir)) = (&log, &plan.log) {
+        println!(
+            "\n  {} matches recorded in {dir}; replay any of them with\n    borscht replay {dir} --match <id>",
+            log.matches_written()
+        );
     }
 }
