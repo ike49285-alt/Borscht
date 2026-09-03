@@ -273,7 +273,7 @@ pub extern "C" fn world_size() -> f32 {
 // ------------------------------------------------------------------ kinds --
 
 /// Numbers per kind in the buffer [`kinds`] fills.
-pub const KIND_FIELDS: usize = 15;
+pub const KIND_FIELDS: usize = 23;
 
 /// Describe every kind of unit in the field: what it is made of, and the two
 /// colours it is actually drawn in.
@@ -296,14 +296,10 @@ pub extern "C" fn kinds() -> u32 {
     out.clear();
     let count = b.cfg.kinds.min(borscht_core::army::MAX_ARCHETYPES as u32);
     for kind in 0..count as usize {
-        let t = Battle::build_ramp(b.cfg, kind);
         let a = b.archetypes[0][kind];
-        let name = borscht_core::army::BUILD_NAMES
-            .iter()
-            .position(|n| *n == borscht_core::army::build_name(t))
-            .unwrap_or(0);
+        let build = borscht_core::army::build_of(kind);
         out.extend_from_slice(&[
-            name as f32,
+            kind as f32,
             a.hp,
             a.damage,
             a.reach,
@@ -317,6 +313,16 @@ pub extern "C" fn kinds() -> u32 {
             let (r, g, bl) = Battle::kind_color(b.cfg, team, kind, 1.0);
             out.extend_from_slice(&[r as f32, g as f32, bl as f32]);
         }
+        out.extend_from_slice(&[
+            a.range,
+            a.reload as f32,
+            a.volley,
+            a.charge,
+            a.brace,
+            a.vs_mounted,
+            if a.mounted { 1.0 } else { 0.0 },
+            build.share,
+        ]);
     }
     count
 }
@@ -454,7 +460,7 @@ mod tests {
         fresh();
         let count = kinds() as usize;
         let table = unsafe { core::slice::from_raw_parts(kinds_ptr(), count * KIND_FIELDS) };
-        let names = borscht_core::army::BUILD_NAMES;
+        let names = borscht_core::army::ROSTER;
         let field = |kind: usize, at: usize| table[kind * KIND_FIELDS + at];
 
         for kind in 0..count {

@@ -65,6 +65,32 @@ pub struct Archetype {
     pub nerve: f32,
     /// Body radius, for drawing and for how tightly it packs.
     pub radius: f32,
+
+    // ---- combined arms ----
+    //
+    // Everything below is zero for a plain foot soldier, so a unit that only
+    // fights hand to hand costs nothing to describe and the arms are additions
+    // rather than special cases threaded through the tick.
+    /// How far it can throw a missile, in field units. Zero: it has none.
+    pub range: f32,
+    /// Ticks between volleys. Far longer than a melee cooldown: loosing is
+    /// quick, nocking and drawing again is not, and a siege engine is worse.
+    pub reload: u16,
+    /// Damage one volley carries, spread over whoever is under it.
+    pub volley: f32,
+    /// How wide a volley falls. An arrow storm is a sheaf; a stone is a stone.
+    pub spread: f32,
+    /// How much a blow gains from the speed it is thrown at, as a multiple at
+    /// full gallop. This is what makes a charge a charge: a horseman brought to
+    /// a standstill in a melee is just a man with a longer reach.
+    pub charge: f32,
+    /// How much of an attacker's charge this unit takes out of it, 0 to 1. A
+    /// braced spear wall is the answer to cavalry, and this is the whole of why.
+    pub brace: f32,
+    /// Multiplier on blows this unit strikes against a mounted man.
+    pub vs_mounted: f32,
+    /// Whether this is a horseman -- what `vs_mounted` and `brace` key off.
+    pub mounted: bool,
 }
 
 impl Default for Archetype {
@@ -78,50 +104,230 @@ impl Default for Archetype {
             armour: 0.15,
             nerve: 0.30,
             radius: 0.5,
+            range: 0.0,
+            reload: 0,
+            volley: 0.0,
+            spread: 0.0,
+            charge: 0.0,
+            brace: 0.0,
+            vs_mounted: 1.0,
+            mounted: false,
         }
     }
 }
 
-/// What each step of the build ramp is called.
+/// Where a body of this arm belongs when the army forms up.
 ///
-/// Names rather than numbers, because `#2` tells a viewer nothing and "heavy"
-/// tells them most of what there is to know. Deliberately descriptive of where
-/// a kind sits on the ramp rather than a taxonomy: the kinds are variations on
-/// a soldier, the count is configurable from one to eight, and inventing five
-/// species to fill eight slots would be claiming a distinction the simulation
-/// does not make.
-pub const BUILD_NAMES: [&str; 5] = ["skirmisher", "light", "line", "heavy", "armoured"];
+/// A commander can move a division anywhere once the battle starts; this is
+/// only where it stands before anyone has given an order. It matters more than
+/// it sounds, because an army that deploys its catapults in the front rank has
+/// lost them before the first order is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum Station {
+    /// In the line of battle, shoulder to shoulder across the front.
+    Line,
+    /// Behind the line, shooting over it.
+    Rear,
+    /// On the flanks, where the room to move is.
+    Wing,
+}
 
-/// Which of [`BUILD_NAMES`] describes a build at ramp position `t`.
-pub fn build_name(t: f32) -> &'static str {
-    let at = (t * BUILD_NAMES.len() as f32) as usize;
-    BUILD_NAMES[at.min(BUILD_NAMES.len() - 1)]
+/// One arm: what it is called, what it is made of, and how much of an army is it.
+#[derive(Clone, Copy, Debug)]
+pub struct Build {
+    pub name: &'static str,
+    pub what: Archetype,
+    /// Share of a side made of this arm, relative to the other arms in play.
+    /// Normalised against whichever arms the muster actually fields, so
+    /// dropping catapults does not leave a hole in the army.
+    pub share: f32,
+    pub station: Station,
+    /// One line on what it is for, shown in the key on the page.
+    pub note: &'static str,
+}
+
+/// The arms, in the order they enter an army.
+///
+/// `kinds` says how many of these are in play, so `kinds = 1` is the plain
+/// shield wall this simulator started as and `kinds = 5` is the full combined
+/// arms. The order is therefore not arbitrary: each arm added has to leave a
+/// coherent army behind it, which is why the counter to cavalry stands second
+/// and cavalry itself does not appear until the answer to it is already there.
+///
+/// # The cycle
+///
+/// - **Horse** rides down anything that shoots, because a charge that lands is
+///   worth several times a standing blow and archers are frail up close.
+/// - **Spears** stop horse, by taking the charge out of it and striking hard at
+///   a mounted man.
+/// - **Bows and engines** beat spears and foot, who cannot answer at ninety
+///   paces and have to walk the whole way under it.
+/// - **Foot** hold the line while the others do their work.
+///
+/// Nothing here enforces that cycle: it falls out of reach, speed, `charge`,
+/// `brace` and `vs_mounted`, which is the point. A table of "beats" would be a
+/// rule; this is a consequence.
+pub const ROSTER: [Build; 5] = [
+    Build {
+        name: "foot",
+        share: 0.40,
+        station: Station::Line,
+        note: "holds the line",
+        what: Archetype {
+            hp: 100.0,
+            damage: 12.0,
+            reach: 1.2,
+            cooldown: 12,
+            speed: 0.30,
+            armour: 0.15,
+            nerve: 0.32,
+            radius: 0.5,
+            ..PLAIN
+        },
+    },
+    Build {
+        name: "spear",
+        share: 0.20,
+        station: Station::Line,
+        note: "braces against horse",
+        what: Archetype {
+            hp: 95.0,
+            damage: 10.0,
+            // Long enough to strike a horseman before he strikes back, which is
+            // the whole argument for carrying one.
+            reach: 2.2,
+            cooldown: 14,
+            speed: 0.26,
+            armour: 0.18,
+            nerve: 0.36,
+            radius: 0.5,
+            brace: 0.88,
+            vs_mounted: 3.0,
+            ..PLAIN
+        },
+    },
+    Build {
+        name: "archer",
+        share: 0.25,
+        station: Station::Rear,
+        note: "kills at ninety paces, dies up close",
+        what: Archetype {
+            hp: 70.0,
+            damage: 5.0,
+            reach: 1.0,
+            cooldown: 16,
+            speed: 0.32,
+            armour: 0.05,
+            nerve: 0.22,
+            radius: 0.45,
+            range: 90.0,
+            reload: 45,
+            // Chosen by sweeping whole battles, not by reasoning about arrows.
+            // A volley carries a total that is shared among whoever is under
+            // it, so what looks like a small number is a body of archers
+            // killing about a tenth of everyone who falls. Higher was tried:
+            // at four times this, missiles account for a third of the dead and
+            // the battles stop being battles -- both sides shoot each other to
+            // pieces regardless of who is winning, mutual ruin goes from one in
+            // twelve to four, and the median engagement doubles in length.
+            volley: 10.0,
+            spread: 5.0,
+            ..PLAIN
+        },
+    },
+    Build {
+        name: "horse",
+        share: 0.12,
+        station: Station::Wing,
+        note: "charge is everything; stalled, it is just a man",
+        what: Archetype {
+            hp: 130.0,
+            damage: 11.0,
+            reach: 1.6,
+            cooldown: 13,
+            // Fast enough to outrun a volley already loosed, which is what
+            // makes riding down archers possible at all.
+            speed: 0.75,
+            armour: 0.25,
+            nerve: 0.40,
+            radius: 0.8,
+            charge: 2.4,
+            mounted: true,
+            ..PLAIN
+        },
+    },
+    Build {
+        name: "catapult",
+        share: 0.03,
+        station: Station::Rear,
+        note: "reaches the whole field, slowly",
+        what: Archetype {
+            hp: 140.0,
+            damage: 3.0,
+            reach: 1.0,
+            cooldown: 30,
+            speed: 0.06,
+            armour: 0.10,
+            nerve: 0.30,
+            radius: 1.4,
+            range: 260.0,
+            reload: 220,
+            volley: 180.0,
+            spread: 16.0,
+            ..PLAIN
+        },
+    },
+];
+
+/// A soldier with none of the combined-arms trimmings, for the roster to build
+/// on. Spelled out because `..Default::default()` is not permitted in a
+/// `const`, and the roster has to be a `const` so the key on the page and the
+/// battle cannot disagree about what an archer is.
+const PLAIN: Archetype = Archetype {
+    hp: 100.0,
+    damage: 12.0,
+    reach: 1.2,
+    cooldown: 12,
+    speed: 0.30,
+    armour: 0.15,
+    nerve: 0.30,
+    radius: 0.5,
+    range: 0.0,
+    reload: 0,
+    volley: 0.0,
+    spread: 0.0,
+    charge: 0.0,
+    brace: 0.0,
+    vs_mounted: 1.0,
+    mounted: false,
+};
+
+/// How many arms an army of `kinds` kinds actually fields.
+pub fn arms_in_play(kinds: u32) -> usize {
+    (kinds.max(1) as usize).min(ROSTER.len())
+}
+
+/// What kind `kind` is, when `kinds` arms are in play.
+pub fn build_of(kind: usize) -> &'static Build {
+    &ROSTER[kind.min(ROSTER.len() - 1)]
+}
+
+/// What each arm is called. Kept as a free function because the page's key is
+/// generated from it and a second copy of these names would drift.
+pub fn build_name(kind: usize) -> &'static str {
+    build_of(kind).name
 }
 
 impl Archetype {
-    /// The kind of soldier `t` of the way along the build ramp.
-    ///
-    /// `t` runs 0 to 1: fast, fragile and hard-hitting at one end, slow,
-    /// armoured and enduring at the other. The spread is deliberately modest —
-    /// these are variations on a soldier, not separate species — and every
-    /// figure is a multiple of [`Archetype::default`], so the ramp has one
-    /// centre of gravity rather than eight hand-tuned tables.
-    ///
-    /// Lives here rather than inside `Battle::deploy` because the page draws a
-    /// key from it. A key computed from a second copy of these numbers would go
-    /// quietly wrong the first time one of them changed.
-    pub fn for_build(t: f32) -> Archetype {
-        let base = Archetype::default();
-        Archetype {
-            hp: base.hp * (0.7 + 0.8 * t),
-            damage: base.damage * (1.25 - 0.5 * t),
-            reach: base.reach * (0.9 + 0.5 * t),
-            cooldown: (base.cooldown as f32 * (0.8 + 0.5 * t)) as u8,
-            speed: base.speed * (1.25 - 0.55 * t),
-            armour: crate::fastmath::clamp(base.armour + 0.35 * t, 0.0, 0.9),
-            nerve: crate::fastmath::clamp(base.nerve + 0.15 * t, 0.0, 0.95),
-            radius: base.radius * (0.85 + 0.5 * t),
-        }
+    /// The arm at roster position `kind`.
+    pub fn of(kind: usize) -> Archetype {
+        build_of(kind).what
+    }
+
+    /// Whether this unit fights at a distance.
+    pub fn shoots(&self) -> bool {
+        self.range > 0.0 && self.volley > 0.0
     }
 
     /// What one unit of this kind is worth to the side that owns it.
@@ -129,8 +335,18 @@ impl Archetype {
     /// Used to weight the per-cell strength field, so a line of heavy infantry
     /// reads as stronger than the same number of skirmishers rather than the
     /// field counting noses.
+    ///
+    /// Missile troops count what they throw as well as what they swing, or a
+    /// battery of catapults would read as the weakest thing on the field and a
+    /// commander sensing strength would walk straight past it.
     pub fn worth(&self) -> f32 {
-        self.hp * self.damage / (self.cooldown.max(1) as f32)
+        let melee = self.hp * self.damage / (self.cooldown.max(1) as f32);
+        let shot = if self.shoots() {
+            self.hp * self.volley / (self.reload.max(1) as f32)
+        } else {
+            0.0
+        };
+        melee + shot
     }
 }
 
@@ -161,6 +377,9 @@ pub struct Army {
     /// written a month later. It caps rather than wrapping, since all anyone
     /// asks of it is whether enough time has passed.
     pub broken_for: Vec<u8>,
+    /// Ticks until this man can loose again. Zero for anyone who carries no
+    /// missile, and never read for them.
+    pub reload: Vec<u16>,
     /// Ticks of steadiness a man has left after re-forming, during which he
     /// cannot break again.
     ///
@@ -202,6 +421,7 @@ impl Army {
             division: vec![0u8; capacity],
             cooldown: vec![0u8; capacity],
             broken_for: vec![0u8; capacity],
+            reload: vec![0u16; capacity],
             steady_for: vec![0u8; capacity],
             flags: vec![0u8; capacity],
             target: vec![NO_TARGET; capacity],
@@ -280,6 +500,9 @@ impl Army {
         self.division[i] = division;
         self.cooldown[i] = 0;
         self.broken_for[i] = 0;
+        // Staggered, so a body of archers does not loose as one man and then
+        // stand idle together for the whole reload.
+        self.reload[i] = 0;
         self.steady_for[i] = 0;
         self.flags[i] = 0;
         self.target[i] = NO_TARGET;
@@ -332,6 +555,7 @@ impl Army {
                 self.division[i] = self.division[last];
                 self.cooldown[i] = self.cooldown[last];
                 self.broken_for[i] = self.broken_for[last];
+                self.reload[i] = self.reload[last];
                 self.steady_for[i] = self.steady_for[last];
                 self.flags[i] = self.flags[last];
             }
@@ -470,64 +694,157 @@ mod tests {
         assert_eq!(army.holding(0), 5);
     }
 
-    /// The four builds an army actually fields, pinned to the values they have.
+    /// The counter cycle, asserted on the numbers rather than trusted to the
+    /// prose that describes it.
     ///
-    /// This exists because the ramp was moved out of `Battle::deploy` so the
-    /// page could draw a key from it, and a move that quietly changed a number
-    /// would change the game a commander was trained against without changing
-    /// anything that looks like the game. The numbers below were read off the
-    /// code before the move; if one of them is meant to change, this test is
-    /// the place to say so on purpose.
+    /// Nothing in this engine says "spears beat horse". It has to fall out of
+    /// reach, speed, charge, brace and vs_mounted, and if one of those is
+    /// retuned into meaninglessness the roster will still read as combined arms
+    /// while playing as a mob. This is the test that notices.
     #[test]
-    fn the_build_ramp_is_where_it_has_always_been() {
-        let want = [
-            // t,    hp,    damage, reach, cooldown, speed,  armour, nerve
-            (0.00, 70.0, 15.00, 1.080, 9u8, 0.3750, 0.1500, 0.3000),
-            (0.25, 90.0, 13.50, 1.230, 11, 0.3337, 0.2375, 0.3375),
-            (0.50, 110.0, 12.00, 1.380, 12, 0.2925, 0.3250, 0.3750),
-            (0.75, 130.0, 10.50, 1.530, 14, 0.2512, 0.4125, 0.4125),
-        ];
-        for (t, hp, damage, reach, cooldown, speed, armour, nerve) in want {
-            let a = Archetype::for_build(t);
-            let close = |got: f32, want: f32, what: &str| {
+    fn the_arms_actually_counter_each_other() {
+        let foot = Archetype::of(0);
+        let spear = Archetype::of(1);
+        let archer = Archetype::of(2);
+        let horse = Archetype::of(3);
+        let engine = Archetype::of(4);
+
+        // Horse rides down what shoots: fast enough to cross a volley's flight,
+        // and a charge that lands is worth several standing blows.
+        assert!(
+            horse.speed > archer.speed * 2.0,
+            "horse cannot catch archers"
+        );
+        assert!(
+            horse.charge > 1.0,
+            "a charge is worth no more than standing still"
+        );
+        assert!(
+            archer.hp < foot.hp && archer.armour < foot.armour,
+            "archers are not frail"
+        );
+
+        // Spears stop horse, and are the only arm that does.
+        assert!(spear.brace > 0.5, "a spear wall does not blunt a charge");
+        assert!(
+            spear.vs_mounted > 1.5,
+            "a spear is no better against a horse than a sword is"
+        );
+        assert!(
+            spear.reach > foot.reach,
+            "a spear is no longer than a sword"
+        );
+        assert_eq!(
+            foot.brace, 0.0,
+            "foot brace against cavalry, so spears are not special"
+        );
+        assert_eq!(archer.brace, 0.0);
+
+        // Missiles answer what cannot answer back.
+        assert!(archer.shoots() && engine.shoots());
+        assert!(!foot.shoots() && !spear.shoots() && !horse.shoots());
+        assert!(
+            archer.range > foot.reach * 20.0,
+            "a bow barely outranges a sword"
+        );
+        assert!(
+            engine.range > archer.range,
+            "an engine does not outrange a bow"
+        );
+        assert!(
+            engine.reload > archer.reload * 2,
+            "an engine reloads like a bow"
+        );
+        assert!(
+            archer.damage < foot.damage * 0.6,
+            "archers are as good as foot up close"
+        );
+
+        // And only horse is mounted, or the counter has nothing to key off.
+        assert!(horse.mounted);
+        for kind in [0, 1, 2, 4] {
+            assert!(!Archetype::of(kind).mounted, "kind {kind} is on a horse");
+        }
+    }
+
+    /// A missile arm is worth something to a commander sensing strength.
+    ///
+    /// The strength field is how a commander perceives the enemy at all, and it
+    /// is weighted by [`Archetype::worth`]. Judged on the melee alone a siege
+    /// engine is the feeblest thing on the field -- three damage every thirty
+    /// ticks -- and a commander reading that field would march past a battery
+    /// as though it were empty ground.
+    ///
+    /// This does not claim an engine outweighs a swordsman. It does not: the
+    /// crew are not fighters, and a volley's damage is spread over everyone
+    /// under it rather than driven into one man. What it claims is that what a
+    /// unit throws is counted at all.
+    #[test]
+    fn what_a_unit_throws_counts_toward_what_it_is_worth() {
+        for kind in 0..ROSTER.len() {
+            let a = Archetype::of(kind);
+            let melee_only = a.hp * a.damage / a.cooldown.max(1) as f32;
+            assert!(
+                a.worth() >= melee_only,
+                "{} is worth less for shooting",
+                build_name(kind)
+            );
+            if a.shoots() {
                 assert!(
-                    (got - want).abs() < 5e-3,
-                    "build {t}: {what} is {got}, was {want}"
+                    a.worth() > melee_only * 1.15,
+                    "{} throws for a living and it counts for nothing",
+                    build_name(kind)
                 );
-            };
-            close(a.hp, hp, "hp");
-            close(a.damage, damage, "damage");
-            close(a.reach, reach, "reach");
-            close(a.speed, speed, "speed");
-            close(a.armour, armour, "armour");
-            close(a.nerve, nerve, "nerve");
-            assert_eq!(a.cooldown, cooldown, "build {t}: cooldown");
+            } else {
+                assert_eq!(a.worth(), melee_only);
+            }
+        }
+        // Nothing reads as empty ground.
+        let foot = Archetype::of(0).worth();
+        for kind in 0..ROSTER.len() {
+            let w = Archetype::of(kind).worth();
+            assert!(
+                w > foot * 0.2,
+                "{} reads as {:.0}% of a swordsman -- a commander would walk past it",
+                build_name(kind),
+                w / foot * 100.0
+            );
         }
     }
 
-    /// Heavier is slower, tougher and hits less often. If the ramp ever stops
-    /// meaning that, the names on the key are lying.
     #[test]
-    fn the_ramp_runs_from_quick_and_fragile_to_slow_and_armoured() {
-        let light = Archetype::for_build(0.0);
-        let heavy = Archetype::for_build(0.75);
-        assert!(heavy.hp > light.hp);
-        assert!(heavy.armour > light.armour);
-        assert!(heavy.nerve > light.nerve);
-        assert!(heavy.speed < light.speed);
-        assert!(heavy.damage < light.damage);
-        assert!(heavy.cooldown > light.cooldown);
+    fn every_arm_has_a_name_and_a_share_of_the_army() {
+        let mut seen = std::collections::HashSet::new();
+        for (kind, build) in ROSTER.iter().enumerate() {
+            assert!(!build.name.is_empty());
+            assert!(
+                !build.note.is_empty(),
+                "{} has nothing said about it",
+                build.name
+            );
+            assert!(build.share > 0.0, "{} is none of the army", build.name);
+            assert!(seen.insert(build.name), "two arms called {}", build.name);
+            assert_eq!(build_name(kind), build.name);
+        }
+        // Past the end of the roster rather than panicking: the count is
+        // configurable and a name is not worth a crash.
+        assert_eq!(build_name(99), ROSTER[ROSTER.len() - 1].name);
+        assert_eq!(arms_in_play(0), 1, "an army with no arms at all");
+        assert_eq!(arms_in_play(99), ROSTER.len());
     }
 
+    /// The roster's order is load-bearing: `kinds` truncates it, so each prefix
+    /// has to be an army somebody could field.
     #[test]
-    fn every_build_has_a_name_and_the_ends_differ() {
-        assert_eq!(build_name(0.0), "skirmisher");
-        assert_eq!(build_name(1.0), "armoured");
-        // Off the end rather than panicking: `t` comes from a configurable
-        // count and a name is not worth a crash.
-        assert_eq!(build_name(9.0), "armoured");
-        for kind in 0..8 {
-            assert!(!build_name(kind as f32 / 8.0).is_empty());
-        }
+    fn every_prefix_of_the_roster_is_a_coherent_army() {
+        // One arm is the shield wall this simulator started as.
+        assert!(!Archetype::of(0).shoots() && !Archetype::of(0).mounted);
+        // The answer to cavalry is in the army before cavalry is.
+        let spear_at = ROSTER.iter().position(|b| b.what.brace > 0.5).unwrap();
+        let horse_at = ROSTER.iter().position(|b| b.what.mounted).unwrap();
+        assert!(
+            spear_at < horse_at,
+            "cavalry enters the roster at {horse_at}, before its counter at {spear_at}"
+        );
     }
 }

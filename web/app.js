@@ -236,17 +236,29 @@ function drawChart(canvasEl, keys, colors, { stacked = false } = {}) {
 
 let kinds = [];
 
-/// The distinguishing numbers, in the order they tell the story: what it can
-/// take, what it deals out, and how it moves.
+/// What each arm is for, in the order it answers "why would I field this".
+///
+/// Not every number the engine has -- the ones that separate the arms from each
+/// other. Reach and range say at what distance it fights, and the rest say what
+/// happens when it gets there.
 const KIND_COLUMNS = [
+  ['share', (k) => `${Math.round(k.share * 100)}%`],
   ['hp', (k) => Math.round(k.hp)],
-  ['dmg', (k) => k.damage.toFixed(1)],
-  ['reach', (k) => k.reach.toFixed(2)],
-  ['every', (k) => `${Math.round(k.cooldown)}t`],
-  ['speed', (k) => k.speed.toFixed(2)],
   ['armour', (k) => `${Math.round(k.armour * 100)}%`],
-  ['nerve', (k) => k.nerve.toFixed(2)],
+  ['speed', (k) => k.speed.toFixed(2)],
+  // A missile arm fights at its range; everyone else at arm's length.
+  ['reach', (k) => (k.range > 0 ? `${Math.round(k.range)}` : k.reach.toFixed(1))],
+  ['dmg', (k) => (k.range > 0 ? `${Math.round(k.volley)}/volley` : k.damage.toFixed(1))],
+  ['every', (k) => `${Math.round(k.range > 0 ? k.reload : k.cooldown)}t`],
 ];
+
+/// The one thing about an arm that is not in the numbers: what it counters.
+function kindTrait(k) {
+  if (k.charge > 0) return `charge x${(1 + k.charge).toFixed(1)} at the gallop`;
+  if (k.brace > 0.5) return `blunts a charge by ${Math.round(k.brace * 100)}%, x${k.vsMounted.toFixed(1)} vs horse`;
+  if (k.range > 0) return `shoots over the line`;
+  return '';
+}
 
 function showKinds(table) {
   kinds = table ?? [];
@@ -259,20 +271,36 @@ function showKinds(table) {
   const head = `<tr><td></td><td></td>${KIND_COLUMNS.map(
     ([name]) => `<td class="nu">${name}</td>`,
   ).join('')}</tr>`;
-  const rows = kinds.map((k) => {
+  const rows = kinds.flatMap((k) => {
     const chips = `<span class="chip" style="background:${k.red}"></span><span class="chip" style="background:${k.blue}"></span>`;
     const cells = KIND_COLUMNS.map(([, get]) => `<td class="nu">${get(k)}</td>`).join('');
-    return `<tr><td class="sw">${chips}</td><td class="nm">#${k.id} ${k.name}</td>${cells}</tr>`;
+    const out = [
+      `<tr><td class="sw">${chips}</td><td class="nm">#${k.id} ${k.name}</td>${cells}</tr>`,
+    ];
+    const trait = kindTrait(k);
+    const line = [k.note, trait].filter(Boolean).join(' — ');
+    if (line) {
+      out.push(
+        `<tr class="why"><td></td><td colspan="${KIND_COLUMNS.length + 1}">${line}</td></tr>`,
+      );
+    }
+    return out;
   });
   body.innerHTML = head + rows.join('');
-  const light = kinds[0];
-  const heavy = kinds[kinds.length - 1];
-  $('kinds-note').textContent =
-    kinds.length > 1
-      ? `A ${light.name} is ${(light.speed / heavy.speed).toFixed(1)}x the speed of ` +
-        `a ${heavy.name} and hits ${(heavy.cooldown / light.cooldown).toFixed(1)}x as often; ` +
-        `the ${heavy.name} takes ${(heavy.hp / light.hp).toFixed(1)}x the punishment.`
-      : 'One kind of soldier on the field.';
+
+  // The cycle, said once, because a table of numbers does not say it.
+  const has = (test) => kinds.some(test);
+  const cycle = [];
+  if (has((k) => k.charge > 0) && has((k) => k.range > 0)) {
+    cycle.push('horse ride down what shoots');
+  }
+  if (has((k) => k.brace > 0.5) && has((k) => k.charge > 0)) {
+    cycle.push('spears stop horse');
+  }
+  if (has((k) => k.range > 0)) {
+    cycle.push('and bows kill what has to walk to them');
+  }
+  $('kinds-note').textContent = cycle.length > 1 ? `${cycle.join(', ')}.` : '';
 }
 
 /// Matches `Outcome` in the core, and the `outcome` export in the wasm ABI.

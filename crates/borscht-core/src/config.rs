@@ -92,8 +92,34 @@ config_params! {
     max_units: u32 = 200_000, "field", 100.0, 4_000_000.0;
     /// Units each side musters.
     units_per_side: u32 = 40_000, "field", 10.0, 2_000_000.0;
-    /// Kinds of unit each side fields.
-    kinds: u32 = 4, "field", 1.0, 8.0;
+    /// Arms each side fields, taken from the top of the roster.
+    ///
+    /// 1 is the plain shield wall this simulator started as; 5 is foot, spears,
+    /// archers, horse and engines. The roster is ordered so that every prefix
+    /// is an army somebody could field -- the answer to cavalry enters before
+    /// cavalry does.
+    kinds: u32 = 5, "field", 1.0, 8.0;
+    /// How fast a missile travels, in field units a tick.
+    ///
+    /// This is the whole of why cavalry can ride down archers. A volley lands
+    /// where it was aimed rather than following anybody, so the slower the
+    /// missile the further a fast target has moved by the time it arrives: at
+    /// 5 a tick a ninety-pace shot is eighteen ticks in the air, in which foot
+    /// travel five paces and horse travel thirteen.
+    missile_speed: f32 = 5.0, "combat", 0.5, 60.0;
+    /// How hard missiles hit, as a multiple of what the roster says.
+    ///
+    /// A single knob over every missile arm, because what matters is not what an
+    /// arrow does but what share of a battle is decided at a distance -- and
+    /// that is a balance question to be measured against whole battles rather
+    /// than reasoned about one arrow at a time. At 0 the missile arms are
+    /// present and useless; the default was chosen by sweeping it.
+    missile_lethality: f32 = 1.0, "combat", 0.0, 20.0;
+    /// How much woodland shelters what is standing under it from missiles.
+    ///
+    /// The other half of what cover is for. Woods already hide men from being
+    /// sensed; this makes them somewhere worth standing when the arrows come.
+    cover_shelter: f32 = 0.7, "combat", 0.0, 1.0;
     /// Bodies each side is divided into, each with its own orders.
     divisions: u32 = 6, "command", 1.0, 8.0;
     /// Of those, how many are drawn up behind the line and held back.
@@ -624,7 +650,9 @@ mod tests {
         let base = Config::default();
         let want = base.press_limit / (base.cell_size() * base.cell_size());
         let want_cohesion = base.cohesion_full / (base.cell_size() * base.cell_size());
-        for target in [2_000u32, 8_000, 12_000, 20_000, 24_000, 40_000, 200_000, 1_000_000] {
+        for target in [
+            2_000u32, 8_000, 12_000, 20_000, 24_000, 40_000, 200_000, 1_000_000,
+        ] {
             let c = Config::for_muster(target);
             let area = c.cell_size() * c.cell_size();
             let got = c.press_per_cell() / area;

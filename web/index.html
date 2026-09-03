@@ -149,6 +149,7 @@
   #kinds .chip + .chip { margin-left: 2px; }
   #kinds td.nm { color: var(--ink); }
   #kinds td.nu { text-align: right; color: var(--muted); }
+  #kinds tr.why td { color: var(--muted); font-size: 10px; padding-bottom: 4px; opacity: .85; }
   canvas.chart { width: 100%; height: 76px; display: block; }
   .legend { display: flex; flex-direction: column; gap: 3px; font-family: var(--mono); font-size: 11px; }
   .legend .item { display: flex; align-items: center; gap: 6px; }
@@ -284,7 +285,7 @@
 
     <div class="card">
       <h2>Unit types</h2>
-      <div class="hint">Both armies field the same builds. Colour by <b>kind</b> to see them on the field.</div>
+      <div class="hint">Both armies field the same arms. Colour by <b>kind</b> to see them on the field.</div>
       <table id="kinds"></table>
       <div class="hint" id="kinds-note"></div>
     </div>

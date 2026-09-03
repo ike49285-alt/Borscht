@@ -182,6 +182,12 @@ pub struct Grid {
     /// count because a wounded unit should pull less weight in the decision to
     /// advance than a fresh one.
     pub strength: [Vec<f32>; TEAMS],
+    /// Of that strength, how much of it is on horseback.
+    ///
+    /// A separate field rather than something read off the units, because
+    /// everything a commander senses is sensed as a field -- and "where is
+    /// their cavalry" is the question a spear wall exists to answer.
+    pub mounted: [Vec<f32>; TEAMS],
     /// Head count per cell, per side.
     pub count: [Vec<f32>; TEAMS],
     /// Units killed in this cell recently, per side, decaying over a few ticks.
@@ -226,6 +232,7 @@ impl Grid {
             },
             units: Buckets::default(),
             strength: zeros(),
+            mounted: zeros(),
             count: zeros(),
             losses: zeros(),
             routing: zeros(),
@@ -317,6 +324,7 @@ impl Grid {
     pub fn clear_fields(&mut self) {
         for t in 0..TEAMS {
             self.strength[t].fill(0.0);
+            self.mounted[t].fill(0.0);
             self.count[t].fill(0.0);
             self.routing[t].fill(0.0);
         }

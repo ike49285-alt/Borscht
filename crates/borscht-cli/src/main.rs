@@ -315,9 +315,16 @@ fn emit_params_js() {
     // What each step of the build ramp is called. Generated rather than typed
     // into the page for the same reason the parameters are: one definition, in
     // the core, and no second copy to fall behind it.
+    // The roster, so the page's key names the arms and says what each is for
+    // without a second copy of either.
     println!("export const BUILD_NAMES = [");
-    for name in borscht_core::army::BUILD_NAMES {
-        println!("  {name:?},");
+    for build in borscht_core::army::ROSTER {
+        println!("  {:?},", build.name);
+    }
+    println!("];");
+    println!("export const BUILD_NOTES = [");
+    for build in borscht_core::army::ROSTER {
+        println!("  {:?},", build.note);
     }
     println!("];");
 }
@@ -731,6 +738,11 @@ fn battle(args: &Args) {
     let cfg = build_config(args.musters.first().copied(), &args.overrides);
     let mut b = Battle::new(cfg, args.seed);
     let started = b.started();
+    // Taken before a blow is struck: what each arm brought to the field.
+    let mut mustered_by = [[0u32; 8]; 2];
+    for i in 0..b.army.len() {
+        mustered_by[b.army.team[i] as usize][b.army.kind[i] as usize] += 1;
+    }
 
     let mut csv = String::from("tick,");
     csv.push_str(&STAT_NAMES.join(","));
@@ -898,6 +910,45 @@ fn battle(args: &Args) {
             100.0 * fighting as f32 / total as f32,
             100.0 * running as f32 / total as f32
         );
+
+        // What each arm did and what it cost, which is the only way to see
+        // whether combined arms is combined arms or five kinds of swordsman.
+        //
+        // The question a roster cannot answer on its own: are the cavalry
+        // getting among the archers, are the spears where the horse is, is
+        // anything being decided at a distance? An arm that musters and dies at
+        // the same rate as every other arm is not playing a different game, it
+        // is wearing a different colour.
+        let arms = borscht_core::army::arms_in_play(b.cfg.kinds);
+        if arms > 1 {
+            let shot: u32 = c.shot_kills.iter().sum();
+            println!("\n  ARMS");
+            println!(
+                "    volleys loosed {} + {}, killed {shot} ({:.0}% of the dead)",
+                c.volleys[0],
+                c.volleys[1],
+                100.0 * shot as f32 / total as f32
+            );
+            println!(
+                "    {:<10} {:>9} {:>9} {:>8}",
+                "arm", "mustered", "standing", "lost"
+            );
+            let mut alive_by = [[0u32; 8]; 2];
+            for i in 0..b.army.len() {
+                if b.army.alive(i) {
+                    alive_by[b.army.team[i] as usize][b.army.kind[i] as usize] += 1;
+                }
+            }
+            for kind in 0..arms {
+                let mustered: u32 = mustered_by[0][kind] + mustered_by[1][kind];
+                let standing: u32 = alive_by[0][kind] + alive_by[1][kind];
+                println!(
+                    "    {:<10} {mustered:>9} {standing:>9} {:>7.0}%",
+                    borscht_core::army::build_name(kind),
+                    100.0 * (mustered.saturating_sub(standing)) as f32 / mustered.max(1) as f32
+                );
+            }
+        }
     }
 
     if let Some(dir) = &args.out {

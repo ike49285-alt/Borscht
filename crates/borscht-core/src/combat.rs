@@ -154,6 +154,42 @@ pub fn engage(army: &mut Army, grid: &Grid, i: usize, s: Strike) -> Option<Blow>
     })
 }
 
+/// What a blow is multiplied by for who is throwing it and who is taking it.
+///
+/// Three things, and between them they are the whole counter cycle:
+///
+/// **The charge.** A horseman's blow is worth what he brings to it, and what he
+/// brings is speed. At a standstill he is a man with a longer reach; at a
+/// gallop he is several times that. This is why cavalry has to be *used* rather
+/// than parked in the line — a body of horse held in contact loses the only
+/// thing that made it worth having, and no rule says so, the arithmetic does.
+///
+/// **The brace.** A spear wall takes the charge out of a charge. Not the blow —
+/// a horseman still fights — but the multiplier, which is the part that kills.
+///
+/// **The spear.** Long enough to reach a rider before he reaches you, and it is
+/// worth more against him than against a man on foot.
+///
+/// `speed` is how fast the attacker is actually moving, not his top speed.
+#[inline]
+pub fn weight_of_blow(
+    attacker: &crate::army::Archetype,
+    defender: &crate::army::Archetype,
+    speed: f32,
+) -> f32 {
+    let mut w = 1.0;
+    if attacker.charge > 0.0 && attacker.speed > 0.0 {
+        let momentum = (speed / attacker.speed).clamp(0.0, 1.0);
+        // Braced men take the charge out of it, not the man out of the saddle.
+        let charge = attacker.charge * (1.0 - defender.brace.clamp(0.0, 1.0));
+        w *= 1.0 + charge * momentum;
+    }
+    if defender.mounted {
+        w *= attacker.vs_mounted.max(0.0);
+    }
+    w
+}
+
 /// A blow from the side or behind lands harder.
 ///
 /// This is most of why flanking is worth doing, and it costs one dot product.
@@ -175,6 +211,93 @@ fn flank_bonus(army: &Army, attacker: usize, target: usize) -> f32 {
 mod tests {
     use super::*;
     use crate::army::Archetype;
+
+    /// How long one of these takes to kill one of those, in ticks, when both
+    /// stand and fight. The only honest way to ask whether an arm counters
+    /// another: not what the multiplier is, but who is left standing.
+    fn ticks_to_kill(attacker: &Archetype, defender: &Archetype, speed: f32) -> f32 {
+        let per_blow =
+            attacker.damage * weight_of_blow(attacker, defender, speed) * (1.0 - defender.armour);
+        defender.hp / (per_blow / attacker.cooldown.max(1) as f32)
+    }
+
+    /// The counter cycle, asserted where it actually lives: in who dies first.
+    ///
+    /// A multiplier can look decisive and mean nothing once armour and health
+    /// are counted. The first version of this test checked that a spear wall
+    /// took 65% off a charge, which it did -- and cavalry still fought spears to
+    /// a draw, because a horseman carries 130 health behind a quarter armour.
+    /// So the assertions below are exchange rates.
+    #[test]
+    fn the_arms_beat_the_arms_they_are_supposed_to_beat() {
+        let foot = Archetype::of(0);
+        let spear = Archetype::of(1);
+        let archer = Archetype::of(2);
+        let horse = Archetype::of(3);
+
+        // Horse ride down foot: a charge that lands is not a fair fight.
+        let horse_kills_foot = ticks_to_kill(&horse, &foot, horse.speed);
+        let foot_kills_horse = ticks_to_kill(&foot, &horse, foot.speed);
+        assert!(
+            foot_kills_horse > horse_kills_foot * 2.5,
+            "horse kill foot in {horse_kills_foot:.0} ticks, foot kill horse in \
+             {foot_kills_horse:.0} -- a charge is not worth making"
+        );
+
+        // And ride down archers worse still.
+        let horse_kills_archer = ticks_to_kill(&horse, &archer, horse.speed);
+        assert!(
+            horse_kills_archer < horse_kills_foot,
+            "archers stand up to a charge"
+        );
+        assert!(
+            ticks_to_kill(&archer, &horse, archer.speed) > horse_kills_archer * 8.0,
+            "archers fight off cavalry hand to hand"
+        );
+
+        // Spears are the answer, and it is decisive rather than a coin toss.
+        let spear_kills_horse = ticks_to_kill(&spear, &horse, spear.speed);
+        let horse_kills_spear = ticks_to_kill(&horse, &spear, horse.speed);
+        assert!(
+            horse_kills_spear > spear_kills_horse * 1.3,
+            "spears kill horse in {spear_kills_horse:.0} ticks and die in \
+             {horse_kills_spear:.0} -- that is a fair fight, not a counter"
+        );
+
+        // But a spear is an answer to cavalry, not simply a better sword: against
+        // men on foot it is no improvement on one.
+        assert!(
+            ticks_to_kill(&spear, &foot, spear.speed) >= ticks_to_kill(&foot, &foot, foot.speed),
+            "spears outfight foot as well as horse, so there is no reason to carry a sword"
+        );
+    }
+
+    /// Half speed is half the charge. A cliff here would make cavalry either
+    /// devastating or useless with nothing in between, and there would be
+    /// nothing for a commander to judge.
+    #[test]
+    fn the_charge_scales_with_how_fast_he_is_actually_going() {
+        let horse = Archetype::of(3);
+        let foot = Archetype::of(0);
+        let mut last = 0.0;
+        for step in 0..=4 {
+            let w = weight_of_blow(&horse, &foot, horse.speed * step as f32 / 4.0);
+            assert!(
+                w > last,
+                "the charge did not grow from {last} at step {step}"
+            );
+            last = w;
+        }
+        // A halted horseman is just a man with a longer reach -- which is why
+        // cavalry has to be used rather than parked in the line.
+        assert!((weight_of_blow(&horse, &foot, 0.0) - 1.0).abs() < 1e-6);
+        // And it stops at the gallop rather than rewarding a bug that makes a
+        // horse move faster than it can.
+        assert_eq!(
+            weight_of_blow(&horse, &foot, horse.speed * 9.0),
+            weight_of_blow(&horse, &foot, horse.speed)
+        );
+    }
 
     fn field(units: &[(f32, f32, u8)]) -> (Army, Grid) {
         let a = Archetype::default();

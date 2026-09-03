@@ -10,7 +10,7 @@
 // through `#bytes`/`#floats`, which re-create their views whenever the buffer
 // identity changes.
 
-import { BUILD_NAMES } from './params.js';
+import { BUILD_NAMES, BUILD_NOTES } from './params.js';
 
 export const ColorMode = Object.freeze({
   team: 0,
@@ -222,7 +222,7 @@ export class Borscht {
     if (!this.#exports.kinds) return [];
     const count = this.#exports.kinds();
     if (count === 0) return [];
-    const FIELDS = 15;
+    const FIELDS = 23;
     const raw = this.#floats(this.#exports.kinds_ptr(), count * FIELDS);
     const rgb = (at) => `rgb(${raw[at] | 0}, ${raw[at + 1] | 0}, ${raw[at + 2] | 0})`;
     const out = [];
@@ -231,6 +231,7 @@ export class Borscht {
       out.push({
         id: i,
         name: BUILD_NAMES[raw[at]] ?? `#${i}`,
+        note: BUILD_NOTES[raw[at]] ?? '',
         hp: raw[at + 1],
         damage: raw[at + 2],
         reach: raw[at + 3],
@@ -241,6 +242,14 @@ export class Borscht {
         radius: raw[at + 8],
         red: rgb(at + 9),
         blue: rgb(at + 12),
+        range: raw[at + 15],
+        reload: raw[at + 16],
+        volley: raw[at + 17],
+        charge: raw[at + 18],
+        brace: raw[at + 19],
+        vsMounted: raw[at + 20],
+        mounted: raw[at + 21] > 0.5,
+        share: raw[at + 22],
       });
     }
     return out;

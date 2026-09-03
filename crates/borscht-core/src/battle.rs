@@ -26,7 +26,7 @@
 //! stream with [`Battle::restream`], which leaves the terrain and the muster
 //! alone.
 
-use crate::army::{Archetype, Army};
+use crate::army::{Archetype, Army, Station};
 use crate::config::Config;
 use crate::fastmath::{atan2, clamp, floor, sin_cos, sqrt, TAU};
 use crate::grid::{clamp_field, foe, Grid, TEAMS};
@@ -125,6 +125,15 @@ pub struct Counters {
     /// army is not in contact, so it measures where the reserves are standing.
     pub blow_slope: [f32; TEAMS],
     pub blows: [u32; TEAMS],
+    /// Volleys loosed, and the damage they did, per side.
+    ///
+    /// Kept apart from the casualty totals because "how much of this was
+    /// decided at a distance" is the question combined arms raises, and a
+    /// single number for damage cannot answer it.
+    pub volleys: [u32; TEAMS],
+    pub shot_damage: [f32; TEAMS],
+    /// Men killed at a distance, per side.
+    pub shot_kills: [u32; TEAMS],
 }
 
 const SALT_INIT: u64 = 0x5EED_0001;
@@ -163,6 +172,8 @@ pub struct Battle {
     /// Share of that strength still standing and not running, per side,
     /// recomputed every tick. Nerve reads it.
     pub host: [f32; TEAMS],
+    /// Everything in the air. See `volley.rs` for why a missile is not a reach.
+    pub sky: crate::volley::Sky,
     rng: Rng,
     started: [u32; TEAMS],
     pub counters: Counters,
@@ -221,6 +232,7 @@ impl Battle {
             rng: Rng::new(seed, 0x9E37_79B9),
             started: [0; TEAMS],
             counters: Counters::default(),
+            sky: crate::volley::Sky::new(),
             render_buf: Vec::new(),
             render_count: 0,
             terrain_buf: Vec::new(),
@@ -251,6 +263,8 @@ impl Battle {
         self.rng = Rng::new(seed, 0x9E37_79B9);
         self.army.clear();
         self.counters = Counters::default();
+        // Arrows loosed in the last battle do not fall on this one.
+        self.sky.clear();
         // New seed, new ground. A reset that kept the old field would quietly
         // make the terrain a property of the session rather than of the battle.
         self.lay_out_ground();
@@ -284,15 +298,175 @@ impl Battle {
         crate::color::hsv_to_rgb(hue % 1.0, 0.75, 0.55 + 0.45 * health)
     }
 
-    /// Where kind `kind` sits on the build ramp, 0 to 1.
+    /// Bring down everything due this tick.
+    fn land_volleys(&mut self) {
+        let hurt = self.sky.land(
+            self.tick,
+            &mut self.army,
+            &self.grid,
+            self.cfg.cover_shelter,
+            self.cfg.press_per_cell(),
+            &self.archetypes,
+        );
+        // Counted apart from melee, because "how much of this battle was decided
+        // at a distance" is the question combined arms exists to raise and it is
+        // invisible in a casualty total -- but counted *into* the casualty list
+        // as well, because a man killed by an arrow has to leave the roll the
+        // same way a man cut down does.
+        for team in 0..TEAMS {
+            self.counters.shot_damage[team] += hurt.damage[team];
+            self.counters.shot_kills[team] += hurt.killed[team];
+            self.counters.killed_routing[team] += hurt.killed_routing[team];
+            self.counters.killed_fighting[team] += hurt.killed[team] - hurt.killed_routing[team];
+        }
+        self.stats.red_killed += hurt.killed[0] as f32;
+        self.stats.blue_killed += hurt.killed[1] as f32;
+    }
+
+    /// Everyone who can shoot, shoots.
     ///
-    /// Note this divides by the number of kinds rather than by the last index,
-    /// so with four kinds the ramp runs 0, 0.25, 0.5, 0.75 and the heaviest
-    /// build stops short of the top. That is the behaviour the armies have
-    /// always had and the key on the page has to describe the army that exists,
-    /// not a tidier one.
-    pub fn build_ramp(cfg: Config, kind: usize) -> f32 {
-        kind as f32 / cfg.kinds.max(1) as f32
+    /// A shooter needs a direction and a target patch of ground, and both come
+    /// from fields rather than from looking at anybody: the enemy strength
+    /// gradient says which way, and one walk out along it says how far. Nobody
+    /// with an enemy in his own cell shoots -- at that point he is in a melee,
+    /// and an archer in a melee has other problems.
+    fn shoot(&mut self) {
+        let cfg = self.cfg;
+        let geom = self.grid.geom;
+        let arms = crate::army::arms_in_play(cfg.kinds);
+        // Nothing in the army can shoot: skip the pass entirely rather than
+        // paying a per-man test for an army of swordsmen.
+        if !(0..arms).any(|k| crate::army::Archetype::of(k).shoots()) {
+            return;
+        }
+        for i in 0..self.army.len() {
+            if !self.army.alive(i) || self.army.routing(i) {
+                continue;
+            }
+            let team = self.army.team[i] as usize;
+            let a = self.archetypes[team][self.army.kind[i] as usize];
+            if !a.shoots() {
+                continue;
+            }
+            if self.army.reload[i] > 0 {
+                self.army.reload[i] -= 1;
+                continue;
+            }
+            let cell = self.grid.units.cell_of[i];
+            // In contact: draw a blade, not a bowstring.
+            if crate::combat::enemy_near(&self.grid, cell as usize, team as u8) {
+                continue;
+            }
+            let (cx, cy) = geom.cell_xy(cell);
+            let (_, fgx, fgy) =
+                geom.sample(&self.grid.strength[foe(team as u8)], cx as i32, cy as i32);
+            let (dx, dy) = unit(fgx, fgy);
+            let shot = crate::volley::aim(
+                &self.grid,
+                crate::volley::Aim {
+                    team: team as u8,
+                    x: self.army.x[i],
+                    y: self.army.y[i],
+                    dx,
+                    dy,
+                    range: a.range,
+                    // Not straight down on top of himself.
+                    minimum: geom.cell_size * 1.5,
+                    scatter: a.spread,
+                },
+                &mut self.rng,
+            );
+            let Some((tx, ty, d)) = shot else { continue };
+            self.army.reload[i] = a.reload;
+            let flight = ((d / cfg.missile_speed).max(1.0) as usize).min(crate::volley::MAX_FLIGHT);
+            self.sky.loose(
+                self.tick,
+                flight,
+                crate::volley::Volley {
+                    x: tx,
+                    y: ty,
+                    damage: a.volley * cfg.missile_lethality,
+                    spread: a.spread,
+                    team: team as u8,
+                },
+            );
+            self.counters.volleys[team] += 1;
+        }
+    }
+
+    /// Which arm each division is, and how many men it musters.
+    ///
+    /// An army is not equal parts of everything: it is mostly foot, with enough
+    /// spears to stop a charge, a body of archers, a wing of horse and a
+    /// handful of engines. Two things follow, and neither is what the old
+    /// equal-divisions code did.
+    ///
+    /// Every arm in play gets at least one division, because an arm with no
+    /// body of its own is an arm the commander cannot give an order to. The
+    /// divisions left over then go to the arms with the largest shares, so foot
+    /// gets several bodies and the catapults get one.
+    ///
+    /// And a division's strength is its arm's share of the army split between
+    /// that arm's divisions -- not the muster split equally. Equal divisions
+    /// would put as many catapults on the field as foot, which is not an army,
+    /// it is a siege park with an escort.
+    fn order_of_battle(
+        arms: usize,
+        divisions: usize,
+        per_side: usize,
+    ) -> (
+        [u8; crate::army::MAX_DIVISIONS],
+        [usize; crate::army::MAX_DIVISIONS],
+    ) {
+        let mut kind_of = [0u8; crate::army::MAX_DIVISIONS];
+        let mut strength = [0usize; crate::army::MAX_DIVISIONS];
+        let arms = arms.clamp(1, crate::army::ROSTER.len());
+
+        // One division each, in roster order, for as many arms as there is room
+        // for. With fewer divisions than arms the tail of the roster simply
+        // does not take the field -- which is why the roster is ordered so that
+        // what remains is still a coherent army.
+        let mut bodies = [0usize; crate::army::ROSTER.len()];
+        let mut given = 0usize;
+        for (arm, slot) in bodies.iter_mut().enumerate().take(arms.min(divisions)) {
+            kind_of[arm] = arm as u8;
+            *slot = 1;
+            given += 1;
+        }
+        // The rest go where the men are: repeatedly to whichever arm currently
+        // has the most men per body.
+        while given < divisions {
+            let mut best = 0usize;
+            let mut best_load = -1.0f32;
+            for (arm, &n) in bodies.iter().enumerate().take(arms.min(divisions)) {
+                if n == 0 {
+                    continue;
+                }
+                let load = crate::army::ROSTER[arm].share / n as f32;
+                if load > best_load {
+                    best_load = load;
+                    best = arm;
+                }
+            }
+            bodies[best] += 1;
+            kind_of[given] = best as u8;
+            given += 1;
+        }
+
+        let total: f32 = bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, &n)| n > 0)
+            .map(|(arm, _)| crate::army::ROSTER[arm].share)
+            .sum();
+        for (d, s) in strength.iter_mut().enumerate().take(divisions) {
+            let arm = kind_of[d] as usize;
+            let share = crate::army::ROSTER[arm].share / total.max(1e-6);
+            // At least one man, so a rare arm is present rather than rounded
+            // out of existence at a small muster.
+            *s = ((per_side as f32 * share) as usize / bodies[arm].max(1)).max(1);
+        }
+        (kind_of, strength)
     }
 
     /// Put both armies on the field, facing each other.
@@ -301,12 +475,13 @@ impl Battle {
         let size = cfg.field_size;
         let mut rng = Rng::new(self.seed, SALT_INIT);
 
-        // Kinds differ by build within a side, so a line is not uniform. The
-        // spread is deliberately modest: these are variations on a soldier, not
-        // separate species.
+        // The arms both sides field. Read straight off the roster rather than
+        // generated, because these are now different weapons rather than
+        // heavier and lighter versions of one.
+        let arms = crate::army::arms_in_play(cfg.kinds);
         for team in 0..TEAMS {
-            for kind in 0..cfg.kinds.min(crate::army::MAX_ARCHETYPES as u32) as usize {
-                self.archetypes[team][kind] = Archetype::for_build(Self::build_ramp(cfg, kind));
+            for kind in 0..arms {
+                self.archetypes[team][kind] = Archetype::of(kind);
             }
         }
 
@@ -335,36 +510,67 @@ impl Battle {
             // breaking point at the same moment. Bodies give the line a weak
             // part and a strong part -- and now a name for each, which is what
             // there has to be before anyone can be given an order.
-            let kinds = cfg.kinds.max(1) as usize;
             let divisions = (cfg.divisions.max(1) as usize).min(crate::army::MAX_DIVISIONS);
-            let reserves = (cfg.reserve_divisions as usize).min(divisions.saturating_sub(1));
-            let in_line = divisions - reserves;
-
-            let mut kind_of = [0u8; crate::army::MAX_DIVISIONS];
-            for (d, slot) in kind_of.iter_mut().enumerate().take(divisions) {
-                slot.clone_from(&((d % kinds) as u8));
+            let (kind_of, strength_of) = Self::order_of_battle(arms, divisions, per_side);
+            // How many men stand in each rank, so a body can be given frontage
+            // in proportion to its strength rather than an equal share.
+            let mut rank_strength = [0.0f32; 3];
+            for (d, &kind) in kind_of.iter().enumerate().take(divisions) {
+                let station = crate::army::build_of(kind as usize).station;
+                rank_strength[station as usize] += strength_of[d] as f32;
             }
-            for d in (1..divisions).rev() {
-                kind_of.swap(d, rng.below(d as u32 + 1) as usize);
-            }
-
-            let per_division = per_side / divisions.max(1);
+            let mut line_taken = [0.0f32; 3];
+            let mut wings = 0usize;
             for (d, &kind) in kind_of.iter().enumerate().take(divisions) {
                 let a = self.archetypes[team][kind as usize];
-                // Divisions in the line take a band of the front each. The
-                // reserve stands behind the centre, which is where a reserve is
-                // of use to any part of the line it may be sent to.
-                let reserve = d >= in_line;
-                let (band_lo, band_hi) = if reserve {
-                    (-0.25, 0.25)
-                } else {
-                    let step = 1.0 / in_line as f32;
-                    (-0.5 + d as f32 * step, -0.5 + (d as f32 + 1.0) * step)
+                // Where each arm stands before anybody has given an order.
+                //
+                // A commander can move a division wherever it likes once the
+                // battle starts, but an army that forms up with its catapults
+                // in the front rank has lost them before the first order is
+                // written, and one whose horse is buried in the centre can
+                // never use it. So the roster says where each arm belongs and
+                // the line is built around that: foot and spears take a band of
+                // the front each, bows and engines stand behind them, horse
+                // goes to the flanks where there is room to ride.
+                let station = crate::army::build_of(kind as usize).station;
+                let reserve = station != Station::Line;
+                // Each body takes a slice of its rank's frontage in proportion
+                // to how many men it has, so every part of the army forms up at
+                // about the same density. Equal slices packed the archers and
+                // the engines into one another -- a quarter of the army in a
+                // third of the frontage -- and they deployed already crushed,
+                // at six times the press limit the front is supposed to hold.
+                let (from, to) = match station {
+                    Station::Line => (-0.5, 0.5),
+                    Station::Rear => (-0.45, 0.45),
+                    Station::Wing => {
+                        wings += 1;
+                        if wings % 2 == 1 {
+                            (-0.66, -0.52)
+                        } else {
+                            (0.52, 0.66)
+                        }
+                    }
                 };
-                let back = if reserve { depth * 1.6 } else { 0.0 };
+                let taken = &mut line_taken[station as usize];
+                let mine = strength_of[d] as f32 / rank_strength[station as usize].max(1.0);
+                let (band_lo, band_hi) = if station == Station::Wing {
+                    (from, to)
+                } else {
+                    let lo = from + (to - from) * *taken;
+                    let hi = lo + (to - from) * mine;
+                    *taken += mine;
+                    (lo, hi)
+                };
+                let back = match station {
+                    Station::Line => 0.0,
+                    Station::Rear => depth * 1.6,
+                    Station::Wing => depth * 0.4,
+                };
                 let cx = if team == 0 { cx - back } else { cx + back };
 
-                for _ in 0..per_division {
+                for _ in 0..strength_of[d] {
                     let x = clamp_field(cx + rng.range(-depth * 0.5, depth * 0.5), size);
                     let across = rng.range(band_lo, band_hi);
                     let y = clamp_field(size * 0.5 + across * width, size);
@@ -460,7 +666,11 @@ impl Battle {
             // *touches* -- the blow, the cohesion of a formation -- reads count.
             let seen = 1.0 - self.cfg.cover_hide * self.grid.cover[cell];
             let worth = a.worth() * health;
-            self.grid.strength[team][cell] += worth * seen.max(0.0);
+            let contributed = worth * seen.max(0.0);
+            self.grid.strength[team][cell] += contributed;
+            if a.mounted {
+                self.grid.mounted[team][cell] += contributed;
+            }
             // What the side still has *standing*, for the army-wide morale term.
             // Men still holding only: a side whose men are all running is not at
             // strength, and counting them would let a collapsing army go on
@@ -534,6 +744,11 @@ impl Battle {
             self.command();
         }
         self.steer_and_move();
+        // Volleys already in the air come down before this tick's are loosed,
+        // so nothing is shot and landed in the same tick however short the
+        // flight, and a man killed by an arrow does not get to loose one back.
+        self.land_volleys();
+        self.shoot();
         self.fight();
         self.steady_or_break();
         if self.army.should_compact() {
@@ -737,7 +952,12 @@ impl Battle {
             let Some(blow) = blow else { continue };
             let t = blow.target;
             let victim_team = self.army.team[t] as usize;
-            let armour = self.archetypes[victim_team][self.army.kind[t] as usize].armour;
+            let defender = self.archetypes[victim_team][self.army.kind[t] as usize];
+            let armour = defender.armour;
+            // What the man brings to the blow and what the man in front of him
+            // does about it: the charge, the spear wall, and the spear. This is
+            // the whole counter cycle, and it is three multiplications.
+            let weight = crate::combat::weight_of_blow(&a, &defender, self.army.speed[i]);
             let was_running = self.army.routing(t);
             // Striking downhill: the slope under the man's feet, along the line
             // of the blow.
@@ -755,7 +975,7 @@ impl Battle {
             let downhill = -self.grid.grade(bx as i32, by as i32, dx, dy);
             self.counters.blow_slope[team] += downhill;
             self.counters.blows[team] += 1;
-            let damage = blow.damage * (1.0 + cfg.high_ground * downhill).max(0.0);
+            let damage = blow.damage * weight * (1.0 + cfg.high_ground * downhill).max(0.0);
             if self.army.wound(t, damage, armour) {
                 killed[victim_team] += 1;
                 if was_running {

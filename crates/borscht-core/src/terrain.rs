@@ -77,7 +77,12 @@ fn fbm(seed: u64, x: f32, y: f32) -> f32 {
     let mut norm = 0.0;
     let (mut px, mut py) = (x, y);
     for o in 0..OCTAVES {
-        sum += amp * value(seed.wrapping_add((o as u64).wrapping_mul(0x1000_0000_0000_01B3)), px, py);
+        sum += amp
+            * value(
+                seed.wrapping_add((o as u64).wrapping_mul(0x1000_0000_0000_01B3)),
+                px,
+                py,
+            );
         norm += amp;
         amp *= 0.5;
         px *= 2.0;
@@ -115,7 +120,14 @@ pub struct Shape {
 /// `height` and `cover` must both be `dim * dim` long. `scratch` is borrowed
 /// for the wood threshold and its contents are not meaningful afterwards; it is
 /// passed in so a reset does not allocate.
-pub fn generate(height: &mut [f32], cover: &mut [f32], scratch: &mut Vec<f32>, dim: u32, seed: u64, shape: Shape) {
+pub fn generate(
+    height: &mut [f32],
+    cover: &mut [f32],
+    scratch: &mut Vec<f32>,
+    dim: u32,
+    seed: u64,
+    shape: Shape,
+) {
     let n = (dim as usize) * (dim as usize);
     debug_assert_eq!(height.len(), n);
     debug_assert_eq!(cover.len(), n);
@@ -211,7 +223,15 @@ mod tests {
 
     #[test]
     fn no_relief_means_flat_and_no_wood_means_bare() {
-        let (h, c) = field(32, 5, Shape { relief: 0.0, wood: 0.0, ..shape() });
+        let (h, c) = field(
+            32,
+            5,
+            Shape {
+                relief: 0.0,
+                wood: 0.0,
+                ..shape()
+            },
+        );
         assert!(h.iter().all(|&v| v == 0.0), "relief 0 left hills behind");
         assert!(c.iter().all(|&v| v == 0.0), "wood 0 left trees behind");
     }
@@ -220,7 +240,14 @@ mod tests {
     fn the_wooded_fraction_is_roughly_what_was_asked_for() {
         // The whole reason the threshold is a quantile rather than a constant.
         for want in [0.1f32, 0.25, 0.5] {
-            let (_, c) = field(128, 11, Shape { wood: want, ..shape() });
+            let (_, c) = field(
+                128,
+                11,
+                Shape {
+                    wood: want,
+                    ..shape()
+                },
+            );
             let got = c.iter().filter(|&&v| v > 0.5).count() as f32 / c.len() as f32;
             assert!(
                 (got - want).abs() < 0.06,

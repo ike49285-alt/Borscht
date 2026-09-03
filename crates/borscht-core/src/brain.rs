@@ -24,7 +24,7 @@ use crate::fastmath::tanh_fast;
 use crate::rng::Rng;
 
 /// Features describing one (division, sector) pair.
-pub const N_IN: usize = 18;
+pub const N_IN: usize = 23;
 pub const N_HID: usize = 10;
 /// One score for the sector, then a logit per posture.
 pub const N_OUT: usize = 6;
@@ -103,6 +103,31 @@ pub mod input {
     /// Always one, so the skip path carries a per-output bias in the same
     /// weights the doctrine is written in.
     pub const BIAS: usize = 17;
+
+    // ---- what arm this division is, and what it is looking at ----
+    //
+    // Without these a commander has one kind of soldier and six bodies of it.
+    // It can no more use cavalry than it can use catapults, because it cannot
+    // tell them apart: a division is a division, and the best it can do is send
+    // them all to the same sort of place. Combined arms is not five colours on
+    // the field, it is a commander that knows the difference.
+    /// This division rides.
+    pub const OWN_MOUNTED: usize = 18;
+    /// This division shoots.
+    pub const OWN_SHOOTS: usize = 19;
+    /// This division carries something long enough to stop a horse.
+    pub const OWN_BRACES: usize = 20;
+    /// Share of the enemy strength in this sector that is mounted.
+    pub const FOE_MOUNTED: usize = 21;
+    /// [`OWN_BRACES`] times [`FOE_MOUNTED`]: spears, and horse to stop.
+    ///
+    /// Handed over ready-made rather than left for the network to find. The
+    /// skip path is linear, and "go where the horse is, but only if you are the
+    /// men who can stop it" is a product of two inputs -- which a linear scorer
+    /// cannot express at all and the hidden layer would have to spend its
+    /// capacity discovering. The hand-written doctrine has to be able to say it
+    /// on day one, so it is a feature rather than something to be learnt.
+    pub const BRACE_NEEDED: usize = 22;
 }
 
 /// Output indices. Index 0 scores the sector; the rest are posture logits and
@@ -210,6 +235,43 @@ impl Net {
         // halves of that are needed: without the depth term every division reads
         // as a reserve on the first tick, and without the breaking terms the one
         // that does hold back never comes in at all.
+        // ---- the arms ----
+        //
+        // Each of these is one sentence about how an arm is used, and together
+        // they are the difference between an army and a mob wearing five
+        // colours. Training may find better; this is what a commander who has
+        // read a book would do.
+
+        // Horse are wasted standing still: a charge is worth several times a
+        // standing blow and a halted horseman is a man with a longer reach. So
+        // they go round rather than in, and they are never the ones to hold.
+        n.skip(i::OWN_MOUNTED, o::FLANK, 1.8);
+        n.skip(i::OWN_MOUNTED, o::ADVANCE, 0.5);
+        n.skip(i::OWN_MOUNTED, o::HOLD, -1.6);
+        n.skip(i::OWN_MOUNTED, o::RESERVE, -0.8);
+        // And they are worth sending a long way, which nothing else is.
+        n.skip(i::OWN_MOUNTED, o::SCORE, 0.6);
+
+        // Bows kill at ninety paces and die at one. They hold their ground and
+        // shoot over the line rather than joining it.
+        n.skip(i::OWN_SHOOTS, o::HOLD, 1.6);
+        n.skip(i::OWN_SHOOTS, o::ADVANCE, -1.8);
+        n.skip(i::OWN_SHOOTS, o::FLANK, -1.0);
+        n.skip(i::OWN_SHOOTS, o::RESERVE, 0.7);
+
+        // Spears stand. That is the whole of what a spear wall is for: it is
+        // worth nothing chasing anybody and everything being where the horse
+        // arrives.
+        n.skip(i::OWN_BRACES, o::HOLD, 0.9);
+        n.skip(i::OWN_BRACES, o::FLANK, -0.6);
+        // And this is the one that makes them an answer rather than merely
+        // tough: go where the horse is, if you are the men who can stop it.
+        n.skip(i::BRACE_NEEDED, o::SCORE, 2.0);
+        n.skip(i::BRACE_NEEDED, o::HOLD, 1.2);
+
+        // Everyone else would rather the cavalry were somebody else's problem.
+        n.skip(i::FOE_MOUNTED, o::SCORE, -0.5);
+
         n.skip(i::DEPTH, o::RESERVE, 5.0);
         n.skip(i::ARMY_KEPT, o::RESERVE, 0.6);
         n.skip(i::ARMY_BROKEN, o::RESERVE, -3.0);

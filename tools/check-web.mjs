@@ -287,7 +287,8 @@ await page.screenshot({ path: `${OUT}/narrow.png` });
 // the same build is a different colour on each side, which is the whole reason
 // the key carries the renderer's own colours instead of computing its own.
 const kindsCard = await page.evaluate(() => {
-  const rows = [...document.querySelectorAll('#kinds tr')].slice(1);
+  // Arm rows only: each is followed by a `.why` row saying what it is for.
+  const rows = [...document.querySelectorAll('#kinds tr:not(.why)')].slice(1);
   return {
     rows: rows.length,
     named: rows.every((r) => /#\d+ \w+/.test(r.children[1]?.textContent ?? '')),
@@ -296,6 +297,8 @@ const kindsCard = await page.evaluate(() => {
       rows.flatMap((r) => [...r.querySelectorAll('.chip')].map((c) => c.style.background)),
     ).size,
     note: (document.getElementById('kinds-note')?.textContent ?? '').length,
+    // Every arm says what it is for, not just what its numbers are.
+    explained: document.querySelectorAll('#kinds tr.why').length,
   };
 });
 
@@ -317,7 +320,7 @@ console.log(`pixels lit: ${(drawn.fraction * 100).toFixed(1)}% of the field`);
 console.log(`inspector:  ${inspected ? 'opened' : 'did not open'}`);
 console.log(`report:     ${((treeDrawn.lit / treeDrawn.total) * 100).toFixed(1)}% drawn — ${treeSummary}`);
 console.log(
-  `kinds:      ${kindsCard.rows} builds, ${kindsCard.named ? 'all named' : 'SOME UNNAMED'}, ${kindsCard.colours} distinct swatches`,
+  `kinds:      ${kindsCard.rows} arms, ${kindsCard.named ? 'all named' : 'SOME UNNAMED'}, ${kindsCard.colours} distinct swatches, ${kindsCard.explained} explained`,
 );
 console.log(
   `verdict:    ${verdict.present ? 'card in the markup' : 'card MISSING from markup'}, ${verdict.offered ? 'OFFERED with no store' : 'not offered without a store'}`,
@@ -356,6 +359,11 @@ if (kindsCard.colours !== kindsCard.rows * 2) {
   failures.push(`the key shows ${kindsCard.colours} distinct colours for ${kindsCard.rows * 2} builds`);
 }
 if (kindsCard.note < 10) failures.push('the unit-type key says nothing about how the builds differ');
+if (kindsCard.explained < kindsCard.rows) {
+  failures.push(
+    `${kindsCard.rows - kindsCard.explained} arms in the key say what they cost and not what they are for`,
+  );
+}
 if (!verdict.present) failures.push('the verdict card is missing from the markup');
 if (verdict.offered) failures.push('the verdict control is offered with no store to record into');
 if (problems.length) failures.push(...problems);

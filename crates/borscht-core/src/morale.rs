@@ -407,7 +407,10 @@ mod tests {
         // With his army gone with him there is nothing to draw on, and his
         // nerve must not climb out of thin air.
         let wrecked = pressure_on(&army, &grid, &c, 0, a.hp, 0.0);
-        assert!(wrecked.delta(&c) <= 0.0, "he steadied himself out of thin air");
+        assert!(
+            wrecked.delta(&c) <= 0.0,
+            "he steadied himself out of thin air"
+        );
 
         // With his army still whole behind him it *may* climb -- that is what
         // the host term is for, and it is not the thing the flicker pathology

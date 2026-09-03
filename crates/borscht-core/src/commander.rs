@@ -120,6 +120,11 @@ impl Default for Order {
 #[derive(Clone, Copy, Debug)]
 pub struct View {
     pub strength: [[f32; CELLS]; TEAMS],
+    /// Of that strength, how much of it is on horseback.
+    ///
+    /// A commander that cannot see where the cavalry is cannot put its spears
+    /// in front of it, and the counter to a charge becomes a matter of luck.
+    pub mounted: [[f32; CELLS]; TEAMS],
     pub routing: [[f32; CELLS]; TEAMS],
     pub losses: [f32; CELLS],
     pub height: [f32; CELLS],
@@ -134,6 +139,7 @@ impl Default for View {
     fn default() -> Self {
         View {
             strength: [[0.0; CELLS]; TEAMS],
+            mounted: [[0.0; CELLS]; TEAMS],
             routing: [[0.0; CELLS]; TEAMS],
             losses: [0.0; CELLS],
             height: [0.0; CELLS],
@@ -175,6 +181,7 @@ impl View {
                 let cell = cy * dim + cx;
                 for t in 0..TEAMS {
                     self.strength[t][s] += grid.strength[t][cell];
+                    self.mounted[t][s] += grid.mounted[t][cell];
                     self.routing[t][s] += grid.routing[t][cell];
                     self.losses[s] += grid.losses[t][cell];
                 }
@@ -209,6 +216,14 @@ pub struct DivisionState {
     pub routing: f32,
     pub men: u32,
     pub in_contact: bool,
+    /// What this body is made of, taken from the men actually standing in it.
+    ///
+    /// Read off the units rather than off the deployment, so a division is what
+    /// it has left rather than what it started as -- and so a commander is
+    /// never told it has cavalry when the cavalry are dead.
+    pub mounted: f32,
+    pub shoots: f32,
+    pub braces: f32,
 }
 
 /// Read every division's position and condition out of the army.
@@ -240,6 +255,15 @@ pub fn survey(
         s.y += army.y[i];
         s.height += grid.height[cell];
         s.strength += a.worth() * clamp(army.hp[i] / a.hp.max(1e-3), 0.0, 1.0);
+        if a.mounted {
+            s.mounted += 1.0;
+        }
+        if a.shoots() {
+            s.shoots += 1.0;
+        }
+        if a.brace > 0.5 {
+            s.braces += 1.0;
+        }
         if army.routing(i) {
             s.routing += 1.0;
         }
@@ -255,6 +279,9 @@ pub fn survey(
             d.y /= n;
             d.height /= n;
             d.routing /= n;
+            d.mounted /= n;
+            d.shoots /= n;
+            d.braces /= n;
         }
     }
 
@@ -301,11 +328,23 @@ fn features(
     // thousand men means the same thing at a million.
     x[input::OWN_STRENGTH] = own_here / view.total[team].max(1e-3);
     x[input::FOE_STRENGTH] = foe_here / view.total[enemy].max(1e-3);
-    x[input::OWN_ROUTING] = clamp(view.routing[team][sector] / view.routing[team].iter().sum::<f32>().max(1.0), 0.0, 1.0);
-    x[input::FOE_ROUTING] = clamp(view.routing[enemy][sector] / view.routing[enemy].iter().sum::<f32>().max(1.0), 0.0, 1.0);
+    x[input::OWN_ROUTING] = clamp(
+        view.routing[team][sector] / view.routing[team].iter().sum::<f32>().max(1.0),
+        0.0,
+        1.0,
+    );
+    x[input::FOE_ROUTING] = clamp(
+        view.routing[enemy][sector] / view.routing[enemy].iter().sum::<f32>().max(1.0),
+        0.0,
+        1.0,
+    );
     x[input::LOSSES] = clamp(view.losses[sector] / 64.0, 0.0, 1.0);
 
-    let inv_relief = if view.relief > 0.0 { 1.0 / view.relief } else { 0.0 };
+    let inv_relief = if view.relief > 0.0 {
+        1.0 / view.relief
+    } else {
+        0.0
+    };
     x[input::HEIGHT] = clamp(view.height[sector] * inv_relief, 0.0, 1.0);
     x[input::HEIGHT_GAIN] = clamp((view.height[sector] - me.height) * inv_relief, -1.0, 1.0);
     x[input::COVER] = view.cover[sector];
@@ -313,7 +352,11 @@ fn features(
     let (cx, cy) = view.centre(sector);
     let (dx, dy) = (cx - me.x, cy - me.y);
     // Against the diagonal, so the far corner is one and nothing is past it.
-    x[input::DISTANCE] = clamp(sqrt(dx * dx + dy * dy) / (view.field * core::f32::consts::SQRT_2), 0.0, 1.0);
+    x[input::DISTANCE] = clamp(
+        sqrt(dx * dx + dy * dy) / (view.field * core::f32::consts::SQRT_2),
+        0.0,
+        1.0,
+    );
     x[input::CLAIMED] = claimed;
 
     x[input::OWN_KEPT] = clamp(me.strength / me.started.max(1e-3), 0.0, 1.0);
@@ -327,6 +370,16 @@ fn features(
     // a zero-sum game will otherwise both decline to move.
     x[input::ATTACKER] = if team == 0 { 1.0 } else { 0.0 };
     x[input::BIAS] = 1.0;
+
+    // What this body is, and what is in front of it.
+    x[input::OWN_MOUNTED] = me.mounted;
+    x[input::OWN_SHOOTS] = me.shoots;
+    x[input::OWN_BRACES] = me.braces;
+    let foe_horse = view.mounted[enemy][sector] / foe_here.max(1e-3);
+    x[input::FOE_MOUNTED] = clamp(foe_horse, 0.0, 1.0);
+    // Spears, and horse for them to stop. See `input::BRACE_NEEDED` for why
+    // this product is handed over rather than left to be discovered.
+    x[input::BRACE_NEEDED] = x[input::OWN_BRACES] * x[input::FOE_MOUNTED];
     x
 }
 
@@ -498,9 +551,23 @@ mod tests {
                 Net::random(&mut rng)
             };
             let mut orders = [Order::default(); MAX_DIVISIONS];
-            decide(&net, &view(), 0, 6, &state(), &mut orders, 0.5, 0.0, &mut rng);
+            decide(
+                &net,
+                &view(),
+                0,
+                6,
+                &state(),
+                &mut orders,
+                0.5,
+                0.0,
+                &mut rng,
+            );
             for o in orders.iter().take(6) {
-                assert!((o.sector as usize) < CELLS, "sector {} is off the map", o.sector);
+                assert!(
+                    (o.sector as usize) < CELLS,
+                    "sector {} is off the map",
+                    o.sector
+                );
                 assert!(o.x.is_finite() && o.y.is_finite());
                 assert!(o.x >= 0.0 && o.x <= 600.0 && o.y >= 0.0 && o.y <= 600.0);
                 assert!(POSTURES.contains(&o.posture));
@@ -518,7 +585,17 @@ mod tests {
         // One sector made obviously attractive, so the pull to converge is real.
         v.routing[1][14] = 50.0;
         let mut orders = [Order::default(); MAX_DIVISIONS];
-        decide(&Net::doctrine(), &v, 0, 6, &state(), &mut orders, 0.35, 0.0, &mut rng);
+        decide(
+            &Net::doctrine(),
+            &v,
+            0,
+            6,
+            &state(),
+            &mut orders,
+            0.35,
+            0.0,
+            &mut rng,
+        );
         let distinct: std::collections::HashSet<u8> =
             orders.iter().take(6).map(|o| o.sector).collect();
         assert!(
@@ -536,7 +613,17 @@ mod tests {
         s[0].routing = 0.9;
         s[0].strength = 10.0;
         let mut orders = [Order::default(); MAX_DIVISIONS];
-        decide(&Net::doctrine(), &view(), 0, 6, &s, &mut orders, 0.3, 0.0, &mut rng);
+        decide(
+            &Net::doctrine(),
+            &view(),
+            0,
+            6,
+            &s,
+            &mut orders,
+            0.3,
+            0.0,
+            &mut rng,
+        );
         assert_eq!(orders[0].posture, Posture::Withdraw);
     }
 
@@ -552,7 +639,17 @@ mod tests {
             y: 2.0,
             posture: Posture::Hold,
         };
-        decide(&Net::doctrine(), &view(), 0, 6, &s, &mut orders, 0.3, 0.0, &mut rng);
+        decide(
+            &Net::doctrine(),
+            &view(),
+            0,
+            6,
+            &s,
+            &mut orders,
+            0.3,
+            0.0,
+            &mut rng,
+        );
         assert_eq!(orders[2].sector, 30);
     }
 
@@ -568,11 +665,31 @@ mod tests {
         let settled = |inertia: f32| {
             let mut orders = [Order::default(); MAX_DIVISIONS];
             let mut rng = Rng::new(13, 4);
-            decide(&Net::doctrine(), &v, 0, 6, &s, &mut orders, 0.5, inertia, &mut rng);
+            decide(
+                &Net::doctrine(),
+                &v,
+                0,
+                6,
+                &s,
+                &mut orders,
+                0.5,
+                inertia,
+                &mut rng,
+            );
             let first: Vec<u8> = orders.iter().take(6).map(|o| o.sector).collect();
             let mut same = 0;
             for _ in 0..20 {
-                decide(&Net::doctrine(), &v, 0, 6, &s, &mut orders, 0.5, inertia, &mut rng);
+                decide(
+                    &Net::doctrine(),
+                    &v,
+                    0,
+                    6,
+                    &s,
+                    &mut orders,
+                    0.5,
+                    inertia,
+                    &mut rng,
+                );
                 same += orders
                     .iter()
                     .take(6)
