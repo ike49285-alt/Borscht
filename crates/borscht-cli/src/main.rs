@@ -27,7 +27,8 @@ USAGE:
     borscht battle  [--muster N] [--ticks N] [--seed N] [--out DIR]
                     [--frames N] [--image-size N] [--color MODE] [--set key=value]...
     borscht nerve   [--muster N] [--ticks N] [--seed N] [--set key=value]...
-    borscht orders  [--muster N] [--ticks N] [--seed N] [--set key=value]...
+    borscht orders  [--muster N] [--ticks N] [--seed N] [--doctrine]
+                    [--set key=value]...
     borscht sweep   [--muster N] [--ticks N] [--seeds N] [--set key=value]...
     borscht train   [--muster N] [--ticks N] [--seed N] [--generations N]
                     [--population N] [--sigma F] [--out FILE] [--log DIR]
@@ -533,6 +534,21 @@ fn orders(args: &Args) {
     let cfg = build_config(args.musters.first().copied(), &args.overrides);
     let divisions = (cfg.divisions as usize).min(borscht_core::army::MAX_DIVISIONS);
     let mut b = Battle::new(cfg, args.seed);
+    // `--doctrine` watches the hand-written commander instead of the shipped
+    // one. Which of the two is giving the orders is the whole question when a
+    // trained commander turns out to play differently from the one it replaced,
+    // and reading the two side by side is the only way to see it.
+    if args.doctrine {
+        b.doctrine = [Net::doctrine(); 2];
+    }
+    println!(
+        "orders from {}",
+        if args.doctrine {
+            "the hand-written doctrine".to_string()
+        } else {
+            format!("commander {}", matchlog::name_of(&Net::trained()))
+        }
+    );
     let every = (args.ticks / 16).max(1);
 
     // When each division first stopped being a reserve.
