@@ -120,6 +120,18 @@ config_params! {
     /// that is a balance question to be measured against whole battles rather
     /// than reasoned about one arrow at a time. At 0 the missile arms are
     /// present and useless; the default was chosen by sweeping it.
+    ///
+    /// Swept again once shooters could see: aiming used to come off a gradient
+    /// with the reach of a spear, so the missile arms were being tuned while
+    /// half blind, and the value that looked right then put about an eighth of
+    /// the dead under arrows. It is now more than half. That is not drift, it
+    /// is what this battle now is -- an assault on a defended position, where
+    /// the defence's whole case is that it shoots first and further. Turn this
+    /// down and the case goes with it: at 0.6 the defender takes six of
+    /// twenty-four, at 0.35 two, at 0.2 none at all, and the battles stop
+    /// finishing -- thirteen of twenty-four still fighting at forty thousand
+    /// ticks. At 1.0 it is twelve against eleven with one battle unfinished,
+    /// which is the best row on every axis at once.
     missile_lethality: f32 = 1.0, "combat", 0.0, 20.0;
     /// How much woodland shelters what is standing under it from missiles.
     ///
