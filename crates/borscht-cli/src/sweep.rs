@@ -33,6 +33,16 @@ pub struct Trial {
     pub slope: [f32; 2],
     pub contact: Option<u32>,
     pub decided: bool,
+    /// Volleys loosed and men killed at a distance, per side.
+    ///
+    /// Here because the two armies shoot differently on purpose now -- the
+    /// attacker short and quick, the guard long and slow -- and "did the
+    /// doctrine do anything?" is not answerable from a casualty total. A side
+    /// that looses twice as many volleys for a quarter of the kills is a
+    /// finding; a side whose volleys stay at nothing has a trait it never gets
+    /// to use.
+    pub volleys: [u32; 2],
+    pub shot_kills: [u32; 2],
 }
 
 /// Mean ground height under each side's living men.
@@ -84,6 +94,8 @@ pub fn trial(cfg: &Config, seed: u64, ticks: u32) -> Trial {
         ],
         contact,
         decided: b.decided(),
+        volleys: b.counters.volleys,
+        shot_kills: b.counters.shot_kills,
     }
 }
 
@@ -223,6 +235,37 @@ pub fn run(cfg: &Config, seeds: u64, ticks: u32) {
         // out loud rather than letting a tick cap edit the conclusions.
         println!("  hit the tick cap                   {ran_out:>2}/{n}  <- raise --ticks");
     }
+    let sum = |f: fn(&Trial) -> [u32; 2], t: usize| -> u64 {
+        trials.iter().map(|x| f(x)[t] as u64).sum()
+    };
+    let killed: u64 = trials
+        .iter()
+        .map(|t| (per_side * 2.0) as u64 - (t.alive[0] + t.alive[1]) as u64)
+        .sum();
+    let arrows = sum(|t| t.shot_kills, 0) + sum(|t| t.shot_kills, 1);
+    println!("\n  what the two doctrines did");
+    println!(
+        "  {} attacks: short bows, quick",
+        if Battle::attacker(cfg) == 0 {
+            "red"
+        } else {
+            "blue"
+        }
+    );
+    println!(
+        "  volleys loosed                     red {:>9}   blue {:>9}",
+        sum(|t| t.volleys, 0),
+        sum(|t| t.volleys, 1)
+    );
+    println!(
+        "  killed at a distance               red {:>9}   blue {:>9}",
+        sum(|t| t.shot_kills, 0),
+        sum(|t| t.shot_kills, 1)
+    );
+    println!(
+        "  share of the dead shot down       {:>5.1}%",
+        100.0 * arrows as f32 / killed.max(1) as f32
+    );
     println!("\n  does the ground decide anything?");
     against_outcome("fought downhill", &slope_edge, &margin);
     against_outcome("held higher ground at contact", &ground_edge, &margin);

@@ -222,7 +222,7 @@ export class Borscht {
     if (!this.#exports.kinds) return [];
     const count = this.#exports.kinds();
     if (count === 0) return [];
-    const FIELDS = 23;
+    const FIELDS = 26;
     const raw = this.#floats(this.#exports.kinds_ptr(), count * FIELDS);
     const rgb = (at) => `rgb(${raw[at] | 0}, ${raw[at + 1] | 0}, ${raw[at + 2] | 0})`;
     const out = [];
@@ -242,14 +242,19 @@ export class Borscht {
         radius: raw[at + 8],
         red: rgb(at + 9),
         blue: rgb(at + 12),
+        // Two numbers, not one: doctrine is per side, so an archer reaches
+        // further for the army that guards than for the army that attacks.
         range: raw[at + 15],
         reload: raw[at + 16],
-        volley: raw[at + 17],
-        charge: raw[at + 18],
-        brace: raw[at + 19],
-        vsMounted: raw[at + 20],
-        mounted: raw[at + 21] > 0.5,
-        share: raw[at + 22],
+        rangeBlue: raw[at + 17],
+        reloadBlue: raw[at + 18],
+        volley: raw[at + 19],
+        charge: raw[at + 20],
+        brace: raw[at + 21],
+        vsMounted: raw[at + 22],
+        mounted: raw[at + 23] > 0.5,
+        share: raw[at + 24],
+        attacker: raw[at + 25] > 0.5 ? 'blue' : 'red',
       });
     }
     return out;

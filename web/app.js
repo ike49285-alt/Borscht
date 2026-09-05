@@ -246,17 +246,42 @@ const KIND_COLUMNS = [
   ['hp', (k) => Math.round(k.hp)],
   ['armour', (k) => `${Math.round(k.armour * 100)}%`],
   ['speed', (k) => k.speed.toFixed(2)],
-  // A missile arm fights at its range; everyone else at arm's length.
-  ['reach', (k) => (k.range > 0 ? `${Math.round(k.range)}` : k.reach.toFixed(1))],
+  // A missile arm fights at its range; everyone else at arm's length. And the
+  // two armies no longer carry the same bow, so where they differ the cell
+  // shows both -- attacker first, in the order the swatches are.
+  ['reach', (k) => (k.range > 0 ? sides(k, Math.round(k.range), Math.round(k.rangeBlue)) : k.reach.toFixed(1))],
   ['dmg', (k) => (k.range > 0 ? `${Math.round(k.volley)}/volley` : k.damage.toFixed(1))],
-  ['every', (k) => `${Math.round(k.range > 0 ? k.reload : k.cooldown)}t`],
+  [
+    'every',
+    (k) =>
+      k.range > 0
+        ? sides(k, `${Math.round(k.reload)}t`, `${Math.round(k.reloadBlue)}t`)
+        : `${Math.round(k.cooldown)}t`,
+  ],
 ];
+
+/// One number when both armies agree, and both when they do not.
+///
+/// Coloured rather than labelled: the swatches beside the name already say
+/// which side is which, and a key that has to explain its own notation is one
+/// nobody reads. Attacker first whichever side is attacking, because the point
+/// being made is short-and-quick against long-and-slow, not red against blue.
+function sides(k, red, blue) {
+  if (String(red) === String(blue)) return `${red}`;
+  const first = k.attacker === 'blue' ? [blue, red] : [red, blue];
+  const hue = k.attacker === 'blue' ? [k.blue, k.red] : [k.red, k.blue];
+  return `<span style="color:${hue[0]}">${first[0]}</span> <span class="dim">/</span> <span style="color:${hue[1]}">${first[1]}</span>`;
+}
 
 /// The one thing about an arm that is not in the numbers: what it counters.
 function kindTrait(k) {
   if (k.charge > 0) return `charge x${(1 + k.charge).toFixed(1)} at the gallop`;
   if (k.brace > 0.5) return `blunts a charge by ${Math.round(k.brace * 100)}%, x${k.vsMounted.toFixed(1)} vs horse`;
-  if (k.range > 0) return `shoots over the line`;
+  if (k.range > 0) {
+    return k.attacker === 'blue'
+      ? 'shoots over the line: blue short and quick, red long and slow'
+      : 'shoots over the line: red short and quick, blue long and slow';
+  }
   return '';
 }
 

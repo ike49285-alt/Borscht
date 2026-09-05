@@ -255,7 +255,7 @@ pub extern "C" fn world_size() -> f32 {
 // ------------------------------------------------------------------ kinds --
 
 /// Numbers per kind in the buffer [`kinds`] fills.
-pub const KIND_FIELDS: usize = 23;
+pub const KIND_FIELDS: usize = 26;
 
 /// Describe every kind of unit in the field: what it is made of, and the two
 /// colours it is actually drawn in.
@@ -263,6 +263,13 @@ pub const KIND_FIELDS: usize = 23;
 /// Returns how many kinds were written, each `KIND_FIELDS` floats:
 /// name index, hp, damage, reach, cooldown, speed, armour, nerve, radius, then
 /// red's RGB and blue's RGB at full health.
+///
+/// Range and reload are sent twice, once per side, because the two armies no
+/// longer field the same weapon: the attacker's bows are short and quick and
+/// the guard's are long and slow. Everything else on a man is still common to
+/// both, so it is sent once. The last field says which side is attacking, so
+/// the key can label the two columns rather than leaving the reader to guess
+/// which is which.
 ///
 /// The colours are carried across rather than left for the host to work out.
 /// The host could compute them -- the formula is not a secret -- but then a key
@@ -298,12 +305,15 @@ pub extern "C" fn kinds() -> u32 {
         out.extend_from_slice(&[
             a.range,
             a.reload as f32,
+            b.archetypes[1][kind].range,
+            b.archetypes[1][kind].reload as f32,
             a.volley,
             a.charge,
             a.brace,
             a.vs_mounted,
             if a.mounted { 1.0 } else { 0.0 },
             build.share,
+            Battle::attacker(&b.cfg) as f32,
         ]);
     }
     count
@@ -453,6 +463,41 @@ mod tests {
         // hp climbs and speed falls across the ramp.
         assert!(field(count - 1, 1) > field(0, 1));
         assert!(field(count - 1, 5) < field(0, 5));
+    }
+
+    /// The key has to carry both armies' bows, and carry them in the order the
+    /// page reads them out.
+    ///
+    /// The layout is a bare run of floats with no names on the wire, so the two
+    /// sides of it agree only by being written to agree. This is the assertion
+    /// that says so: a field inserted in the middle of `kinds` shifts
+    /// everything after it, and without this the first sign would be a legend
+    /// quietly reporting a catapult's reload as an archer's range.
+    #[test]
+    fn the_kind_table_carries_a_doctrine_for_each_side() {
+        let _g = lock();
+        fresh();
+        let count = kinds() as usize;
+        let table = unsafe { core::slice::from_raw_parts(kinds_ptr(), count * KIND_FIELDS) };
+        let b = battle().expect("a battle");
+        let mut shooters = 0;
+        for kind in 0..count {
+            let at = kind * KIND_FIELDS;
+            assert_eq!(table[at + 15], b.archetypes[0][kind].range);
+            assert_eq!(table[at + 16], b.archetypes[0][kind].reload as f32);
+            assert_eq!(table[at + 17], b.archetypes[1][kind].range);
+            assert_eq!(table[at + 18], b.archetypes[1][kind].reload as f32);
+            assert_eq!(table[at + 25], Battle::attacker(&b.cfg) as f32);
+            if table[at + 15] > 0.0 {
+                shooters += 1;
+                assert_ne!(
+                    table[at + 15],
+                    table[at + 17],
+                    "kind {kind} shoots the same on both sides -- there is no doctrine"
+                );
+            }
+        }
+        assert!(shooters > 0, "nothing in this army shoots");
     }
 
     #[test]

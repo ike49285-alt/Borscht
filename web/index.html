@@ -149,6 +149,15 @@
   #kinds .chip + .chip { margin-left: 2px; }
   #kinds td.nm { color: var(--ink); }
   #kinds td.nu { text-align: right; color: var(--muted); }
+  /* The separator between an attacker's number and a guard's, kept quiet so
+     the two coloured figures are what the eye lands on. */
+  #kinds td.nu .dim { opacity: .45; }
+  /* Two numbers in a cell where there was one made the key wide enough to push
+     the whole page sideways on a phone. The card scrolls on its own instead of
+     the document doing it: the table is a table and will not be made narrow by
+     asking politely. */
+  #kinds-scroll { overflow-x: auto; }
+  #kinds { min-width: 100%; }
   #kinds tr.why td { color: var(--muted); font-size: 10px; padding-bottom: 4px; opacity: .85; }
   canvas.chart { width: 100%; height: 76px; display: block; }
   .legend { display: flex; flex-direction: column; gap: 3px; font-family: var(--mono); font-size: 11px; }
@@ -286,7 +295,7 @@
     <div class="card">
       <h2>Unit types</h2>
       <div class="hint">Both armies field the same arms. Colour by <b>kind</b> to see them on the field.</div>
-      <table id="kinds"></table>
+      <div id="kinds-scroll"><table id="kinds"></table></div>
       <div class="hint" id="kinds-note"></div>
     </div>
 

@@ -127,6 +127,57 @@ config_params! {
     /// sensed; this makes them somewhere worth standing when the arrows come.
     cover_shelter: f32 = 0.7, "combat", 0.0, 1.0;
 
+    /// Which side attacks: 0 for red, 1 for blue.
+    ///
+    /// A parameter and not a constant, and that is the point of it. The
+    /// doctrines are per-side data rather than something hard-coded into red,
+    /// so they can be swapped and the battle re-fought the other way round --
+    /// which is a test a symmetric game could not run. The simulator hands
+    /// whoever deploys at the lower coordinate an unearned advantage; if the
+    /// winner follows the doctrine when this is flipped, the factions decide
+    /// the battle, and if it follows the *side*, the tuning is measuring
+    /// geometry.
+    attacker_side: f32 = 0.0, "faction", 0.0, 1.0;
+    /// How far the attacking side's missile arms shoot, against the roster.
+    ///
+    /// The two armies are not the same army any more. Red attacks: it closes
+    /// the distance and looses fast at short range, so its bows and its engines
+    /// alike reach less far and reload sooner. Blue guards ground it has
+    /// already chosen and shoots at leisure into the approach.
+    ///
+    /// These are doctrine, not equipment -- they multiply the roster's numbers
+    /// for *every* arm that shoots rather than editing the archer, which is why
+    /// they live here and are applied once at deploy. The roster stays the
+    /// baseline both sides are read against.
+    ///
+    /// The four were swept as a grid, twenty-four battles a point, half of them
+    /// with the doctrines swapped so that the simulator's positional bias
+    /// cancels instead of being tuned against. The surface is monotone and the
+    /// defence is fragile: at a reload of 1.4 the guard wins nothing at all
+    /// however far it shoots, and every point of range it gives up has to be
+    /// bought back twice over. The defaults are the point where the attacker
+    /// takes twelve of thirty-two and the defender fifteen.
+    attacker_range: f32 = 0.60, "faction", 0.1, 3.0;
+    /// Ticks the attacking side takes to reload, against the roster.
+    attacker_reload: f32 = 0.55, "faction", 0.1, 3.0;
+    /// How far the guarding side's missile arms shoot, against the roster.
+    guard_range: f32 = 2.40, "faction", 0.1, 4.0;
+    /// Ticks the guarding side takes to reload, against the roster.
+    guard_reload: f32 = 1.20, "faction", 0.1, 3.0;
+    /// How hard a guard falls back on its formation when nothing is in sight.
+    ///
+    /// A defender that has lost sight of the enemy walks back to where it
+    /// formed up. Zero leaves blue standing wherever the fighting left it,
+    /// which is the behaviour before there were factions at all.
+    guard_recall: f32 = 1.0, "faction", 0.0, 1.0;
+    /// How close to its formation's ground a guard has to be to count as home,
+    /// as a fraction of the field.
+    ///
+    /// Inside this it stops walking. Without a stopping distance a defender
+    /// cannot stand still -- a man in this engine always steps at his speed
+    /// along his heading -- so it would orbit its own anchor forever.
+    guard_station: f32 = 0.012, "faction", 0.001, 0.2;
+
     /// How far apart the two musters are drawn up, as a fraction of the field.
     deploy_separation: f32 = 0.45, "deployment", 0.05, 0.95;
     /// Depth of each formation, front to back, as a fraction of the field.

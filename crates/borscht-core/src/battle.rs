@@ -36,6 +36,15 @@ use crate::stats::Stats;
 /// Bytes per unit in the render buffer.
 pub const RENDER_STRIDE: usize = 12;
 
+/// The side that attacks by default: it closes, and it never stops coming.
+///
+/// The two armies used to be one army twice. They are not any more -- somebody
+/// assaults and somebody holds, or there is no position to take. Which side
+/// does which is `Config::attacker_side`; see [`Battle::attacker`].
+pub const ATTACKER: u8 = 0;
+/// The side that guards ground it has already chosen, by default.
+pub const GUARD: u8 = 1;
+
 /// Byte offsets within one unit's render record. Named because more than one
 /// renderer reads this layout, and a silent disagreement shows up as wrong
 /// colours rather than as an error.
@@ -130,6 +139,23 @@ pub struct Battle {
     pub stats: Stats,
     /// One entry per side per kind.
     pub archetypes: [[Archetype; crate::army::MAX_ARCHETYPES]; TEAMS],
+    /// Where each body of each army formed up, fixed at deploy.
+    ///
+    /// Eight anchors a side, not eight bytes a man: the man carries only which
+    /// division he is in. This is the ground a guard falls back to when there
+    /// is nothing in front of him, and it is what makes a defence a defence
+    /// rather than an army that happens to be standing still.
+    pub anchors: [[(f32, f32); crate::army::MAX_DIVISIONS]; TEAMS],
+    /// Where each army's weight is, this tick, and whether there is anybody
+    /// left to have a weight.
+    ///
+    /// One pair per side, accumulated in the pass that rebuilds the fields
+    /// anyway, so it costs an add per man and no pass of its own. It is what a
+    /// shooter aims down: the strength *gradient* is a central difference over
+    /// neighbouring cells, which is a sense about a spear long, and pointing a
+    /// ninety-pace bow with it means never loosing until the enemy is already
+    /// on you.
+    centre: [(f32, f32, f32); TEAMS],
     /// Everything in the air. See `volley.rs` for why a missile is not a reach.
     pub sky: crate::volley::Sky,
     /// Blows thrown this tick, waiting to land. A reused buffer: at four
@@ -180,6 +206,8 @@ impl Battle {
             grid,
             stats: Stats::default(),
             archetypes: [[Archetype::default(); crate::army::MAX_ARCHETYPES]; TEAMS],
+            anchors: [[(0.0, 0.0); crate::army::MAX_DIVISIONS]; TEAMS],
+            centre: [(0.0, 0.0, 0.0); TEAMS],
             cfg,
             seed,
             tick: 0,
@@ -314,7 +342,27 @@ impl Battle {
             let (cx, cy) = geom.cell_xy(cell);
             let (_, fgx, fgy) =
                 geom.sample(&self.grid.strength[foe(team as u8)], cx as i32, cy as i32);
-            let (dx, dy) = unit(fgx, fgy);
+            // Which way the enemy is. The gradient is the better answer when it
+            // has one, because it points at the part of the enemy nearest this
+            // man rather than at the army as a whole -- but it only has one
+            // when the enemy is within a cell or so, and that is the length of
+            // a spear, not the length of a bowshot. Beyond it, aim at where the
+            // enemy army's weight is; `aim` then walks out along that line and
+            // picks the thickest ground it crosses inside range, so the coarse
+            // direction only has to be roughly right.
+            let (dx, dy) = {
+                let (gx, gy) = unit(fgx, fgy);
+                if gx != 0.0 || gy != 0.0 {
+                    (gx, gy)
+                } else {
+                    let far = self.centre[foe(team as u8)];
+                    if far.2 > 0.0 {
+                        unit(far.0 - self.army.x[i], far.1 - self.army.y[i])
+                    } else {
+                        (0.0, 0.0)
+                    }
+                }
+            };
             let shot = crate::volley::aim(
                 &self.grid,
                 crate::volley::Aim {
@@ -423,6 +471,38 @@ impl Battle {
         (kind_of, strength)
     }
 
+    /// Which side is assaulting, this battle.
+    #[inline(always)]
+    pub fn attacker(cfg: &Config) -> u8 {
+        if cfg.attacker_side >= 0.5 {
+            GUARD
+        } else {
+            ATTACKER
+        }
+    }
+
+    /// Which side is holding, this battle.
+    #[inline(always)]
+    pub fn guard(cfg: &Config) -> u8 {
+        foe(Self::attacker(cfg)) as u8
+    }
+
+    /// What a side's doctrine does to the roster: how far its missile arms
+    /// reach, and how long they take to reload.
+    ///
+    /// Both are multipliers on what the roster says, so the roster stays the
+    /// one baseline and the traits are read against it. The attacker trades
+    /// reach for rate -- it means to be close anyway -- and the guard trades
+    /// the other way, because it is shooting into an approach it does not have
+    /// to make.
+    fn doctrine(cfg: &Config, team: u8) -> (f32, f32) {
+        if team == Self::guard(cfg) {
+            (cfg.guard_range, cfg.guard_reload)
+        } else {
+            (cfg.attacker_range, cfg.attacker_reload)
+        }
+    }
+
     /// Put both armies on the field, facing each other.
     fn deploy(&mut self) {
         let cfg = self.cfg;
@@ -434,8 +514,21 @@ impl Battle {
         // heavier and lighter versions of one.
         let arms = crate::army::arms_in_play(cfg.kinds);
         for team in 0..TEAMS {
+            let (range, reload) = Self::doctrine(&cfg, team as u8);
             for kind in 0..arms {
-                self.archetypes[team][kind] = Archetype::of(kind);
+                let mut a = Archetype::of(kind);
+                // Doctrine, applied once here rather than every tick. The
+                // archetype table is already one table per side, so an army
+                // that fights differently costs nothing at all in the tick and
+                // not one byte on the man.
+                //
+                // Every arm that shoots, engines included: this is how the two
+                // sides make war, not a note about bows.
+                if a.shoots() {
+                    a.range *= range;
+                    a.reload = ((a.reload as f32 * reload) as u16).max(1);
+                }
+                self.archetypes[team][kind] = a;
             }
         }
 
@@ -523,14 +616,28 @@ impl Battle {
                 };
                 let cx = if team == 0 { cx - back } else { cx + back };
 
+                // The middle of the ground this body is drawn up on, kept so
+                // it can be found again. Taken from the band rather than from
+                // where the men happen to land, so it is the formation's place
+                // in the line and not the average of a scatter.
+                self.anchors[team][d] = (
+                    cx,
+                    clamp_field(size * 0.5 + (band_lo + band_hi) * 0.5 * width, size),
+                );
+
                 for _ in 0..strength_of[d] {
                     let x = clamp_field(cx + rng.range(-depth * 0.5, depth * 0.5), size);
                     let across = rng.range(band_lo, band_hi);
                     let y = clamp_field(size * 0.5 + across * width, size);
-                    if !self
-                        .army
-                        .push(x, y, facing + rng.range(-0.2, 0.2), team as u8, kind, &a)
-                    {
+                    if !self.army.push(
+                        x,
+                        y,
+                        facing + rng.range(-0.2, 0.2),
+                        team as u8,
+                        kind,
+                        d as u8,
+                        &a,
+                    ) {
                         break;
                     }
                 }
@@ -547,12 +654,16 @@ impl Battle {
         self.grid
             .rebuild(&self.army.x, &self.army.y, self.army.len());
         self.grid.clear_fields();
+        self.centre = [(0.0, 0.0, 0.0); TEAMS];
         for i in 0..self.army.len() {
             if !self.army.alive(i) {
                 continue;
             }
             let cell = self.grid.units.cell_of[i] as usize;
             let team = self.army.team[i] as usize;
+            self.centre[team].0 += self.army.x[i];
+            self.centre[team].1 += self.army.y[i];
+            self.centre[team].2 += 1.0;
             let a = &self.archetypes[team][self.army.kind[i] as usize];
             // Strength, not head count: a unit at a tenth of its health should
             // not make the line read as though it were fresh.
@@ -567,6 +678,12 @@ impl Battle {
             let worth = a.worth() * health;
             self.grid.strength[team][cell] += worth * seen.max(0.0);
             self.grid.count[team][cell] += 1.0;
+        }
+        for c in self.centre.iter_mut() {
+            if c.2 > 0.0 {
+                c.0 /= c.2;
+                c.1 /= c.2;
+            }
         }
     }
 
@@ -607,6 +724,7 @@ impl Battle {
         // this battle happens to have, and doing it per man per tick would be a
         // division a million times over for a constant.
         let press_full = cfg.press_per_cell();
+        let guarding = Self::guard(&cfg);
 
         for i in 0..self.army.len() {
             if !self.army.alive(i) {
@@ -641,9 +759,34 @@ impl Battle {
                 0.0
             };
             // Nobody in sight: hold the heading rather than jittering on the
-            // spot. There is no order to fall back on any more.
+            // spot -- unless this is the side that guards, in which case
+            // nobody in sight means go back to your place in the line.
+            //
+            // `hold` is how much of a step he takes, and it exists because a
+            // man in this engine cannot stand still: the step is always his
+            // speed along his heading, and the steering vector only says which
+            // way. Damping the vector thins a rear rank; it does not stop
+            // anybody. So a guard within his station takes no step at all, and
+            // everybody else takes a whole one.
+            let mut hold = 1.0;
             let (mut tx, mut ty) = if seen > 0.0 {
                 (ex, ey)
+            } else if team as u8 == guarding && cfg.guard_recall > 0.0 {
+                let (ax, ay) = self.anchors[team][self.army.division[i] as usize];
+                let (hx, hy) = (ax - self.army.x[i], ay - self.army.y[i]);
+                let home = sqrt(hx * hx + hy * hy);
+                let station = (cfg.field_size * cfg.guard_station).max(1e-3);
+                let march = clamp(home / station, 0.0, 1.0);
+                hold = 1.0 - cfg.guard_recall * (1.0 - march);
+                let (s, c) = sin_cos(self.army.heading[i]);
+                let (dx, dy) = unit(hx, hy);
+                // Blended rather than switched, so the parameter is a dial
+                // between the old behaviour at zero -- walk on, there is no
+                // rear to go to -- and a defence that reforms at one.
+                (
+                    c * (1.0 - cfg.guard_recall) + dx * cfg.guard_recall,
+                    s * (1.0 - cfg.guard_recall) + dy * cfg.guard_recall,
+                )
             } else {
                 let (s, c) = sin_cos(self.army.heading[i]);
                 (c, s)
@@ -701,8 +844,8 @@ impl Battle {
             let going = clamp(1.0 - cfg.slope_cost * climb, 0.25, 1.5)
                 * (1.0 - cfg.cover_drag * self.grid.cover[cell_now]);
 
-            let x = clamp_field(self.army.x[i] + c * speed * going, size);
-            let y = clamp_field(self.army.y[i] + s * speed * going, size);
+            let x = clamp_field(self.army.x[i] + c * speed * going * hold, size);
+            let y = clamp_field(self.army.y[i] + s * speed * going * hold, size);
             self.army.x[i] = x;
             self.army.y[i] = y;
         }
@@ -1057,19 +1200,27 @@ mod tests {
         ]
     }
 
-    /// Both sides must close on each other at the same rate.
+    /// Both sides must close on each other at the same rate -- *with the
+    /// doctrines switched off*.
     ///
     /// On flat bare ground, before a blow is struck, red walking east and blue
     /// walking west are the same problem reflected. This exists because the
-    /// simulator currently hands one side a win it did not earn -- whoever
-    /// deploys at the lower coordinate takes eight battles out of eight -- and
-    /// this is the pass that had to be ruled out first. It was: measured across
-    /// twenty seeds the pre-contact drift is +0.03 units with a standard error
-    /// of 0.13, positive in nine seeds of twenty. Movement is even; the
-    /// advantage is made after contact.
+    /// simulator hands one side a win it did not earn -- whoever deploys at the
+    /// lower coordinate takes eight battles out of eight -- and this is the
+    /// pass that had to be ruled out first. It was: measured across twenty
+    /// seeds the pre-contact drift is +0.03 units with a standard error of
+    /// 0.13, positive in nine seeds of twenty. Movement is even; the advantage
+    /// is made after contact.
+    ///
+    /// The two armies are deliberately unlike each other now, and blue is
+    /// *supposed* to close more slowly, so the symmetry is measured with
+    /// `guard_recall` at zero. That is not the test being weakened to fit: it
+    /// is the same claim about the movement pass, made where the claim still
+    /// means anything. The asymmetry itself is measured by the test below.
     #[test]
     fn both_sides_close_at_the_same_rate() {
-        let cfg = flat();
+        let mut cfg = flat();
+        cfg.guard_recall = 0.0;
         let mut b = Battle::new(cfg, 5);
         let start = centres(&b);
         b.tick_many(60);
@@ -1086,6 +1237,113 @@ mod tests {
             gap < red_advance.abs().max(blue_advance.abs()) * 0.05,
             "red closed {red_advance:.3} and blue closed {blue_advance:.3} over \
              the same flat ground -- one side is being carried"
+        );
+    }
+
+    /// The guard guards: blue holds the ground it formed up on, and red does
+    /// not.
+    ///
+    /// Measured as ground given up rather than as a flag being set, because
+    /// what was asked for is a defence, and a defence is a thing you can see
+    /// from a distance: two armies that were mirror images now advance
+    /// differently over the same flat field.
+    #[test]
+    fn the_guard_holds_its_ground_and_the_attacker_does_not() {
+        let cfg = flat();
+        let mut b = Battle::new(cfg, 5);
+        let start = centres(&b);
+        b.tick_many(60);
+        assert_eq!(
+            b.stats.red_killed + b.stats.blue_killed,
+            0.0,
+            "already in contact, so this is no longer measuring the march"
+        );
+        let now = centres(&b);
+        let red_advance = now[0] - start[0];
+        let blue_advance = start[1] - now[1];
+        assert!(
+            red_advance > 0.0,
+            "red is the attacker and did not attack: {red_advance:.3}"
+        );
+        assert!(
+            blue_advance < red_advance * 0.95,
+            "blue closed {blue_advance:.3} against red's {red_advance:.3} -- \
+             the guard is marching like an attacker"
+        );
+    }
+
+    /// A guard standing on its own ground with nobody in sight stays there.
+    ///
+    /// The narrow claim behind the one above, and the one that would break
+    /// silently: a man in this engine always steps at his speed along his
+    /// heading, so holding a position is not the absence of a rule but a rule
+    /// of its own.
+    #[test]
+    fn a_guard_alone_on_the_field_stays_where_it_formed_up() {
+        let mut cfg = flat();
+        // Far enough apart that neither army can sense the other at all, so
+        // this measures standing still and nothing else.
+        cfg.deploy_separation = 0.9;
+        cfg.sanitize();
+        let mut b = Battle::new(cfg, 3);
+        let start = centres(&b);
+        b.tick_many(400);
+        let now = centres(&b);
+        let blue_drift = (now[1] - start[1]).abs();
+        let red_march = now[0] - start[0];
+        assert!(
+            blue_drift < 2.0,
+            "blue wandered {blue_drift:.3} units off its own ground with \
+             nothing in front of it"
+        );
+        assert!(
+            red_march > 10.0,
+            "red went looking for a fight and covered only {red_march:.3}"
+        );
+    }
+
+    /// The doctrines are real, and they are doctrines rather than an edit to
+    /// the archer.
+    #[test]
+    fn the_attacker_shoots_short_and_fast_and_the_guard_long_and_slow() {
+        let b = Battle::new(small(), 1);
+        let arms = crate::army::arms_in_play(b.cfg.kinds);
+        let mut shooters = 0;
+        for kind in 0..arms {
+            let red = b.archetypes[Battle::attacker(&b.cfg) as usize][kind];
+            let blue = b.archetypes[Battle::guard(&b.cfg) as usize][kind];
+            let roster = Archetype::of(kind);
+            if !roster.shoots() {
+                assert_eq!(red.range, blue.range, "kind {kind} has no missile");
+                assert_eq!(
+                    red.damage, blue.damage,
+                    "kind {kind} was given a doctrine it has no use for"
+                );
+                continue;
+            }
+            shooters += 1;
+            assert!(
+                red.range < roster.range && red.range < blue.range,
+                "kind {kind}: the attacker reaches {} against the guard's {}",
+                red.range,
+                blue.range
+            );
+            assert!(
+                red.reload < roster.reload && red.reload < blue.reload,
+                "kind {kind}: the attacker reloads in {} against the guard's {}",
+                red.reload,
+                blue.reload
+            );
+            // The roster is still the baseline both are read against.
+            assert!(blue.range > roster.range && blue.reload > roster.reload);
+            // And nothing else about the man changed.
+            assert_eq!(red.hp, blue.hp);
+            assert_eq!(red.speed, blue.speed);
+            assert_eq!(red.volley, blue.volley);
+        }
+        assert!(
+            shooters >= 2,
+            "the doctrine was meant to cover every missile arm and found {shooters}"
         );
     }
 

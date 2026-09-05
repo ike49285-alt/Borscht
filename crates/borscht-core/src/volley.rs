@@ -327,7 +327,7 @@ mod tests {
         let a = Archetype::default();
         let mut army = Army::new(64);
         for &(x, y, team) in units {
-            army.push(x, y, 0.0, team, 0, &a);
+            army.push(x, y, 0.0, team, 0, 0, &a);
         }
         let grid = index(&army);
         (army, grid)

@@ -358,6 +358,13 @@ pub struct Army {
     pub hp: Vec<f32>,
     pub team: Vec<u8>,
     pub kind: Vec<u8>,
+    /// Which body of the army the man formed up with.
+    ///
+    /// One byte, and it buys the defence a home: the battle keeps one anchor
+    /// per division per side, so a guard who has lost sight of the enemy knows
+    /// the ground he is supposed to be standing on without anybody storing a
+    /// position per man.
+    pub division: Vec<u8>,
     /// Ticks until this unit can strike again.
     pub cooldown: Vec<u8>,
     /// Ticks until this man can loose again. Zero for anyone who carries no
@@ -387,6 +394,7 @@ impl Army {
             hp: f(0.0),
             team: vec![0u8; capacity],
             kind: vec![0u8; capacity],
+            division: vec![0u8; capacity],
             cooldown: vec![0u8; capacity],
             reload: vec![0u16; capacity],
             flags: vec![0u8; capacity],
@@ -444,6 +452,7 @@ impl Army {
         heading: f32,
         team: u8,
         kind: u8,
+        division: u8,
         archetype: &Archetype,
     ) -> bool {
         if self.is_full() {
@@ -457,6 +466,7 @@ impl Army {
         self.hp[i] = archetype.hp;
         self.team[i] = team;
         self.kind[i] = kind;
+        self.division[i] = division;
         self.cooldown[i] = 0;
         // Staggered, so a body of archers does not loose as one man and then
         // stand idle together for the whole reload.
@@ -508,6 +518,7 @@ impl Army {
                 self.hp[i] = self.hp[last];
                 self.team[i] = self.team[last];
                 self.kind[i] = self.kind[last];
+                self.division[i] = self.division[last];
                 self.cooldown[i] = self.cooldown[last];
                 self.reload[i] = self.reload[last];
                 self.flags[i] = self.flags[last];
@@ -564,7 +575,7 @@ mod tests {
         let a = Archetype::default();
         let mut army = Army::new(16);
         for i in 0..10 {
-            army.push(i as f32, 0.0, 0.0, (i % 2) as u8, 0, &a);
+            army.push(i as f32, 0.0, 0.0, (i % 2) as u8, 0, 0, &a);
         }
         army
     }
@@ -573,9 +584,9 @@ mod tests {
     fn a_full_pool_refuses_rather_than_growing() {
         let a = Archetype::default();
         let mut army = Army::new(2);
-        assert!(army.push(0.0, 0.0, 0.0, 0, 0, &a));
-        assert!(army.push(0.0, 0.0, 0.0, 0, 0, &a));
-        assert!(!army.push(0.0, 0.0, 0.0, 0, 0, &a));
+        assert!(army.push(0.0, 0.0, 0.0, 0, 0, 0, &a));
+        assert!(army.push(0.0, 0.0, 0.0, 0, 0, 0, &a));
+        assert!(!army.push(0.0, 0.0, 0.0, 0, 0, 0, &a));
         assert_eq!(army.len(), 2);
     }
 
@@ -611,7 +622,7 @@ mod tests {
     fn armour_turns_damage_aside_but_never_all_of_it() {
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(0.0, 0.0, 0.0, 0, 0, &a);
+        army.push(0.0, 0.0, 0.0, 0, 0, 0, &a);
         assert!(!army.wound(0, 10.0, 0.5));
         assert!((army.hp[0] - 95.0).abs() < 1e-3);
         // Armour beyond the cap is still not immunity.
@@ -623,7 +634,7 @@ mod tests {
     fn a_unit_dies_when_its_health_runs_out() {
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(0.0, 0.0, 0.0, 0, 0, &a);
+        army.push(0.0, 0.0, 0.0, 0, 0, 0, &a);
         assert!(army.wound(0, 1000.0, 0.0));
         assert!(!army.alive(0));
         assert_eq!(army.target[0], NO_TARGET);
