@@ -182,22 +182,8 @@ pub struct Grid {
     /// count because a wounded unit should pull less weight in the decision to
     /// advance than a fresh one.
     pub strength: [Vec<f32>; TEAMS],
-    /// Of that strength, how much of it is on horseback.
-    ///
-    /// A separate field rather than something read off the units, because
-    /// everything a commander senses is sensed as a field -- and "where is
-    /// their cavalry" is the question a spear wall exists to answer.
-    pub mounted: [Vec<f32>; TEAMS],
     /// Head count per cell, per side.
     pub count: [Vec<f32>; TEAMS],
-    /// Units killed in this cell recently, per side, decaying over a few ticks.
-    ///
-    /// This is what makes a collapse spread: morale reads the field, so a unit
-    /// feels the men dying around it without anyone walking a neighbour list.
-    pub losses: [Vec<f32>; TEAMS],
-    /// Routing units per cell, per side. Panic is contagious, and this is the
-    /// carrier.
-    pub routing: [Vec<f32>; TEAMS],
 
     /// Height of the ground, **in world units** -- the same units as a unit's
     /// `x` and `y`, so a difference divided by a distance is a real grade.
@@ -232,10 +218,7 @@ impl Grid {
             },
             units: Buckets::default(),
             strength: zeros(),
-            mounted: zeros(),
             count: zeros(),
-            losses: zeros(),
-            routing: zeros(),
             height: vec![0.0f32; cells],
             relief: 0.0,
             cover: vec![0.0f32; cells],
@@ -324,18 +307,7 @@ impl Grid {
     pub fn clear_fields(&mut self) {
         for t in 0..TEAMS {
             self.strength[t].fill(0.0);
-            self.mounted[t].fill(0.0);
             self.count[t].fill(0.0);
-            self.routing[t].fill(0.0);
-        }
-    }
-
-    /// Fade the casualty field toward zero.
-    pub fn decay_losses(&mut self, keep: f32) {
-        for t in 0..TEAMS {
-            for v in self.losses[t].iter_mut() {
-                *v *= keep;
-            }
         }
     }
 
@@ -419,16 +391,6 @@ mod tests {
     fn the_other_side_is_the_other_side() {
         assert_eq!(foe(0), 1);
         assert_eq!(foe(1), 0);
-    }
-
-    #[test]
-    fn losses_decay_rather_than_clearing() {
-        let mut g = grid();
-        g.losses[0][5] = 1.0;
-        g.clear_fields();
-        assert_eq!(g.losses[0][5], 1.0, "clearing must not wipe the memory");
-        g.decay_losses(0.5);
-        assert_eq!(g.losses[0][5], 0.5);
     }
 
     #[test]

@@ -58,8 +58,6 @@ pub struct Volley {
 pub struct Toll {
     pub damage: [f32; 2],
     pub killed: [u32; 2],
-    /// Of those, the ones who were already running.
-    pub killed_routing: [u32; 2],
 }
 
 /// Everything in the air, filed by the tick it comes down on.
@@ -226,7 +224,6 @@ impl Sky {
                 }
                 let armour = archetypes[victims][army.kind[i] as usize].armour;
                 let before = army.hp[i];
-                let was_running = army.routing(i);
                 // Through `wound` rather than straight into the health array:
                 // that is where a man who runs out of health is marked dead, and
                 // subtracting here left corpses walking around with nothing left
@@ -238,9 +235,6 @@ impl Sky {
                     // vanishing off the roll -- neither alive nor a casualty --
                     // which is exactly what the battle's accounting test is for.
                     done.killed[victims] += 1;
-                    if was_running {
-                        done.killed_routing[victims] += 1;
-                    }
                 }
                 done.damage[victims] += (before - army.hp[i]).max(0.0);
             }
@@ -333,7 +327,7 @@ mod tests {
         let a = Archetype::default();
         let mut army = Army::new(64);
         for &(x, y, team) in units {
-            army.push(x, y, 0.0, team, 0, 0, &a);
+            army.push(x, y, 0.0, team, 0, &a);
         }
         let grid = index(&army);
         (army, grid)

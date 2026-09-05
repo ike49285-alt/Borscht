@@ -153,24 +153,6 @@ pub extern "C" fn outcome() -> u32 {
     battle().map_or(0, |b| b.outcome() as u32)
 }
 
-/// The name of the commander this build fights with, low and high halves.
-///
-/// A verdict passed on a battle somebody watched is worth nothing if it cannot
-/// be tied to the commander that was actually on the field: "this played badly"
-/// has to mean *this one*, not whichever weights the page happened to be built
-/// with that week. Split across two exports because the ABI carries `u32` and
-/// the name is 64 bits; the host joins them back into the same hex string the
-/// match log writes.
-#[no_mangle]
-pub extern "C" fn commander_lo() -> u32 {
-    borscht_core::brain::Net::trained().fingerprint() as u32
-}
-
-#[no_mangle]
-pub extern "C" fn commander_hi() -> u32 {
-    (borscht_core::brain::Net::trained().fingerprint() >> 32) as u32
-}
-
 // ------------------------------------------------------------- parameters --
 
 #[no_mangle]
@@ -336,7 +318,7 @@ pub extern "C" fn kinds_ptr() -> *const f32 {
 // ---------------------------------------------------------------- inspect --
 
 /// Fields returned by [`inspect`], in order.
-pub const INSPECT_FIELDS: usize = 8;
+pub const INSPECT_FIELDS: usize = 6;
 
 /// Look up the unit nearest a point, within `radius`.
 ///
@@ -370,10 +352,8 @@ pub extern "C" fn inspect(x: f32, y: f32, radius: f32) -> u32 {
     out.push(b.army.kind[i] as f32);
     out.push(b.army.hp[i]);
     out.push(a.hp);
-    out.push(b.army.morale[i]);
     out.push(b.army.speed[i]);
     out.push(b.army.heading[i]);
-    out.push(if b.army.routing(i) { 1.0 } else { 0.0 });
     out.len() as u32
 }
 

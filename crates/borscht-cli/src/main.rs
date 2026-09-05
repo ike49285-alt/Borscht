@@ -7,16 +7,12 @@
 mod png;
 mod render;
 
-use borscht_core::brain::Net;
 use borscht_core::config::{Config, PARAMS};
 use borscht_core::stats::STAT_NAMES;
 use borscht_core::{Battle, ColorMode, Outcome};
 use std::time::Instant;
 
-mod matchlog;
 mod sweep;
-mod train;
-mod verdict;
 
 fn usage() -> ! {
     eprintln!(
@@ -130,8 +126,6 @@ fn parse() -> Args {
                 args.color = match value().as_str() {
                     "kind" => ColorMode::Kind,
                     "health" => ColorMode::Health,
-                    "morale" => ColorMode::Morale,
-                    "division" => ColorMode::Division,
                     _ => ColorMode::Team,
                 }
             }
@@ -200,9 +194,6 @@ fn main() {
     match args.command.as_str() {
         "bench" => bench(&args),
         "battle" | "run" => battle(&args),
-        "nerve" => nerve(&args),
-        "orders" => orders(&args),
-        "replay" => replay(&args),
         "sweep" => sweep::run(
             &build_config(
                 args.musters.first().copied().or(Some(8_000)),
@@ -214,30 +205,6 @@ fn main() {
             // from being scored as though they had. A cap that truncates
             // quietly turns "still fighting" into "nobody won".
             if args.ticks == 2000 { 8000 } else { args.ticks },
-            args.doctrine,
-        ),
-        "train" => train::run(&train::Plan {
-            cfg: build_config(
-                Some(args.musters.first().copied().unwrap_or(4_000)),
-                &args.overrides,
-            ),
-            seed: args.seed,
-            ticks: if args.ticks == 2000 { 1500 } else { args.ticks },
-            generations: args.generations,
-            population: args.population,
-            sigma: args.sigma,
-            out: args.out.clone(),
-            log: args.log.clone(),
-            verdicts: args.verdicts.clone(),
-        }),
-        "match" => versus(&args),
-        // Which commander does this build actually ship? The page reports the
-        // same name from the WebAssembly module, and a verdict recorded there
-        // is worthless if the two ever disagree -- so it is checkable from the
-        // shell rather than only inferable.
-        "commander" => println!(
-            "{}",
-            matchlog::name_of(&borscht_core::brain::Net::trained())
         ),
         "params" if args.json => emit_params_js(),
         "params" => list_params(),
@@ -373,364 +340,11 @@ fn bench(args: &Args) {
 
 // ------------------------------------------------------------------ replay --
 
-/// Fight a recorded battle again and report what happened.
-///
-/// The point of the match log: a training run's twenty thousand battles stop
-/// being a number and become a list you can pull any line out of and watch.
-fn replay(args: &Args) {
-    let Some(dir) = &args.log else {
-        eprintln!(
-            "error: replay needs a log directory, e.g. `borscht replay runs/today --match 12`"
-        );
-        std::process::exit(2);
-    };
-    let Some(id) = args.match_id else {
-        eprintln!("error: replay needs --match ID");
-        std::process::exit(2);
-    };
-    let recorded = match matchlog::find(std::path::Path::new(dir), id) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(2);
-        }
-    };
-
-    let row = recorded.row.clone();
-    println!(
-        "match {id} from {}: seed {}, stream {}, red {} against blue {}",
-        row.phase, row.seed, row.stream, row.red, row.blue
-    );
-
-    // Frames are spread over the battle's recorded length rather than a tick
-    // cap: a replay is the one case where how long the fight ran is known
-    // before it is fought again.
-    let mut canvas = args.out.as_ref().filter(|_| args.frames > 0).map(|out| {
-        let _ = std::fs::create_dir_all(out);
-        render::Canvas::new(args.image_size)
-    });
-    let frame_every = (row.ticks / args.frames.max(1) as u64).max(1);
-    let mut frames_written = 0u32;
-
-    let mut b = matchlog::replay(&recorded, |b| {
-        let Some(canvas) = canvas.as_mut() else {
-            return;
-        };
-        if b.tick % frame_every != 0 || frames_written >= args.frames {
-            return;
-        }
-        canvas.draw(b, args.color);
-        let out = args.out.as_ref().expect("a canvas implies an output dir");
-        let _ = std::fs::write(
-            format!("{out}/match{id:06}-{frames_written:03}.png"),
-            canvas.encode(),
-        );
-        frames_written += 1;
-    });
-    let alive = b.army.muster();
-    // The claim the whole record rests on. If a replay disagrees with the row it
-    // came from, the log is decoration and had better say so out loud.
-    let faithful = alive == row.alive && b.tick == row.ticks;
-    println!(
-        "  recorded: {} ticks, red {} blue {}",
-        row.ticks, row.alive[0], row.alive[1]
-    );
-    println!(
-        "  replayed: {} ticks, red {} blue {}   {}",
-        b.tick,
-        alive[0],
-        alive[1],
-        if faithful {
-            "-- identical"
-        } else {
-            "-- DIFFERENT, the log cannot be trusted"
-        }
-    );
-
-    // The last frame is the one worth having whatever else was asked for: it
-    // is how the battle actually ended.
-    if let Some(out) = &args.out {
-        let _ = std::fs::create_dir_all(out);
-        let mut canvas = render::Canvas::new(args.image_size);
-        canvas.draw(&mut b, args.color);
-        let path = format!("{out}/match{id:06}-end.png");
-        let _ = std::fs::write(&path, canvas.encode());
-        println!("  wrote {frames_written} frames and {path}");
-    }
-    if !faithful {
-        std::process::exit(1);
-    }
-}
-
 // ------------------------------------------------------------------- match --
-
-/// The commander this build ships against the doctrine, at whatever muster is
-/// asked for.
-///
-/// This exists because of a gap between where a commander is trained and where
-/// it is watched. Training happens at a few thousand a side, because that is
-/// what fits in an afternoon; the page opens at a hundred thousand. Conclusions
-/// here are already known not to carry between musters -- twelve and twenty
-/// thousand disagreed at four standard errors -- so "it won the battles it was
-/// trained on" is a different claim from "it is better", and only one of them is
-/// worth shipping on.
-fn versus(args: &Args) {
-    let cfg = build_config(
-        args.musters.first().copied().or(Some(8_000)),
-        &args.overrides,
-    );
-    let ticks = if args.ticks == 2000 {
-        12_000
-    } else {
-        args.ticks
-    };
-    let trained = Net::trained();
-    let doctrine = Net::doctrine();
-    let name = matchlog::name_of(&trained);
-    if name == matchlog::name_of(&doctrine) {
-        println!("this build ships the doctrine, so there is nothing to compare it against.");
-        return;
-    }
-
-    let seeds: Vec<u64> = (0..args.seeds).map(|i| 700_000 + i).collect();
-    println!(
-        "commander {name} against the doctrine: {} battles of {} men, mirrored",
-        seeds.len() * 2,
-        cfg.units_per_side * 2
-    );
-
-    let scores: Vec<f32> = seeds
-        .iter()
-        .map(|&s| train::duel(&cfg, s, &trained, &doctrine, ticks))
-        .collect();
-    let mean = scores.iter().sum::<f32>() / scores.len().max(1) as f32;
-    let won = scores.iter().filter(|v| **v > 0.0).count();
-
-    // The bar is the same one the trainer's own verdict uses, and for the same
-    // reason: this is a mean over seeds, so what it has to clear is the
-    // uncertainty of a mean, not the spread of a single battle.
-    let (_, sd) = train::noise_floor(&cfg, &doctrine, &seeds, ticks);
-    let se = sd / (seeds.len() as f32).sqrt();
-    let bar = 2.0 * se;
-    println!(
-        "  margin {mean:+.4} over {} seeds, ahead on {won} of them",
-        seeds.len()
-    );
-    println!(
-        "  noise: single battles spread {sd:.4}, so this mean carries {se:.4}; the bar is {bar:.4}"
-    );
-    if mean > bar {
-        println!("  -> better than the doctrine here.");
-    } else if mean < -bar {
-        println!("  -> WORSE than the doctrine here.");
-    } else {
-        println!("  -> not distinguishable from the doctrine here.");
-    }
-}
 
 // ------------------------------------------------------------------ orders --
 
-/// What the commanders decided, and whether the divisions are still divisions.
-///
-/// Two questions this exists to answer, and neither is visible in a battle
-/// summary. Does the doctrine send every division to the same sector -- in
-/// which case this is the old single order point wearing six times the
-/// machinery? And is a reserve ever actually committed, or does it stand behind
-/// the line for the whole battle?
-fn orders(args: &Args) {
-    let cfg = build_config(args.musters.first().copied(), &args.overrides);
-    let divisions = (cfg.divisions as usize).min(borscht_core::army::MAX_DIVISIONS);
-    let mut b = Battle::new(cfg, args.seed);
-    // `--doctrine` watches the hand-written commander instead of the shipped
-    // one. Which of the two is giving the orders is the whole question when a
-    // trained commander turns out to play differently from the one it replaced,
-    // and reading the two side by side is the only way to see it.
-    if args.doctrine {
-        b.doctrine = [Net::doctrine(); 2];
-    }
-    println!(
-        "orders from {}",
-        if args.doctrine {
-            "the hand-written doctrine".to_string()
-        } else {
-            format!("commander {}", matchlog::name_of(&Net::trained()))
-        }
-    );
-    let every = (args.ticks / 16).max(1);
-
-    // When each division first stopped being a reserve.
-    let mut committed = [[None::<u32>; borscht_core::army::MAX_DIVISIONS]; 2];
-
-    println!(
-        "{:>6} {:>5} {:>7} {:>28} {:>9}",
-        "tick", "side", "spread", "postures", "sectors"
-    );
-    for tick in 0..args.ticks {
-        b.tick();
-        for (team, marks) in committed.iter_mut().enumerate() {
-            for (d, mark) in marks.iter_mut().enumerate().take(divisions) {
-                if mark.is_none()
-                    && b.orders[team][d].posture != borscht_core::Posture::Reserve
-                    && tick > 0
-                {
-                    *mark = Some(tick);
-                }
-            }
-        }
-        if tick % every != 0 {
-            continue;
-        }
-        for (team, name) in ["red", "blue"].iter().enumerate() {
-            // Mean distance between division centroids, against the field. This
-            // is the number that says whether the army is still an army of
-            // bodies or has melted into one crowd.
-            let s = &b.divisions[team];
-            let (mut sum, mut pairs) = (0.0f32, 0u32);
-            for a in 0..divisions {
-                for c in a + 1..divisions {
-                    if s[a].men == 0 || s[c].men == 0 {
-                        continue;
-                    }
-                    let (dx, dy) = (s[a].x - s[c].x, s[a].y - s[c].y);
-                    sum += (dx * dx + dy * dy).sqrt();
-                    pairs += 1;
-                }
-            }
-            let spread = sum / pairs.max(1) as f32 / b.field_size();
-            let postures: Vec<&str> = (0..divisions)
-                .map(|d| &b.orders[team][d].posture.name()[..4])
-                .collect();
-            let sectors: Vec<String> = (0..divisions)
-                .map(|d| b.orders[team][d].sector.to_string())
-                .collect();
-            let distinct: std::collections::HashSet<u8> =
-                (0..divisions).map(|d| b.orders[team][d].sector).collect();
-            println!(
-                "{tick:>6} {name:>5} {spread:>7.3} {:>28} {:>3} of {}",
-                postures.join(","),
-                distinct.len(),
-                divisions
-            );
-            let _ = sectors;
-        }
-    }
-
-    println!(
-        "
-  RESERVES"
-    );
-    for (team, name) in ["red", "blue"].iter().enumerate() {
-        let when: Vec<String> = committed[team]
-            .iter()
-            .take(divisions)
-            .map(|m| m.map_or("never".to_string(), |t| t.to_string()))
-            .collect();
-        println!("    {name:<5} committed at {}", when.join(", "));
-    }
-}
-
 // ------------------------------------------------------------------- nerve --
-
-/// Where a man's nerve is actually going, term by term.
-///
-/// The morale rule is six terms pulling against each other and the only visible
-/// output is whether the army broke, which is not enough to tell a rule that is
-/// wrong from one that is merely mistuned. This prints the mean of each term
-/// per tick, split by whether the man is in contact with the enemy -- because
-/// the whole point of giving the formation depth was that those two groups
-/// should no longer be the same group.
-fn nerve(args: &Args) {
-    let cfg = build_config(args.musters.first().copied(), &args.overrides);
-    let mut b = Battle::new(cfg, args.seed);
-    let every = (args.ticks / 20).max(1);
-
-    println!(
-        "{:>6} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8}",
-        "tick", "where", "men", "odds", "cohes", "ascend", "shock", "panic", "wound", "net/tick"
-    );
-    for tick in 0..args.ticks {
-        b.tick();
-        if tick % every != 0 {
-            continue;
-        }
-        // [front, rear] x [terms]
-        let mut sum = [[0.0f64; 6]; 2];
-        let mut men = [0u32; 2];
-        let mut worst = [Vec::new(), Vec::new()];
-        let mut nerve_now: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
-        // Where men are actually breaking, which is the question the mean of
-        // the delta cannot answer.
-        let mut broke = [0u32; 2];
-        for i in 0..b.army.len() {
-            if !b.army.alive(i) || b.army.routing(i) {
-                continue;
-            }
-            let team = b.army.team[i] as usize;
-            let a = b.archetypes[team][b.army.kind[i] as usize];
-            let cell = b.grid.units.cell_of[i] as usize;
-            let in_contact = b.grid.count[borscht_core::grid::foe(b.army.team[i])][cell] > 0.0;
-            let p =
-                borscht_core::morale::pressure_on(&b.army, &b.grid, &b.cfg, i, a.hp, b.host[team]);
-            let g = usize::from(!in_contact);
-            let c = &b.cfg;
-            let terms = [
-                (c.morale_odds * (p.odds - 0.5) * 2.0) as f64,
-                (c.morale_cohesion * p.cohesion) as f64,
-                (c.morale_ascendancy * p.ascendancy) as f64,
-                (-c.morale_shock * p.losses) as f64,
-                (-c.morale_panic * p.routing) as f64,
-                (-c.morale_wound * p.hurt) as f64,
-            ];
-            for (slot, v) in sum[g].iter_mut().zip(terms) {
-                *slot += v;
-            }
-            men[g] += 1;
-            worst[g].push(terms.iter().sum::<f64>());
-            nerve_now[g].push(b.army.morale[i]);
-            if b.army.morale[i] < a.nerve + 0.05 {
-                broke[g] += 1;
-            }
-        }
-        for (g, name) in ["front", "rear"].iter().enumerate() {
-            let n = men[g].max(1) as f64;
-            let t: Vec<f64> = sum[g].iter().map(|v| v / n).collect();
-            println!(
-                "{tick:>6} {name:>5} {:>7} {:>7.4} {:>7.4} {:>7.4} {:>7.4} {:>7.4} {:>7.4} {:>8.4}",
-                men[g],
-                t[0],
-                t[1],
-                t[2],
-                t[3],
-                t[4],
-                t[5],
-                t.iter().sum::<f64>()
-            );
-            // The mean hides the men it is actually happening to. A rule whose
-            // average is comfortably positive can still be sending a tenth of
-            // the army over the edge.
-            let w = &mut worst[g];
-            w.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let pick =
-                |q: f64| w.get(((w.len() as f64 * q) as usize).min(w.len().saturating_sub(1)));
-            let m = &mut nerve_now[g];
-            m.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let mpick = |q: f64| {
-                m.get(((m.len() as f64 * q) as usize).min(m.len().saturating_sub(1)))
-                    .copied()
-                    .unwrap_or(0.0)
-            };
-            if let (Some(p1), Some(p10)) = (pick(0.01), pick(0.10)) {
-                println!(
-                    "{:>12} delta worst 1% {p1:>8.4} 10% {p10:>8.4} | nerve 10% {:>5.2} 50% {:>5.2} | broke here {}",
-                    "",
-                    mpick(0.10),
-                    mpick(0.50),
-                    broke[g]
-                );
-            }
-        }
-    }
-}
 
 // ------------------------------------------------------------------ battle --
 
@@ -755,13 +369,6 @@ fn battle(args: &Args) {
     };
     let mut frame = 0;
 
-    // The rout trace. The spread between these is the measurement that matters:
-    // a real collapse is progressive and accelerating, so if 10%, 50% and 90%
-    // land on nearly the same tick the whole army broke at once, which is a
-    // flash rout and looks fake however good every other number is.
-    let mut milestones = [[None::<u32>; 3]; 2];
-    let mut peak_routing = 0u32;
-
     // The ground each side is standing on when the fighting starts.
     //
     // This is the measurement that says whether terrain decides anything or is
@@ -774,25 +381,6 @@ fn battle(args: &Args) {
     for tick in 0..args.ticks {
         b.tick();
         {
-            let alive = b.army.muster();
-            let mut routing_now = 0u32;
-            for team in 0..2 {
-                let holding = b.army.holding(team as u8);
-                let routing = alive[team].saturating_sub(holding);
-                routing_now += routing;
-                // Against the men still on the field, not against the muster:
-                // a router who is cut down stops counting as routing, so a
-                // share of the starting strength can never reach the top of
-                // the scale and the last milestone would never fire.
-                let share = routing as f32 / alive[team].max(1) as f32;
-                for (slot, want) in [0.10f32, 0.50, 0.90].iter().enumerate() {
-                    if milestones[team][slot].is_none() && share >= *want {
-                        milestones[team][slot] = Some(tick);
-                    }
-                }
-            }
-            peak_routing = peak_routing.max(routing_now);
-
             if contact_at.is_none() && b.stats.red_killed + b.stats.blue_killed > 0.0 {
                 contact_at = Some(tick);
                 let mut sum = [0.0f64; 2];
@@ -849,9 +437,8 @@ fn battle(args: &Args) {
     };
     if args.quiet {
         println!(
-            "ticks={} red={} blue={} red_holding={} blue_holding={} red_started={} blue_started={} red_killed={} blue_killed={} red_ground={:.4} blue_ground={:.4} red_slope={:.5} blue_slope={:.5} contact={} winner={winner}",
+            "ticks={} red={} blue={} red_started={} blue_started={} red_killed={} blue_killed={} red_ground={:.4} blue_ground={:.4} red_slope={:.5} blue_slope={:.5} contact={} winner={winner}",
             b.tick, end[0], end[1],
-            b.stats.red_holding, b.stats.blue_holding,
             started[0], started[1],
             b.stats.red_killed, b.stats.blue_killed,
             ground[0], ground[1],
@@ -861,18 +448,8 @@ fn battle(args: &Args) {
         );
     } else {
         println!("after {} ticks: {winner}", b.tick);
-        println!(
-            "  red   {:>8} of {:>8} ({} holding)",
-            end[0], started[0], b.stats.red_holding
-        );
-        println!(
-            "  blue  {:>8} of {:>8} ({} holding)",
-            end[1], started[1], b.stats.blue_holding
-        );
-        println!(
-            "  mean nerve   red {:.2}   blue {:.2}",
-            b.stats.red_morale, b.stats.blue_morale
-        );
+        println!("  red   {:>8} of {:>8}", end[0], started[0]);
+        println!("  blue  {:>8} of {:>8}", end[1], started[1]);
         println!(
             "  mean downhill on blows struck   red {:+.4}   blue {:+.4}",
             b.counters.blow_slope[0] / b.counters.blows[0].max(1) as f32,
@@ -886,31 +463,6 @@ fn battle(args: &Args) {
         );
 
         let c = b.counters;
-        let at = |m: Option<u32>| m.map_or("never".to_string(), |t| t.to_string());
-        println!("\n  ROUT");
-        for (team, name) in ["red", "blue"].iter().enumerate() {
-            println!(
-                "    {name:<5} broke {:>8}   10% at {:>6}   50% at {:>6}   90% at {:>6}",
-                c.broke[team],
-                at(milestones[team][0]),
-                at(milestones[team][1]),
-                at(milestones[team][2]),
-            );
-        }
-        println!(
-            "    peak running at once {peak_routing}, rallied in the field {}, re-formed at the rear {}",
-            c.rallied,
-            c.regrouped[0] + c.regrouped[1]
-        );
-        let fighting: u32 = c.killed_fighting.iter().sum();
-        let running: u32 = c.killed_routing.iter().sum();
-        let total = (fighting + running).max(1);
-        println!(
-            "    cut down fighting {fighting} ({:.0}%), running {running} ({:.0}%)",
-            100.0 * fighting as f32 / total as f32,
-            100.0 * running as f32 / total as f32
-        );
-
         // What each arm did and what it cost, which is the only way to see
         // whether combined arms is combined arms or five kinds of swordsman.
         //
@@ -922,6 +474,7 @@ fn battle(args: &Args) {
         let arms = borscht_core::army::arms_in_play(b.cfg.kinds);
         if arms > 1 {
             let shot: u32 = c.shot_kills.iter().sum();
+            let total = (c.killed_fighting[0] + c.killed_fighting[1]).max(1);
             println!("\n  ARMS");
             println!(
                 "    volleys loosed {} + {}, killed {shot} ({:.0}% of the dead)",

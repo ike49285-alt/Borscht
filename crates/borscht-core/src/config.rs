@@ -92,6 +92,12 @@ config_params! {
     max_units: u32 = 200_000, "field", 100.0, 4_000_000.0;
     /// Units each side musters.
     units_per_side: u32 = 40_000, "field", 10.0, 2_000_000.0;
+    /// Bodies each side forms up in, each drawing one arm.
+    ///
+    /// No longer anybody's command structure -- there is no commander -- but it
+    /// still shapes the line: how many separate blocks an army deploys in, and
+    /// therefore where each arm stands.
+    divisions: u32 = 6, "field", 1.0, 8.0;
     /// Arms each side fields, taken from the top of the roster.
     ///
     /// 1 is the plain shield wall this simulator started as; 5 is foot, spears,
@@ -120,40 +126,6 @@ config_params! {
     /// The other half of what cover is for. Woods already hide men from being
     /// sensed; this makes them somewhere worth standing when the arrows come.
     cover_shelter: f32 = 0.7, "combat", 0.0, 1.0;
-    /// Bodies each side is divided into, each with its own orders.
-    divisions: u32 = 6, "command", 1.0, 8.0;
-    /// Of those, how many are drawn up behind the line and held back.
-    ///
-    /// A reserve is the thing an army with one order point cannot have, and
-    /// committing one where the line is bending is the first decision worth
-    /// calling a decision.
-    reserve_divisions: u32 = 2, "command", 0.0, 4.0;
-    /// Ticks between one set of orders and the next.
-    ///
-    /// Long, deliberately. A commander who re-decides every tick produces
-    /// divisions that jitter between objectives and never arrive anywhere, and
-    /// real orders take time to write, carry and act on.
-    command_interval: f32 = 60.0, "command", 1.0, 600.0;
-    /// How much a division prefers the objective it has already been given.
-    ///
-    /// Added to the incumbent sector's score before the draw. Without it a
-    /// commander re-decides from scratch every interval and divisions oscillate:
-    /// a fresh draw over thirty-six sectors sends a body somewhere else every
-    /// sixty ticks, and it spends the battle marching between objectives rather
-    /// than arriving at one. The cost is invisible at a small muster, where the
-    /// sectors are close together, and enormous at a large one -- at a hundred
-    /// thousand men the armies took 3715 ticks to come to blows, against 275
-    /// with the commander frozen entirely.
-    ///
-    /// Real orders are not reversed every minute either.
-    order_inertia: f32 = 1.2, "command", 0.0, 8.0;
-    /// How much the commander's choice of objective is a draw rather than the
-    /// best sector outright.
-    ///
-    /// Zero would make the same weights give the same battle every time, and
-    /// would make a search over those weights snap between sectors instead of
-    /// improving smoothly.
-    command_temperature: f32 = 0.35, "command", 0.01, 4.0;
 
     /// How far apart the two musters are drawn up, as a fraction of the field.
     deploy_separation: f32 = 0.45, "deployment", 0.05, 0.95;
@@ -216,15 +188,6 @@ config_params! {
     /// Fraction of speed retained each tick, which is what gives a charge its
     /// build-up and a halt its slide.
     drag: f32 = 0.80, "movement", 0.0, 0.99;
-    /// Multiplier on top speed for a unit that has broken. Fear is faster than
-    /// discipline.
-    rout_speed: f32 = 1.5, "movement", 1.0, 4.0;
-    /// How much a fugitive's line of flight bends away from the enemy, against
-    /// the pull of the muster point he is running for.
-    ///
-    /// He heads for his own ground, but not in a straight line if that would
-    /// take him past the men chasing him.
-    rout_fear: f32 = 0.8, "movement", 0.0, 4.0;
 
     /// How far a unit will look for someone to fight, in units.
     ///
@@ -232,95 +195,7 @@ config_params! {
     /// unit fights what it can reach, and anything further is the commander's
     /// problem.
     search_radius: f32 = 3.0, "combat", 0.5, 32.0;
-    /// Fraction of the casualty field carried from one tick to the next.
-    ///
-    /// Morale reads this field, so it decides how long a unit goes on feeling
-    /// the men who fell beside it. Clearing it every tick would give a line no
-    /// reason to break: it would only ever see the deaths of the current
-    /// instant.
-    loss_memory: f32 = 0.92, "combat", 0.0, 0.999;
-    /// How much harder a blow lands on a man who has broken and is running.
-    ///
-    /// He cannot turn and defend himself. This is why most of the killing in a
-    /// real battle happened in the pursuit rather than in the fighting, and it
-    /// is what makes breaking an enemy line worth more than grinding it down.
-    rout_vulnerability: f32 = 2.6, "combat", 1.0, 10.0;
 
-    /// Steadying from having the better of it locally, per tick at even odds
-    /// against none.
-    morale_odds: f32 = 0.010, "morale", 0.0, 0.5;
-    /// Steadying from having friends at your shoulder, per tick at full
-    /// cohesion.
-    morale_cohesion: f32 = 0.006, "morale", 0.0, 0.5;
-    /// Shock per unit of the local casualty field.
-    ///
-    /// That field decays rather than clearing, so this is what makes a volley go
-    /// on being felt after it lands.
-    ///
-    /// Chosen against the rout trace rather than by eye: at 0.04 a line wears
-    /// down without ever giving way, and past 0.2 both armies dissolve on
-    /// contact before anyone has fought.
-    morale_shock: f32 = 0.08, "morale", 0.0, 2.0;
-    /// Shock per friend running past you.
-    ///
-    /// The carrier of a collapse: one broken company frightens the next, which
-    /// is the whole phenomenon. Without it a line wears down evenly and never
-    /// gives way.
-    ///
-    /// This is the term that decides the *shape* of a collapse. Too little and
-    /// men break one at a time and are killed one at a time; too much and the
-    /// whole army goes in a single tick, which is a flash rout and looks fake.
-    /// At the default a line holds for about four hundred ticks and then gives
-    /// over roughly a hundred and forty, with the break accelerating as it
-    /// spreads -- ten per cent of the men running at tick 422, half by 501, nine
-    /// in ten by 560.
-    morale_panic: f32 = 0.12, "morale", 0.0, 2.0;
-    /// Steadying from the enemy in front of you giving way, per tick when all
-    /// of him is running.
-    ///
-    /// The only term in the whole rule that is not symmetric between the two
-    /// sides, and therefore the only one that can decide anything. With it at
-    /// zero, two even armies break within twenty ticks of each other at every
-    /// setting of shock and panic that was measured, and the field is left to
-    /// whichever mob happens to evaporate second.
-    morale_ascendancy: f32 = 0.20, "morale", 0.0, 2.0;
-    /// Cost of standing in a melee, per tick with nothing but the enemy around
-    /// you.
-    ///
-    /// What makes contact frightening rather than merely dangerous, and the
-    /// term the rule was missing. It sets the *sign* of a front-rank man's
-    /// nerve: with it at zero every other term in contact nets positive and
-    /// nobody in an unbroken formation ever wavers, so a break can only ever be
-    /// an individual accident. It has to be large enough that the front drains
-    /// and small enough that the local terms -- odds, ascendancy, the men
-    /// falling beside him -- still decide which part of the line drains
-    /// fastest, because that is what makes a collapse start somewhere.
-    morale_melee: f32 = 0.015, "morale", 0.0, 2.0;
-    /// Steadying from your own army being whole, per tick at full strength.
-    ///
-    /// Signed about a half-strength army: intact is a bonus, wrecked is a
-    /// penalty. This is the only term in the rule that is not about the ground a
-    /// man is standing on, and without it nothing opposed a local panic -- a
-    /// thousand broken men could shatter the army that had just beaten them,
-    /// because no part of a man's nerve knew his side was winning everywhere
-    /// else.
-    ///
-    /// It has to be large enough to matter against panic, which reaches 0.12,
-    /// and small enough that an army which gets slightly ahead does not become
-    /// unbreakable and turn every battle into a foregone conclusion.
-    /// Swept at twenty thousand men over thirty-two battles a point. Off, the
-    /// winner shatters too in 10 of 32 and only 21 of 32 battles are won
-    /// decisively; at 0.02 that is 2 and 29, with battles slightly shorter and
-    /// the share of casualties taken in the pursuit unchanged at about four
-    /// fifths.
-    ///
-    /// Not turned higher, though it looks tempting: 0.05 leaves no mutual ruin
-    /// at all and 0.10 makes every one of thirty-two battles a decisive win,
-    /// which is not a better simulation but a foregone conclusion -- an army a
-    /// little ahead can no longer be broken by anything.
-    morale_host: f32 = 0.02, "morale", 0.0, 1.0;
-    /// Shock from your own wounds, per tick at the point of death.
-    morale_wound: f32 = 0.004, "morale", 0.0, 0.5;
     /// Men in a cell at which cohesion counts as full, quoted at the reference
     /// cell size and converted for the cell size in use -- see
     /// [`Config::cohesion_per_cell`].
@@ -491,13 +366,8 @@ impl Config {
         self.kinds = self.kinds.clamp(1, crate::army::MAX_ARCHETYPES as u32);
         self.divisions = self.divisions.clamp(1, crate::army::MAX_DIVISIONS as u32);
         // A side that is all reserve never fights.
-        self.reserve_divisions = self.reserve_divisions.min(self.divisions.saturating_sub(1));
-        self.command_interval = self.command_interval.max(1.0);
-        self.command_temperature = self.command_temperature.max(1e-3);
         self.turn_rate = self.turn_rate.max(1e-4);
         self.drag = self.drag.clamp(0.0, 0.99);
-        self.loss_memory = self.loss_memory.clamp(0.0, 0.999);
-        self.rout_vulnerability = self.rout_vulnerability.max(1.0);
         self.cohesion_full = self.cohesion_full.max(1.0);
         self.terrain_relief = self.terrain_relief.clamp(0.0, 1.0);
 

@@ -26,7 +26,6 @@ use std::time::Instant;
 /// What one battle is worth to a sweep.
 pub struct Trial {
     pub ticks: u64,
-    pub holding: [f32; 2],
     pub alive: [u32; 2],
     /// Mean height each side's men stood on when the fighting started.
     pub ground: [f32; 2],
@@ -55,13 +54,8 @@ fn ground_under(b: &Battle) -> [f32; 2] {
 }
 
 /// Fight one battle and report what a sweep needs from it.
-pub fn trial(cfg: &Config, seed: u64, ticks: u32, doctrine: bool) -> Trial {
+pub fn trial(cfg: &Config, seed: u64, ticks: u32) -> Trial {
     let mut b = Battle::new(*cfg, seed);
-    // The comparison this project keeps needing: the trained commander against
-    // the one it was initialised from, without a rebuild in between.
-    if doctrine {
-        b.doctrine = [borscht_core::brain::Net::doctrine(); 2];
-    }
     let mut ground = [0.0f32; 2];
     let mut contact = None;
 
@@ -82,7 +76,6 @@ pub fn trial(cfg: &Config, seed: u64, ticks: u32, doctrine: bool) -> Trial {
     let alive = b.army.muster();
     Trial {
         ticks: b.tick,
-        holding: [b.stats.red_holding, b.stats.blue_holding],
         alive,
         ground,
         slope: [
@@ -125,7 +118,6 @@ fn correlate(xs: &[f32], ys: &[f32]) -> (f32, f32) {
     (r, t)
 }
 
-/// Report one candidate predictor against who ended up holding the field.
 fn against_outcome(name: &str, edge: &[f32], margin: &[f32]) {
     let n = edge.len();
     let agree = edge
@@ -136,27 +128,21 @@ fn against_outcome(name: &str, edge: &[f32], margin: &[f32]) {
     let (r, t) = correlate(edge, margin);
     println!(
         "  {name:<34} {agree:>2}/{n} by sign   r={r:+.3}  t={t:.2}{}",
-        if t > 2.1 {
-            "   <- past the noise"
-        } else {
-            ""
-        }
+        if t > 2.1 { "   <- past the noise" } else { "" }
     );
 }
 
-pub fn run(cfg: &Config, seeds: u64, ticks: u32, doctrine: bool) {
+pub fn run(cfg: &Config, seeds: u64, ticks: u32) {
     let started = Instant::now();
     // The whole point of the command: the battles are independent, so they go
     // across cores instead of down a shell loop.
     let trials: Vec<Trial> = (1..=seeds)
         .into_par_iter()
-        .map(|s| trial(cfg, s, ticks, doctrine))
+        .map(|s| trial(cfg, s, ticks))
         .collect();
 
     let per_side = cfg.units_per_side.max(1) as f32;
-    // Scored on who is still breathing rather than who is still holding. The
     // field is closed and a rout is a withdrawal a side recovers from, so
-    // "holding" is a state both armies pass through repeatedly and settles
     // nothing; the survivors do.
     let margin: Vec<f32> = trials
         .iter()
@@ -176,7 +162,6 @@ pub fn run(cfg: &Config, seeds: u64, ticks: u32, doctrine: bool) {
         .count();
     // Outcomes here are bimodal -- a decisive victory leaves the winner most of
     // a side, mutual ruin leaves both sides nothing -- so a median of the
-    // winner's holding is a terrible summary: it reports whichever mode holds
     // the majority and swings from 3% to 70% on a couple of battles changing
     // camp. Report the split instead, and quartiles rather than a midpoint.
     let mut kept: Vec<f32> = trials
@@ -196,23 +181,15 @@ pub fn run(cfg: &Config, seeds: u64, ticks: u32, doctrine: bool) {
     let length = median(trials.iter().map(|t| t.ticks as f32).collect());
     let ran_out = trials.iter().filter(|t| t.ticks >= ticks as u64).count();
 
-    // What is *actually* playing. `Net::trained` falls back to the doctrine when
-    // no run has beaten it, so "trained" was a label the header printed rather
-    // than a fact about the battles underneath it.
-    let commander = if doctrine || borscht_core::trained::TRAINED.is_none() {
-        "hand-written"
-    } else {
-        "trained"
-    };
     let red_won = trials.iter().filter(|t| t.alive[1] == 0).count();
     let blue_won = trials.iter().filter(|t| t.alive[0] == 0).count();
     println!(
-        "{n} battles of {} men under the {commander} commander, {:.1}s\n",
+        "{n} battles of {} men, {:.1}s\n",
         cfg.units_per_side * 2,
         started.elapsed().as_secs_f32()
     );
-    println!("  red (attacking) won                {red_won:>2}/{n}");
-    println!("  blue (holding) won                 {blue_won:>2}/{n}");
+    println!("  red won                            {red_won:>2}/{n}");
+    println!("  blue won                           {blue_won:>2}/{n}");
     println!("  decided                            {decided:>2}/{n}");
     println!("  decisive victories                 {real:>2}/{n}   (loser destroyed, winner keeps a twentieth or more)");
     println!("  mutual ruin                        {ruin:>2}/{n}   (neither side has much of anything left)");
@@ -235,24 +212,10 @@ pub fn run(cfg: &Config, seeds: u64, ticks: u32, doctrine: bool) {
             .filter_map(|t| t.contact.map(|c| c as f32))
             .collect(),
     );
-    println!("  median still alive at the end      {:.0}% of both sides", survivors * 100.0);
-    // Alive and holding are different questions now that a rout is a
-    // withdrawal: an army can end a battle whole but with half of it still
-    // running for the rear.
-    let steady = median(
-        trials
-            .iter()
-            .map(|t| {
-                let alive = (t.alive[0] + t.alive[1]) as f32;
-                if alive > 0.0 {
-                    (t.holding[0] + t.holding[1]) / alive
-                } else {
-                    0.0
-                }
-            })
-            .collect(),
+    println!(
+        "  median still alive at the end      {:.0}% of both sides",
+        survivors * 100.0
     );
-    println!("  median of the living still holding {:.0}%", steady * 100.0);
     println!("  median first blood                 tick {met:.0}");
     if ran_out > 0 {
         // A truncated battle is scored as though it ended where the clock did,
@@ -303,8 +266,14 @@ mod tests {
         };
         let (r_small, t_small) = noisy(12);
         let (r_big, t_big) = noisy(120);
-        assert!((r_small - r_big).abs() < 0.15, "the correlation itself should be about the same");
-        assert!(t_big > t_small * 2.0, "but the confidence in it should not be");
+        assert!(
+            (r_small - r_big).abs() < 0.15,
+            "the correlation itself should be about the same"
+        );
+        assert!(
+            t_big > t_small * 2.0,
+            "but the confidence in it should not be"
+        );
     }
 
     #[test]

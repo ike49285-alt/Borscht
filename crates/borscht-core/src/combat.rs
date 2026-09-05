@@ -99,18 +99,10 @@ pub struct Strike {
     pub search: f32,
     pub damage: f32,
     pub cooldown: u8,
-    /// How much harder a blow lands on a man who is running.
-    pub rout_vulnerability: f32,
 }
 
 pub fn engage(army: &mut Army, grid: &Grid, i: usize, s: Strike) -> Option<Blow> {
-    let (reach, search, damage, cooldown, rout_vulnerability) = (
-        s.reach,
-        s.search,
-        s.damage,
-        s.cooldown,
-        s.rout_vulnerability,
-    );
+    let (reach, search, damage, cooldown) = (s.reach, s.search, s.damage, s.cooldown);
     let cell = grid.units.cell_of[i] as usize;
     if !enemy_near(grid, cell, army.team[i]) {
         army.target[i] = NO_TARGET;
@@ -140,17 +132,9 @@ pub fn engage(army: &mut Army, grid: &Grid, i: usize, s: Strike) -> Option<Blow>
         return None;
     }
     army.cooldown[i] = cooldown;
-    // A man who has broken cannot turn and defend himself, which is why most of
-    // the killing in a real battle happened in the pursuit rather than in the
-    // fighting.
-    let fleeing = if army.routing(t) {
-        rout_vulnerability
-    } else {
-        1.0
-    };
     Some(Blow {
         target: t,
-        damage: flank_bonus(army, i, t) * damage * fleeing,
+        damage: flank_bonus(army, i, t) * damage,
     })
 }
 
@@ -303,7 +287,7 @@ mod tests {
         let a = Archetype::default();
         let mut army = Army::new(64);
         for &(x, y, team) in units {
-            army.push(x, y, 0.0, team, 0, 0, &a);
+            army.push(x, y, 0.0, team, 0, &a);
         }
         let mut grid = Grid::new(16, 160.0);
         grid.rebuild(&army.x, &army.y, army.len());
@@ -327,7 +311,6 @@ mod tests {
                 search: 4.0,
                 damage: 10.0,
                 cooldown: 5,
-                rout_vulnerability: 1.0
             }
         )
         .is_none());
@@ -358,7 +341,6 @@ mod tests {
                 search: 4.0,
                 damage: 10.0,
                 cooldown: 7,
-                rout_vulnerability: 1.0,
             },
         );
         assert!(blow.is_some(), "in reach and ready, so it should strike");
@@ -373,7 +355,6 @@ mod tests {
                 search: 4.0,
                 damage: 10.0,
                 cooldown: 7,
-                rout_vulnerability: 1.0
             }
         )
         .is_none());
@@ -389,7 +370,6 @@ mod tests {
                 search: 8.0,
                 damage: 10.0,
                 cooldown: 7,
-                rout_vulnerability: 1.0
             }
         )
         .is_none());
@@ -411,7 +391,6 @@ mod tests {
                 search: 6.0,
                 damage: 10.0,
                 cooldown: 7,
-                rout_vulnerability: 1.0,
             },
         );
         let first = army.target[0];
@@ -425,7 +404,6 @@ mod tests {
                 search: 6.0,
                 damage: 10.0,
                 cooldown: 7,
-                rout_vulnerability: 1.0,
             },
         );
         assert_eq!(army.target[0], first, "it changed its mind for no reason");
@@ -445,7 +423,6 @@ mod tests {
                 search: 4.0,
                 damage: 10.0,
                 cooldown: 7,
-                rout_vulnerability: 1.0,
             },
         )
         .expect("a live foe remains");

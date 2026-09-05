@@ -47,11 +47,7 @@ stats_fields! {
     blue,
     /// Units alive and still fighting, i.e. not routing. The gap between this
     /// and the head count is what a collapse looks like as a number.
-    red_holding,
-    blue_holding,
     /// Mean nerve remaining, per side.
-    red_morale,
-    blue_morale,
     /// Fighting strength on the field, per side: head count weighted by what
     /// each unit is worth and how hurt it is.
     red_strength,
@@ -80,10 +76,10 @@ mod tests {
         let mut s = Stats::default();
         s.tick = 7.0;
         s.red = 123.0;
-        s.blue_morale = 0.25;
+        s.blue_strength = 0.25;
         assert_eq!(s.get("tick"), Some(7.0));
         assert_eq!(s.get("red"), Some(123.0));
-        assert_eq!(s.get("blue_morale"), Some(0.25));
+        assert_eq!(s.get("blue_strength"), Some(0.25));
         assert_eq!(s.get("no_such_stat"), None);
         assert_eq!(s.as_slice()[0], 7.0);
     }

@@ -26,9 +26,6 @@ use crate::fastmath::clamp;
 /// the muster point rather than an exit, so every man who took the field is
 /// either still on it or a casualty.
 pub const DEAD: u8 = 1 << 0;
-/// Unit has broken and is running. It does not fight, and it frightens its
-/// neighbours.
-pub const ROUTING: u8 = 1 << 1;
 
 /// No target.
 pub const NO_TARGET: u32 = u32::MAX;
@@ -359,40 +356,13 @@ pub struct Army {
     pub heading: Vec<f32>,
     pub speed: Vec<f32>,
     pub hp: Vec<f32>,
-    /// Nerve remaining, in `[0, 1]`. Below the archetype's floor, the unit
-    /// breaks.
-    pub morale: Vec<f32>,
     pub team: Vec<u8>,
     pub kind: Vec<u8>,
-    /// Which body of his own side a man belongs to, and therefore whose orders
-    /// he follows. Set at deployment and never changed: a division is an
-    /// identity, not a position.
-    pub division: Vec<u8>,
     /// Ticks until this unit can strike again.
     pub cooldown: Vec<u8>,
-    /// Ticks since this man broke, while he is still running.
-    ///
-    /// A separate byte rather than borrowing the attack cooldown, which a
-    /// router never uses: one field with two meanings is how a subtle bug gets
-    /// written a month later. It caps rather than wrapping, since all anyone
-    /// asks of it is whether enough time has passed.
-    pub broken_for: Vec<u8>,
     /// Ticks until this man can loose again. Zero for anyone who carries no
     /// missile, and never read for them.
     pub reload: Vec<u16>,
-    /// Ticks of steadiness a man has left after re-forming, during which he
-    /// cannot break again.
-    ///
-    /// A separate byte from `broken_for` rather than that one counting the other
-    /// way. The two are never both meaningful, which is exactly the argument
-    /// that makes sharing a field tempting and exactly why it is not done: one
-    /// field with two meanings is how a subtle bug gets written a month later.
-    ///
-    /// Without it a division that re-forms at its muster point breaks again on
-    /// the spot, because the men arriving beside it are still running and panic
-    /// reads the share of them. Men who have just been rallied by their officers
-    /// do not scatter at the sight of the next company coming in.
-    pub steady_for: Vec<u8>,
     pub flags: Vec<u8>,
     /// Index of the unit being fought, or `NO_TARGET`.
     ///
@@ -415,14 +385,10 @@ impl Army {
             heading: f(0.0),
             speed: f(0.0),
             hp: f(0.0),
-            morale: f(1.0),
             team: vec![0u8; capacity],
             kind: vec![0u8; capacity],
-            division: vec![0u8; capacity],
             cooldown: vec![0u8; capacity],
-            broken_for: vec![0u8; capacity],
             reload: vec![0u16; capacity],
-            steady_for: vec![0u8; capacity],
             flags: vec![0u8; capacity],
             target: vec![NO_TARGET; capacity],
             len: 0,
@@ -469,10 +435,6 @@ impl Army {
     }
 
     #[inline(always)]
-    pub fn routing(&self, i: usize) -> bool {
-        self.flags[i] & ROUTING != 0
-    }
-
     /// Put a unit on the field. Returns false when the pool is full.
     #[allow(clippy::too_many_arguments)]
     pub fn push(
@@ -482,7 +444,6 @@ impl Army {
         heading: f32,
         team: u8,
         kind: u8,
-        division: u8,
         archetype: &Archetype,
     ) -> bool {
         if self.is_full() {
@@ -494,16 +455,12 @@ impl Army {
         self.heading[i] = heading;
         self.speed[i] = 0.0;
         self.hp[i] = archetype.hp;
-        self.morale[i] = 1.0;
         self.team[i] = team;
         self.kind[i] = kind;
-        self.division[i] = division;
         self.cooldown[i] = 0;
-        self.broken_for[i] = 0;
         // Staggered, so a body of archers does not loose as one man and then
         // stand idle together for the whole reload.
         self.reload[i] = 0;
-        self.steady_for[i] = 0;
         self.flags[i] = 0;
         self.target[i] = NO_TARGET;
         self.len += 1;
@@ -549,14 +506,10 @@ impl Army {
                 self.heading[i] = self.heading[last];
                 self.speed[i] = self.speed[last];
                 self.hp[i] = self.hp[last];
-                self.morale[i] = self.morale[last];
                 self.team[i] = self.team[last];
                 self.kind[i] = self.kind[last];
-                self.division[i] = self.division[last];
                 self.cooldown[i] = self.cooldown[last];
-                self.broken_for[i] = self.broken_for[last];
                 self.reload[i] = self.reload[last];
-                self.steady_for[i] = self.steady_for[last];
                 self.flags[i] = self.flags[last];
             }
             self.len = last;
@@ -589,17 +542,6 @@ impl Army {
         out
     }
 
-    /// Fraction of a side still holding, i.e. alive and not routing.
-    pub fn holding(&self, team: u8) -> u32 {
-        let mut n = 0;
-        for i in 0..self.len {
-            if self.team[i] == team && self.alive(i) && !self.routing(i) {
-                n += 1;
-            }
-        }
-        n
-    }
-
     /// Apply damage, and report whether it killed.
     #[inline(always)]
     pub fn wound(&mut self, i: usize, amount: f32, armour: f32) -> bool {
@@ -622,7 +564,7 @@ mod tests {
         let a = Archetype::default();
         let mut army = Army::new(16);
         for i in 0..10 {
-            army.push(i as f32, 0.0, 0.0, (i % 2) as u8, 0, (i % 3) as u8, &a);
+            army.push(i as f32, 0.0, 0.0, (i % 2) as u8, 0, &a);
         }
         army
     }
@@ -631,9 +573,9 @@ mod tests {
     fn a_full_pool_refuses_rather_than_growing() {
         let a = Archetype::default();
         let mut army = Army::new(2);
-        assert!(army.push(0.0, 0.0, 0.0, 0, 0, 0, &a));
-        assert!(army.push(0.0, 0.0, 0.0, 0, 0, 0, &a));
-        assert!(!army.push(0.0, 0.0, 0.0, 0, 0, 0, &a));
+        assert!(army.push(0.0, 0.0, 0.0, 0, 0, &a));
+        assert!(army.push(0.0, 0.0, 0.0, 0, 0, &a));
+        assert!(!army.push(0.0, 0.0, 0.0, 0, 0, &a));
         assert_eq!(army.len(), 2);
     }
 
@@ -669,7 +611,7 @@ mod tests {
     fn armour_turns_damage_aside_but_never_all_of_it() {
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(0.0, 0.0, 0.0, 0, 0, 0, &a);
+        army.push(0.0, 0.0, 0.0, 0, 0, &a);
         assert!(!army.wound(0, 10.0, 0.5));
         assert!((army.hp[0] - 95.0).abs() < 1e-3);
         // Armour beyond the cap is still not immunity.
@@ -681,7 +623,7 @@ mod tests {
     fn a_unit_dies_when_its_health_runs_out() {
         let a = Archetype::default();
         let mut army = Army::new(4);
-        army.push(0.0, 0.0, 0.0, 0, 0, 0, &a);
+        army.push(0.0, 0.0, 0.0, 0, 0, &a);
         assert!(army.wound(0, 1000.0, 0.0));
         assert!(!army.alive(0));
         assert_eq!(army.target[0], NO_TARGET);
@@ -691,7 +633,6 @@ mod tests {
     fn muster_counts_each_side() {
         let army = army();
         assert_eq!(army.muster(), [5, 5]);
-        assert_eq!(army.holding(0), 5);
     }
 
     /// The counter cycle, asserted on the numbers rather than trusted to the

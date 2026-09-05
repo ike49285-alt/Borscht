@@ -59,12 +59,6 @@ pub enum ColorMode {
     Kind = 1,
     /// How badly hurt.
     Health = 2,
-    /// How close to breaking.
-    Morale = 3,
-    /// Which body of his own side a man belongs to. The one mode in which a
-    /// commander's work is visible at all: divisions read as divisions, and a
-    /// wing that swings or a reserve that waits can be watched doing it.
-    Division = 4,
 }
 
 impl ColorMode {
@@ -72,8 +66,6 @@ impl ColorMode {
         match v {
             1 => ColorMode::Kind,
             2 => ColorMode::Health,
-            3 => ColorMode::Morale,
-            4 => ColorMode::Division,
             _ => ColorMode::Team,
         }
     }
@@ -103,20 +95,8 @@ pub enum Outcome {
 /// because they accumulate rather than being sampled.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counters {
-    /// Men who broke, per side. Counts the transition, so a man who rallies and
-    /// breaks again is counted twice -- which is the honest reading of it.
-    pub broke: [u32; TEAMS],
-    /// Times a broken man pulled himself together.
-    pub rallied: u32,
     /// Men cut down while standing and fighting, per side.
     pub killed_fighting: [u32; TEAMS],
-    /// Men cut down while running, per side. History says this should be the
-    /// larger number.
-    pub killed_routing: [u32; TEAMS],
-    /// Men who ran all the way back to their muster point and were re-formed
-    /// there, per side. A rout is now a withdrawal, so this is the number of
-    /// times a broken man was put back in the line.
-    pub regrouped: [u32; TEAMS],
     /// Summed downhill advantage over every blow a side struck, and how many
     /// blows that was.
     ///
@@ -150,30 +130,12 @@ pub struct Battle {
     pub stats: Stats,
     /// One entry per side per kind.
     pub archetypes: [[Archetype; crate::army::MAX_ARCHETYPES]; TEAMS],
-    /// What each division has been told to do.
-    pub orders: [[crate::commander::Order; crate::army::MAX_DIVISIONS]; TEAMS],
-    /// The commander of each side.
-    pub doctrine: [crate::brain::Net; TEAMS],
-    /// The coarse picture the commanders decide from, kept between decisions so
-    /// it is not reallocated sixty times a battle.
-    pub view: crate::commander::View,
-    /// Each division's position and condition, as of the last set of orders.
-    pub divisions: [[crate::commander::DivisionState; crate::army::MAX_DIVISIONS]; TEAMS],
-    /// Where each division formed up, and where its broken men run back to.
-    ///
-    /// Fixed at deployment rather than following the division: a rally point
-    /// that chased the fighting would be no refuge at all, and one that drifted
-    /// forward could end up on the wrong side of the enemy -- which is how
-    /// fugitives came to charge the men who had broken them once already.
-    pub rally_point: [[(f32, f32); crate::army::MAX_DIVISIONS]; TEAMS],
-    /// Fighting strength each side mustered, so "how much of itself has this
-    /// army left" means something.
-    pub started_strength: [f32; TEAMS],
-    /// Share of that strength still standing and not running, per side,
-    /// recomputed every tick. Nerve reads it.
-    pub host: [f32; TEAMS],
     /// Everything in the air. See `volley.rs` for why a missile is not a reach.
     pub sky: crate::volley::Sky,
+    /// Blows thrown this tick, waiting to land. A reused buffer: at four
+    /// million men this is a million entries a tick and allocating it fresh
+    /// would cost more than the pass it serves.
+    blows: Vec<(u32, f32)>,
     rng: Rng,
     started: [u32; TEAMS],
     pub counters: Counters,
@@ -218,14 +180,6 @@ impl Battle {
             grid,
             stats: Stats::default(),
             archetypes: [[Archetype::default(); crate::army::MAX_ARCHETYPES]; TEAMS],
-            orders: [[crate::commander::Order::default(); crate::army::MAX_DIVISIONS]; TEAMS],
-            doctrine: [crate::brain::Net::default(); TEAMS],
-            view: crate::commander::View::default(),
-            divisions: [[crate::commander::DivisionState::default(); crate::army::MAX_DIVISIONS];
-                TEAMS],
-            rally_point: [[(0.0, 0.0); crate::army::MAX_DIVISIONS]; TEAMS],
-            started_strength: [0.0; TEAMS],
-            host: [1.0; TEAMS],
             cfg,
             seed,
             tick: 0,
@@ -233,6 +187,7 @@ impl Battle {
             started: [0; TEAMS],
             counters: Counters::default(),
             sky: crate::volley::Sky::new(),
+            blows: Vec::new(),
             render_buf: Vec::new(),
             render_count: 0,
             terrain_buf: Vec::new(),
@@ -316,8 +271,7 @@ impl Battle {
         for team in 0..TEAMS {
             self.counters.shot_damage[team] += hurt.damage[team];
             self.counters.shot_kills[team] += hurt.killed[team];
-            self.counters.killed_routing[team] += hurt.killed_routing[team];
-            self.counters.killed_fighting[team] += hurt.killed[team] - hurt.killed_routing[team];
+            self.counters.killed_fighting[team] += hurt.killed[team];
         }
         self.stats.red_killed += hurt.killed[0] as f32;
         self.stats.blue_killed += hurt.killed[1] as f32;
@@ -340,7 +294,7 @@ impl Battle {
             return;
         }
         for i in 0..self.army.len() {
-            if !self.army.alive(i) || self.army.routing(i) {
+            if !self.army.alive(i) {
                 continue;
             }
             let team = self.army.team[i] as usize;
@@ -534,7 +488,6 @@ impl Battle {
                 // the front each, bows and engines stand behind them, horse
                 // goes to the flanks where there is room to ride.
                 let station = crate::army::build_of(kind as usize).station;
-                let reserve = station != Station::Line;
                 // Each body takes a slice of its rank's frontage in proportion
                 // to how many men it has, so every part of the army forms up at
                 // about the same density. Equal slices packed the archers and
@@ -574,71 +527,18 @@ impl Battle {
                     let x = clamp_field(cx + rng.range(-depth * 0.5, depth * 0.5), size);
                     let across = rng.range(band_lo, band_hi);
                     let y = clamp_field(size * 0.5 + across * width, size);
-                    if !self.army.push(
-                        x,
-                        y,
-                        facing + rng.range(-0.2, 0.2),
-                        team as u8,
-                        kind,
-                        d as u8,
-                        &a,
-                    ) {
+                    if !self
+                        .army
+                        .push(x, y, facing + rng.range(-0.2, 0.2), team as u8, kind, &a)
+                    {
                         break;
                     }
                 }
-
-                // Where this division formed up, which is where its broken men
-                // will run back to for the rest of the battle.
-                self.rally_point[team][d] = (cx, size * 0.5 + (band_lo + band_hi) * 0.5 * width);
-
-                // Opening orders: the line goes forward, the reserve stands
-                // where it was drawn up.
-                //
-                // The reserve's objective is its own ground, not the enemy's.
-                // Giving it the line's objective and merely a different posture
-                // marched it straight through the line it was meant to be
-                // waiting behind -- it ended up nearer the enemy than the men it
-                // was supporting.
-                self.orders[team][d] = crate::commander::Order {
-                    sector: 0,
-                    x: if reserve {
-                        cx
-                    } else if team == 0 {
-                        size * 0.72
-                    } else {
-                        size * 0.28
-                    },
-                    y: size * 0.5 + (band_lo + band_hi) * 0.5 * width,
-                    posture: if reserve {
-                        crate::commander::Posture::Reserve
-                    } else {
-                        crate::commander::Posture::Advance
-                    },
-                };
             }
         }
 
         self.started = self.army.muster();
         self.rebuild_fields();
-        // What each division mustered, so "how much of itself has it left" means
-        // something later.
-        crate::commander::survey(
-            &self.army,
-            &self.grid,
-            &self.archetypes,
-            &mut self.divisions,
-        );
-        for team in self.divisions.iter_mut() {
-            for d in team.iter_mut() {
-                d.started = d.strength;
-            }
-        }
-        // What each side put on the field, which is the denominator the
-        // army-wide morale term is measured against for the rest of the battle.
-        for t in 0..TEAMS {
-            self.started_strength[t] = self.divisions[t].iter().map(|d| d.started).sum();
-        }
-        self.host = [1.0; TEAMS];
         self.collect_stats();
     }
 
@@ -647,7 +547,6 @@ impl Battle {
         self.grid
             .rebuild(&self.army.x, &self.army.y, self.army.len());
         self.grid.clear_fields();
-        let mut standing = [0.0f32; TEAMS];
         for i in 0..self.army.len() {
             if !self.army.alive(i) {
                 continue;
@@ -666,83 +565,13 @@ impl Battle {
             // *touches* -- the blow, the cohesion of a formation -- reads count.
             let seen = 1.0 - self.cfg.cover_hide * self.grid.cover[cell];
             let worth = a.worth() * health;
-            let contributed = worth * seen.max(0.0);
-            self.grid.strength[team][cell] += contributed;
-            if a.mounted {
-                self.grid.mounted[team][cell] += contributed;
-            }
-            // What the side still has *standing*, for the army-wide morale term.
-            // Men still holding only: a side whose men are all running is not at
-            // strength, and counting them would let a collapsing army go on
-            // reassuring itself. Not scaled by cover either -- a man knows how
-            // his own army is faring without having to see across the field.
-            if !self.army.routing(i) {
-                standing[team] += worth;
-            }
+            self.grid.strength[team][cell] += worth * seen.max(0.0);
             self.grid.count[team][cell] += 1.0;
-            if self.army.routing(i) {
-                self.grid.routing[team][cell] += 1.0;
-            }
-        }
-        for (t, &left) in standing.iter().enumerate() {
-            self.host[t] = if self.started_strength[t] > 1e-3 {
-                clamp(left / self.started_strength[t], 0.0, 1.0)
-            } else {
-                1.0
-            };
-        }
-    }
-
-    /// Ask both commanders for orders.
-    ///
-    /// Costs one pass over the cells and one over the units, and runs once every
-    /// `command_interval` ticks -- so against the tick it sits inside it does
-    /// not register.
-    fn command(&mut self) {
-        self.view.gather(&self.grid);
-        let started: Vec<[f32; crate::army::MAX_DIVISIONS]> = self
-            .divisions
-            .iter()
-            .map(|t| core::array::from_fn(|d| t[d].started))
-            .collect();
-        crate::commander::survey(
-            &self.army,
-            &self.grid,
-            &self.archetypes,
-            &mut self.divisions,
-        );
-        for (team, keep) in self.divisions.iter_mut().zip(started) {
-            for (d, slot) in team.iter_mut().enumerate() {
-                slot.started = keep[d];
-            }
-        }
-
-        let divisions = (self.cfg.divisions.max(1) as usize).min(crate::army::MAX_DIVISIONS);
-        for team in 0..TEAMS {
-            crate::commander::decide(
-                &self.doctrine[team],
-                &self.view,
-                team,
-                divisions,
-                &self.divisions[team],
-                &mut self.orders[team],
-                self.cfg.command_temperature,
-                self.cfg.order_inertia,
-                &mut self.rng,
-            );
         }
     }
 
     pub fn tick(&mut self) {
-        self.grid.decay_losses(self.cfg.loss_memory);
         self.rebuild_fields();
-        // Not on the first tick. Orders take time to write and carry, and the
-        // deployment's own dispositions -- a line forward, a reserve behind --
-        // should stand for at least as long as any other set of orders. Asking
-        // at tick zero threw them away before a shot was fired.
-        if self.tick > 0 && self.tick % (self.cfg.command_interval.max(1.0) as u64) == 0 {
-            self.command();
-        }
         self.steer_and_move();
         // Volleys already in the air come down before this tick's are loosed,
         // so nothing is shot and landed in the same tick however short the
@@ -750,7 +579,6 @@ impl Battle {
         self.land_volleys();
         self.shoot();
         self.fight();
-        self.steady_or_break();
         if self.army.should_compact() {
             self.army.compact();
         }
@@ -797,93 +625,53 @@ impl Battle {
             // rather than inside.
             let (_, ogx, ogy) = geom.sample(&self.grid.strength[team], cx, cy);
 
-            // Orders and the enemy, blended -- not the enemy with orders as a
-            // fallback, which is what made an army converge on one point and
-            // stay there. The objective is a standing pull; how hard it pulls
-            // against the enemy in front of him is what a posture *is*, and it
-            // is the only reason a reserve division can exist at all.
-            let order = self.orders[team]
-                [(self.army.division[i] as usize).min(crate::army::MAX_DIVISIONS - 1)];
-            let (pull, engage) = order.posture.steering();
-            let (ox, oy) = unit(order.x - self.army.x[i], order.y - self.army.y[i]);
+            // Straight at the nearest enemy, sensed as a field rather than by
+            // looking at anybody in particular.
+            //
+            // This *is* "head for the closest enemy". Doing it literally --
+            // each man searching for the nearest individual every tick -- would
+            // be a neighbourhood scan per man per tick, which is the one thing
+            // this engine cannot afford and the reason a million men are
+            // possible at all. The strength gradient points at the nearest
+            // enemy mass for the cost of one array read.
             let (ex, ey) = unit(fgx, fgy);
             let seen = if foe_here > 0.0 || fgx != 0.0 || fgy != 0.0 {
                 1.0
             } else {
                 0.0
             };
-            let (mut tx, mut ty) = (
-                ex * engage * seen + ox * pull,
-                ey * engage * seen + oy * pull,
-            );
+            // Nobody in sight: hold the heading rather than jittering on the
+            // spot. There is no order to fall back on any more.
+            let (mut tx, mut ty) = if seen > 0.0 {
+                (ex, ey)
+            } else {
+                let (s, c) = sin_cos(self.army.heading[i]);
+                (c, s)
+            };
 
-            // Both directions are normalised first: the enemy gradient and the
-            // friendly one have unrelated magnitudes, and combining them raw
-            // would let whichever field happens to be steeper decide the
-            // behaviour -- a units mistake that looks exactly like a tuning
-            // problem.
+            // The friendly gradient is normalised separately: it and the enemy
+            // gradient have unrelated magnitudes, and combining them raw would
+            // let whichever field happens to be steeper decide the behaviour --
+            // a units mistake that looks exactly like a tuning problem.
             (tx, ty) = unit(tx, ty);
             let (sx, sy) = unit(ogx, ogy);
 
-            if self.army.routing(i) {
-                // Away from the enemy, and away fast. A frightened man does not
-                // dress his ranks, so neither the press ahead of him nor the
-                // spacing from his neighbours applies -- and he is not following
-                // anybody's plan either, so his orders play no part in it.
-                //
-                // This used to negate the blend above, which was right when that
-                // blend was purely "toward the enemy" and became wrong the moment
-                // an order was mixed into it. `Withdraw` carries an engage weight
-                // of -0.6 -- already pointing away -- so negating it pointed the
-                // man *at* the enemy at +0.6; and the doctrine orders Withdraw
-                // precisely when a division is full of fugitives. A broken
-                // division therefore turned round and charged the men who had
-                // just broken it.
-                // He runs for the ground his division formed up on. The field
-                // is closed -- there is no running off the edge of it any more
-                // -- so a rout is a withdrawal to the muster point, where he can
-                // be gathered up and sent back in.
-                let (hx, hy) = self.rally_point[team]
-                    [(self.army.division[i] as usize).min(crate::army::MAX_DIVISIONS - 1)];
-                let (rx, ry) = unit(hx - self.army.x[i], hy - self.army.y[i]);
-                let (ax, ay) = (-ex * seen, -ey * seen);
-                tx = rx + ax * cfg.rout_fear;
-                ty = ry + ay * cfg.rout_fear;
-
-                // And never *through* the enemy to get there. If his muster
-                // point now lies beyond the men who broke him -- which happens
-                // the moment a line is overrun -- running for it would send him
-                // straight back into them, which is the exact shape of the last
-                // defect this steering had.
-                if tx * ax + ty * ay < 0.0 {
-                    tx = ax;
-                    ty = ay;
-                }
-                if tx == 0.0 && ty == 0.0 {
-                    let (s, c) = sin_cos(self.army.heading[i]);
-                    tx = c;
-                    ty = s;
-                }
-            } else {
-                // Advance only if there is room in front. One read of his own
-                // side's head count, one cell along the way he means to go: if
-                // that is already at fighting density he is in a rear rank, and
-                // a rear rank does not walk through the men in front of it.
-                //
-                // This is what gives a formation depth. Without it every man
-                // steers up the same enemy gradient until both armies are a
-                // single mass, everybody is in contact, everybody is shocked at
-                // once, and the whole army breaks in the same instant with no
-                // steady rear to rally on.
-                let ahead = self.grid.count[team][geom.cell_at(cx + pace(tx), cy + pace(ty))];
-                let room = clamp(1.0 - ahead / press_full, 0.0, 1.0);
-                tx *= room;
-                ty *= room;
-                // Push out of the crush, which is also what dresses him on his
-                // neighbours once the advance is damped away.
-                tx -= sx * cfg.spacing;
-                ty -= sy * cfg.spacing;
-            }
+            // Advance only if there is room in front. One read of his own
+            // side's head count, one cell along the way he means to go: if that
+            // is already at fighting density he is in a rear rank, and a rear
+            // rank does not walk through the men in front of it.
+            //
+            // This is what gives a formation depth. Without it every man steers
+            // up the same enemy gradient until both armies are a single mass
+            // and the whole front is one rank deep.
+            let ahead = self.grid.count[team][geom.cell_at(cx + pace(tx), cy + pace(ty))];
+            let room = clamp(1.0 - ahead / press_full, 0.0, 1.0);
+            tx *= room;
+            ty *= room;
+            // Push out of the crush, which is also what dresses him on his
+            // neighbours once the advance is damped away.
+            tx -= sx * cfg.spacing;
+            ty -= sy * cfg.spacing;
 
             let want = if tx == 0.0 && ty == 0.0 {
                 self.army.heading[i]
@@ -900,14 +688,7 @@ impl Battle {
             heading -= TAU * floor(heading / TAU);
             self.army.heading[i] = heading;
 
-            // Routers run flat out; everyone else moves at the pace of the
-            // formation unless there is nobody left to keep step with.
-            let top = if self.army.routing(i) {
-                a.speed * cfg.rout_speed
-            } else {
-                a.speed
-            };
-            let speed = self.army.speed[i] * cfg.drag + top * (1.0 - cfg.drag);
+            let speed = self.army.speed[i] * cfg.drag + a.speed * (1.0 - cfg.drag);
             self.army.speed[i] = speed;
             let (s, c) = sin_cos(heading);
 
@@ -928,11 +709,30 @@ impl Battle {
     }
 
     /// Everyone in contact throws a blow if they have one ready.
+    /// Everyone strikes, then everyone bleeds.
+    ///
+    /// The two halves are separate on purpose. Landing each blow as it was
+    /// thrown gave the men at the front of the pool a free hit: a unit could
+    /// kill its target before that target had taken its turn, and the army
+    /// deployed first holds the lower indices. With morale in the way this was
+    /// invisible -- a battle was decided by nerve long before a one-tick edge
+    /// mattered. With morale gone and both sides grinding to the last man it
+    /// decided *everything*: red won twelve of twelve, not because red is
+    /// better but because red is first.
+    ///
+    /// So blows are gathered against one state of the field and applied against
+    /// the next. Two men can now kill each other in the same tick, which is
+    /// what should happen when two men strike each other simultaneously.
+    /// It is also what makes the pass safe to split across cores: nothing in
+    /// the gather writes to another unit.
     fn fight(&mut self) {
         let cfg = self.cfg;
         let mut killed = [0u32; TEAMS];
+        let mut blows = core::mem::take(&mut self.blows);
+        blows.clear();
+
         for i in 0..self.army.len() {
-            if !self.army.alive(i) || self.army.routing(i) {
+            if !self.army.alive(i) {
                 continue;
             }
             let team = self.army.team[i] as usize;
@@ -946,19 +746,16 @@ impl Battle {
                     search: cfg.search_radius,
                     damage: a.damage,
                     cooldown: a.cooldown,
-                    rout_vulnerability: cfg.rout_vulnerability,
                 },
             );
             let Some(blow) = blow else { continue };
             let t = blow.target;
             let victim_team = self.army.team[t] as usize;
             let defender = self.archetypes[victim_team][self.army.kind[t] as usize];
-            let armour = defender.armour;
             // What the man brings to the blow and what the man in front of him
             // does about it: the charge, the spear wall, and the spear. This is
             // the whole counter cycle, and it is three multiplications.
             let weight = crate::combat::weight_of_blow(&a, &defender, self.army.speed[i]);
-            let was_running = self.army.routing(t);
             // Striking downhill: the slope under the man's feet, along the line
             // of the blow.
             //
@@ -976,142 +773,37 @@ impl Battle {
             self.counters.blow_slope[team] += downhill;
             self.counters.blows[team] += 1;
             let damage = blow.damage * weight * (1.0 + cfg.high_ground * downhill).max(0.0);
+            blows.push((t as u32, damage));
+        }
+
+        for &(t, damage) in &blows {
+            let t = t as usize;
+            // A man already cut down this tick takes no further wounds -- but
+            // the blow he threw before he fell still lands.
+            if !self.army.alive(t) {
+                continue;
+            }
+            let victim_team = self.army.team[t] as usize;
+            let armour = self.archetypes[victim_team][self.army.kind[t] as usize].armour;
             if self.army.wound(t, damage, armour) {
                 killed[victim_team] += 1;
-                if was_running {
-                    self.counters.killed_routing[victim_team] += 1;
-                } else {
-                    self.counters.killed_fighting[victim_team] += 1;
-                }
-                let cell = self.grid.units.cell_of[t] as usize;
-                // Where a man fell, so his neighbours can feel it.
-                self.grid.losses[victim_team][cell] += 1.0;
+                self.counters.killed_fighting[victim_team] += 1;
             }
         }
+        self.blows = blows;
         self.stats.red_killed += killed[0] as f32;
         self.stats.blue_killed += killed[1] as f32;
     }
 
-    /// Move every man's nerve, and let those who have had enough break.
+    /// One pass over nothing: everything here is already a running total.
     ///
-    /// Runs after the fighting, so the casualties of this tick are already in
-    /// the field a man reads. Ordering matters here: doing it first would mean
-    /// nobody ever felt the blow that just landed beside him.
-    fn steady_or_break(&mut self) {
-        let cfg = self.cfg;
-        for i in 0..self.army.len() {
-            if !self.army.alive(i) {
-                continue;
-            }
-            let team = self.army.team[i] as usize;
-            let a = self.archetypes[team][self.army.kind[i] as usize];
-            // Relative, not absolute. Both sides start whole, so an absolute
-            // "is my army intact" term hands *everybody* the same steadying
-            // bonus from the first tick, and the measured effect was that
-            // nobody broke early and the battle became a grind: the share of
-            // casualties taken in the pursuit fell from about 83% to under 30%,
-            // which throws away the thing morale was built for. Scored against
-            // the enemy's condition it is zero at the outset and only starts to
-            // matter once one side is genuinely ahead, which is when a winner
-            // ought to be hard to panic.
-            let ours = self.host[team];
-            let theirs = self.host[foe(team as u8)];
-            let standing = if ours + theirs > 1e-6 {
-                ours / (ours + theirs)
-            } else {
-                0.5
-            };
-            let cell = self.grid.units.cell_of[i] as usize;
-            let enemy_near = self.grid.strength[foe(team as u8)][cell] > 0.0;
-            let p = crate::morale::pressure_on(&self.army, &self.grid, &cfg, i, a.hp, standing);
-            let m = clamp(self.army.morale[i] + p.delta(&cfg), 0.0, 1.0);
-            self.army.morale[i] = m;
-
-            if self.army.routing(i) {
-                self.army.broken_for[i] = self.army.broken_for[i].saturating_add(1);
-
-                // Home. Reaching the ground his division formed up on is what
-                // ends a rout: he is gathered up by whoever is running the rear,
-                // given his nerve back, and goes in again. No waiting on his own
-                // mood and no need for a formed body to fall in with -- that is
-                // what the muster point *is*.
-                let (hx, hy) = self.rally_point[team]
-                    [(self.army.division[i] as usize).min(crate::army::MAX_DIVISIONS - 1)];
-                let home = cfg.regroup_radius * cfg.field_size;
-                let (dx, dy) = (self.army.x[i] - hx, self.army.y[i] - hy);
-                if dx * dx + dy * dy <= home * home {
-                    self.reform(i, cfg.regroup_nerve, cfg.steady_ticks);
-                    self.counters.regrouped[team] += 1;
-                    continue;
-                }
-
-                let long_enough = self.army.broken_for[i] as f32 >= cfg.rally_delay;
-                if long_enough
-                    && crate::morale::may_rally(
-                        &self.grid,
-                        &self.army,
-                        i,
-                        m,
-                        a.nerve,
-                        cfg.rally_margin,
-                    )
-                {
-                    // Rallied in the field, on a formed body rather than at the
-                    // rear. He keeps the nerve he talked himself into.
-                    self.reform(i, m, cfg.steady_ticks);
-                    self.counters.rallied += 1;
-                }
-            } else if self.army.steady_for[i] > 0 {
-                // Spent in contact only. Counted in plain ticks it is used up on
-                // the march back from the muster point and protects nothing at
-                // all: a man breaks, walks home, re-forms, walks back, and
-                // breaks again the moment he arrives. Measured that way, ten
-                // thousand men produced a hundred and thirty thousand breaks in
-                // one battle -- thirteen apiece -- and almost nobody died,
-                // because everyone spent the battle walking.
-                //
-                // What it is meant to buy is that a re-formed company *fights*
-                // for a while before it can break again, so that is what it is
-                // denominated in.
-                if enemy_near {
-                    self.army.steady_for[i] -= 1;
-                }
-            } else if m < a.nerve {
-                self.army.flags[i] |= crate::army::ROUTING;
-                self.army.broken_for[i] = 0;
-                self.counters.broke[team] += 1;
-            }
-        }
-    }
-
-    /// Put a broken man back in the line.
-    ///
-    /// The steadiness he is given afterwards is the whole of what stops a
-    /// re-formed company breaking again on the spot: the men arriving around it
-    /// are still running, and panic reads the share of them.
-    fn reform(&mut self, i: usize, nerve: f32, steady: f32) {
-        self.army.flags[i] &= !crate::army::ROUTING;
-        self.army.broken_for[i] = 0;
-        self.army.morale[i] = clamp(nerve, 0.0, 1.0);
-        self.army.steady_for[i] = clamp(steady, 0.0, 255.0) as u8;
-    }
-
+    /// It used to walk every man to average his nerve, which at a million men
+    /// was a whole extra pass over the pool for two numbers on a chart.
     fn collect_stats(&mut self) {
         let muster = self.army.muster();
-        let holding = [self.army.holding(0), self.army.holding(1)];
-        let mut morale = [0.0f64; TEAMS];
-        for i in 0..self.army.len() {
-            if self.army.alive(i) {
-                morale[self.army.team[i] as usize] += self.army.morale[i] as f64;
-            }
-        }
         self.stats.tick = self.tick as f32;
         self.stats.red = muster[0] as f32;
         self.stats.blue = muster[1] as f32;
-        self.stats.red_holding = holding[0] as f32;
-        self.stats.blue_holding = holding[1] as f32;
-        self.stats.red_morale = (morale[0] / muster[0].max(1) as f64) as f32;
-        self.stats.blue_morale = (morale[1] / muster[1].max(1) as f64) as f32;
         self.stats.red_strength = self.grid.total_strength(0) as f32;
         self.stats.blue_strength = self.grid.total_strength(1) as f32;
     }
@@ -1241,28 +933,6 @@ impl Battle {
                     Self::kind_color(self.cfg, team, self.army.kind[i] as usize, health)
                 }
                 ColorMode::Health => crate::color::lerp_rgb((210, 60, 55), (90, 220, 110), health),
-                ColorMode::Division => {
-                    // Hue by division, but each side kept to its own half of the
-                    // wheel: warm for red, cool for blue. Spreading all sixteen
-                    // over the whole wheel would make the divisions legible and
-                    // the sides not, and which side a man is on is the thing you
-                    // must never lose track of.
-                    let d = self.army.division[i] as f32 / crate::army::MAX_DIVISIONS as f32;
-                    let hue = if team == 0 {
-                        0.94 + 0.20 * d
-                    } else {
-                        0.44 + 0.20 * d
-                    };
-                    crate::color::hsv_to_rgb(hue % 1.0, 0.8, 0.45 + 0.5 * health)
-                }
-                ColorMode::Morale => {
-                    let m = clamp(self.army.morale[i], 0.0, 1.0);
-                    if self.army.routing(i) {
-                        (250, 225, 90)
-                    } else {
-                        crate::color::lerp_rgb((190, 70, 190), (120, 220, 200), m)
-                    }
-                }
             };
             Self::write_unit(
                 &mut self.render_buf,
@@ -1456,15 +1126,22 @@ mod tests {
             },
             23,
         );
-        // How hard the men are packed where they are thickest. Counting who is
-        // "in contact" will not do it: without a press limit the two armies
-        // converge into one dense ball, and most of that ball has no enemy in
-        // its cell either -- but it is a crush, not a rear rank.
+        // How hard the men are packed, averaged over the ground they actually
+        // hold. This used to take the thickest cell, which stopped
+        // discriminating the moment morale was removed: with nobody breaking,
+        // both armies grind together and the single densest cell is a coin
+        // toss. The mean over occupied cells is the same claim, measured
+        // somewhere it is not drowned in noise.
         let crush = |b: &Battle| {
-            b.grid.count[0]
-                .iter()
-                .chain(b.grid.count[1].iter())
-                .fold(0.0f32, |a, &v| a.max(v))
+            let mut sum = 0.0f32;
+            let mut held = 0.0f32;
+            for (&r, &bl) in b.grid.count[0].iter().zip(b.grid.count[1].iter()) {
+                if r + bl > 0.0 {
+                    sum += r + bl;
+                    held += 1.0;
+                }
+            }
+            sum / held.max(1.0)
         };
         // Far enough in that both are fighting, early enough that neither has
         // dissolved.
@@ -1487,56 +1164,6 @@ mod tests {
             crush(&deep),
             deep.cfg.press_per_cell()
         );
-    }
-
-    #[test]
-    fn a_broken_man_runs_home_and_is_put_back_in_the_line() {
-        // The field is closed: a rout is a withdrawal to the muster point, not
-        // an exit. What it costs a side is the time its men spend out of the
-        // line, not their removal from the battle.
-        let mut b = Battle::new(small(), 29);
-        let started = b.started();
-        for i in 0..b.army.len() {
-            if b.army.team[i] == 0 {
-                b.army.flags[i] |= crate::army::ROUTING;
-            }
-        }
-        b.tick_many(900);
-
-        assert!(
-            b.counters.regrouped[0] > 0,
-            "a broken army never made it back to its own ground"
-        );
-        // Nobody left, so every man is alive or dead and none is unaccounted.
-        let alive = b.army.muster();
-        let casualties = b.stats.red_killed as u32 + b.stats.blue_killed as u32;
-        assert_eq!(alive[0] + alive[1] + casualties, started[0] + started[1]);
-        // And they are back on their feet rather than milling at the boundary.
-        assert!(
-            b.army.holding(0) > 0,
-            "the whole side stayed broken with a rally point to run to"
-        );
-    }
-
-    #[test]
-    fn a_field_of_fugitives_has_not_been_decided() {
-        let mut b = Battle::new(small(), 31);
-        assert_eq!(b.outcome(), Outcome::Undecided);
-        for i in 0..b.army.len() {
-            b.army.flags[i] |= crate::army::ROUTING;
-        }
-        // Every man on the field is running, and that decides nothing: they
-        // withdraw to their muster points, re-form and go back in. Ending here
-        // would hand the field to whichever side was steady at the instant the
-        // clock was read.
-        assert_eq!(b.outcome(), Outcome::Undecided);
-
-        for i in 0..b.army.len() {
-            if b.army.team[i] == 1 {
-                b.army.kill(i);
-            }
-        }
-        assert_eq!(b.outcome(), Outcome::RedHolds);
     }
 
     #[test]
@@ -1585,194 +1212,6 @@ mod tests {
     }
 
     #[test]
-    fn every_man_belongs_to_a_division_and_divisions_deploy_as_bodies() {
-        let b = Battle::new(small(), 61);
-        let divisions = b.cfg.divisions as usize;
-        // Men of one division stand together, not scattered through the army.
-        // Bands are what let one part of a line break before another, and they
-        // are also the only thing that makes an order to a division mean
-        // anything.
-        let mut men = [0u32; crate::army::MAX_DIVISIONS];
-        let mut spread = [(f32::MAX, f32::MIN); crate::army::MAX_DIVISIONS];
-        for i in 0..b.army.len() {
-            if !b.army.alive(i) || b.army.team[i] != 0 {
-                continue;
-            }
-            let d = b.army.division[i] as usize;
-            assert!(d < divisions, "unit {i} is in division {d} of {divisions}");
-            men[d] += 1;
-            spread[d].0 = spread[d].0.min(b.army.y[i]);
-            spread[d].1 = spread[d].1.max(b.army.y[i]);
-        }
-        for d in 0..divisions {
-            assert!(men[d] > 0, "division {d} mustered nobody");
-            let band = spread[d].1 - spread[d].0;
-            assert!(
-                band < b.cfg.field_size * 0.6,
-                "division {d} is spread over {band} of the field, which is not a body"
-            );
-        }
-    }
-
-    #[test]
-    fn a_fugitive_runs_from_the_enemy_under_every_order() {
-        // The test whose absence let a real defect ship. A routing man's heading
-        // used to be the blend of his orders and the enemy gradient, negated
-        // wholesale -- correct only while that blend was purely "toward the
-        // enemy". `Withdraw` carries an engage weight of -0.6, already pointing
-        // away, so negating it pointed him *at* the enemy; and the doctrine
-        // orders Withdraw exactly when a division is full of fugitives. Broken
-        // divisions turned round and charged the men who had just broken them.
-        for posture in crate::commander::POSTURES {
-            let mut c = small();
-            // Fixed orders, so this measures the steering and not the
-            // commander's second thoughts.
-            c.command_interval = 100_000.0;
-            let mut b = Battle::new(c, 71);
-            b.tick_many(220); // let them close, so there is an enemy to sense
-
-            // Break one side outright and put every division under the order
-            // being tested, with its objective *behind* it -- which is what a
-            // rally point is, and what makes this discriminating. Leaving the
-            // objective pointing at the enemy hides the defect entirely: the
-            // buggy code negated the order too, and negating an objective that
-            // lay forwards happened to send men backwards for the wrong reason.
-            let rally = (b.cfg.field_size * 0.1, b.cfg.field_size * 0.5);
-            for d in b.orders[0].iter_mut() {
-                d.posture = posture;
-                d.x = rally.0;
-                d.y = rally.1;
-            }
-            for i in 0..b.army.len() {
-                if b.army.team[i] == 0 {
-                    b.army.flags[i] |= crate::army::ROUTING;
-                }
-            }
-
-            // Measured against where the enemy stood when the rout began, not
-            // against where he is now. He is advancing, so his centre of mass
-            // walks toward the fugitives, and a live reference point shrinks the
-            // distance even while they run -- which made the first version of
-            // this test fail for a reason that had nothing to do with the men
-            // being tested.
-            let enemy_centre = |b: &Battle| {
-                let (mut x, mut y, mut n) = (0.0f64, 0.0f64, 0u32);
-                for i in 0..b.army.len() {
-                    if b.army.alive(i) && b.army.team[i] == 1 {
-                        x += b.army.x[i] as f64;
-                        y += b.army.y[i] as f64;
-                        n += 1;
-                    }
-                }
-                (x / n.max(1) as f64, y / n.max(1) as f64)
-            };
-            let (cx, cy) = enemy_centre(&b);
-            let gap = |b: &Battle| {
-                let (mut ours, mut n) = (0.0f64, 0u32);
-                for i in 0..b.army.len() {
-                    if b.army.alive(i) && b.army.team[i] == 0 {
-                        ours += ((b.army.x[i] as f64 - cx).powi(2)
-                            + (b.army.y[i] as f64 - cy).powi(2))
-                        .sqrt();
-                        n += 1;
-                    }
-                }
-                ours / n.max(1) as f64
-            };
-
-            let before = gap(&b);
-            b.tick_many(60);
-            let after = gap(&b);
-            assert!(
-                after > before,
-                "under {} a broken army closed with the enemy instead of \
-                 fleeing it: {before:.1} to {after:.1}",
-                posture.name()
-            );
-        }
-    }
-
-    #[test]
-    fn an_army_that_is_winning_is_harder_to_break() {
-        // The second half of the same report: a thousand broken men shattering
-        // the army that had just beaten them. Every other term in the morale
-        // rule reads one grid cell, so nothing knew the rest of the army was
-        // intact and nothing opposed a local panic.
-        let c = small();
-        let a = crate::army::Archetype::default();
-        let mut b = Battle::new(c, 73);
-        b.tick_many(1);
-        let sample = (0..b.army.len()).find(|&i| b.army.alive(i)).unwrap();
-
-        let whole = crate::morale::pressure_on(&b.army, &b.grid, &b.cfg, sample, a.hp, 1.0);
-        let wrecked = crate::morale::pressure_on(&b.army, &b.grid, &b.cfg, sample, a.hp, 0.0);
-        assert!(
-            whole.delta(&b.cfg) > wrecked.delta(&b.cfg),
-            "an intact army steadied a man no more than a shattered one"
-        );
-    }
-
-    #[test]
-    fn a_reserve_division_does_not_close_with_the_enemy() {
-        // What a reserve is *for*, and the thing no unit could express when
-        // there was one order point for the whole side.
-        let mut c = small();
-        c.divisions = 4;
-        c.reserve_divisions = 1;
-        // Long enough that the commander never gets to change its mind inside
-        // the window this measures.
-        c.command_interval = 100_000.0;
-        let mut b = Battle::new(c, 67);
-        let reserve = 3u8;
-        assert_eq!(
-            b.orders[0][reserve as usize].posture,
-            crate::commander::Posture::Reserve
-        );
-
-        let gap = |b: &Battle| {
-            // How far the reserve is from the enemy, against how far the rest of
-            // its own side is.
-            let mut r = (0.0f64, 0u32);
-            let mut line = (0.0f64, 0u32);
-            let mut foe = (0.0f64, 0.0f64, 0u32);
-            for i in 0..b.army.len() {
-                if !b.army.alive(i) {
-                    continue;
-                }
-                if b.army.team[i] == 1 {
-                    foe.0 += b.army.x[i] as f64;
-                    foe.1 += b.army.y[i] as f64;
-                    foe.2 += 1;
-                }
-            }
-            let (fx, fy) = (foe.0 / foe.2.max(1) as f64, foe.1 / foe.2.max(1) as f64);
-            for i in 0..b.army.len() {
-                if !b.army.alive(i) || b.army.team[i] != 0 {
-                    continue;
-                }
-                let d =
-                    ((b.army.x[i] as f64 - fx).powi(2) + (b.army.y[i] as f64 - fy).powi(2)).sqrt();
-                if b.army.division[i] == reserve {
-                    r.0 += d;
-                    r.1 += 1;
-                } else {
-                    line.0 += d;
-                    line.1 += 1;
-                }
-            }
-            (r.0 / r.1.max(1) as f64, line.0 / line.1.max(1) as f64)
-        };
-
-        b.tick_many(400);
-        let (held_back, in_line) = gap(&b);
-        assert!(
-            held_back > in_line * 1.1,
-            "the reserve closed with the enemy: it stands {held_back:.0} away \
-             against the line's {in_line:.0}"
-        );
-    }
-
-    #[test]
     fn a_reset_musters_the_same_numbers_again() {
         let mut b = Battle::new(small(), 2);
         let started = b.started();
@@ -1810,12 +1249,7 @@ mod tests {
     fn the_render_buffer_is_the_advertised_shape() {
         let mut b = Battle::new(small(), 17);
         b.tick_many(50);
-        for mode in [
-            ColorMode::Team,
-            ColorMode::Kind,
-            ColorMode::Health,
-            ColorMode::Morale,
-        ] {
+        for mode in [ColorMode::Team, ColorMode::Kind, ColorMode::Health] {
             let n = b.prepare_render(mode);
             assert_eq!(n, b.units());
             assert_eq!(b.render_buffer().len(), n * RENDER_STRIDE);

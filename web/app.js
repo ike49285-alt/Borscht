@@ -336,7 +336,7 @@ function updatePanel(stats, red, blue) {
 }
 
 /// What `inspect` returns, in order, matching INSPECT_FIELDS in the wasm crate.
-const INSPECT_FIELDS = ['side', 'type', 'health', 'max health', 'nerve', 'speed', 'facing', 'routing'];
+const INSPECT_FIELDS = ['side', 'type', 'health', 'max health', 'speed', 'facing'];
 
 function showInspector(unit) {
   const card = $('inspector');
@@ -348,7 +348,6 @@ function showInspector(unit) {
   const rows = INSPECT_FIELDS.map((name, i) => {
     let v = unit[i];
     if (name === 'side') v = v === 0 ? 'red' : 'blue';
-    else if (name === 'routing') v = v > 0.5 ? 'yes' : 'no';
     else if (name === 'type') {
       const kind = kinds[Math.round(v)];
       v = kind ? `#${kind.id} ${kind.name}` : `#${Math.round(v)}`;
