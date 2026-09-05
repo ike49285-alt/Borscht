@@ -146,16 +146,17 @@ pub struct Battle {
     /// is nothing in front of him, and it is what makes a defence a defence
     /// rather than an army that happens to be standing still.
     pub anchors: [[(f32, f32); crate::army::MAX_DIVISIONS]; TEAMS],
-    /// Where each army's weight is, this tick, and whether there is anybody
-    /// left to have a weight.
+    /// Where each army is, this tick: its weight, and the ground it covers.
     ///
-    /// One pair per side, accumulated in the pass that rebuilds the fields
-    /// anyway, so it costs an add per man and no pass of its own. It is what a
-    /// shooter aims down: the strength *gradient* is a central difference over
-    /// neighbouring cells, which is a sense about a spear long, and pointing a
-    /// ninety-pace bow with it means never loosing until the enemy is already
-    /// on you.
-    centre: [(f32, f32, f32); TEAMS],
+    /// One of these per side, accumulated in the pass that rebuilds the fields
+    /// anyway, so it costs a few adds and compares per man and no pass of its
+    /// own. Both things that have to happen at a distance read it, and for the
+    /// same reason: every other sense in this engine is the strength field or
+    /// its gradient, which is a central difference over neighbouring cells --
+    /// about the reach of a spear. Pointing a ninety-pace bow with it means
+    /// never loosing until the enemy is already on you, and *marching* with it
+    /// means never marching anywhere at all.
+    enemy_at: [Mass; TEAMS],
     /// Everything in the air. See `volley.rs` for why a missile is not a reach.
     pub sky: crate::volley::Sky,
     /// Blows thrown this tick, waiting to land. A reused buffer: at four
@@ -168,6 +169,79 @@ pub struct Battle {
     render_buf: Vec<u8>,
     render_count: usize,
     terrain_buf: Vec<u8>,
+}
+
+/// Where an army is: its weight, and the ground it covers.
+///
+/// Kept as a bounding box and not only a centre because steering at a centroid
+/// and steering at an army are different orders. A thousand men all walking at
+/// one point converge into a column; men walking at the nearest part of a line
+/// close the distance and stay a line. The same distinction decides whether a
+/// defence that reforms is still a defence.
+#[derive(Clone, Copy, Debug)]
+pub struct Mass {
+    pub x: f32,
+    pub y: f32,
+    pub men: f32,
+    pub lo: (f32, f32),
+    pub hi: (f32, f32),
+}
+
+impl Default for Mass {
+    fn default() -> Self {
+        Mass {
+            x: 0.0,
+            y: 0.0,
+            men: 0.0,
+            // Empty, and deliberately inverted so the first man sets both ends.
+            lo: (f32::INFINITY, f32::INFINITY),
+            hi: (f32::NEG_INFINITY, f32::NEG_INFINITY),
+        }
+    }
+}
+
+impl Mass {
+    #[inline(always)]
+    fn add(&mut self, x: f32, y: f32) {
+        self.x += x;
+        self.y += y;
+        self.men += 1.0;
+        self.lo.0 = self.lo.0.min(x);
+        self.lo.1 = self.lo.1.min(y);
+        self.hi.0 = self.hi.0.max(x);
+        self.hi.1 = self.hi.1.max(y);
+    }
+
+    /// Turn the running sums into a mean, once, at the end of the pass.
+    #[inline(always)]
+    fn settle(&mut self) {
+        if self.men > 0.0 {
+            self.x /= self.men;
+            self.y /= self.men;
+        }
+    }
+
+    /// The nearest part of this army to a man standing at `(x, y)`.
+    ///
+    /// The nearest point of the box it occupies, which is the whole reason the
+    /// box is kept: a man off the end of the enemy line angles in toward the
+    /// end, and a man standing opposite it walks straight ahead instead of
+    /// sliding along the front toward the centre. Somebody already inside the
+    /// box has no nearest edge worth walking to, so he is sent at the weight.
+    #[inline(always)]
+    fn nearest(&self, x: f32, y: f32) -> (f32, f32) {
+        if self.men <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let tx = clamp(x, self.lo.0, self.hi.0);
+        let ty = clamp(y, self.lo.1, self.hi.1);
+        let (dx, dy) = (tx - x, ty - y);
+        if dx == 0.0 && dy == 0.0 {
+            unit(self.x - x, self.y - y)
+        } else {
+            unit(dx, dy)
+        }
+    }
 }
 
 /// Which neighbouring cell a unit-length direction component points into.
@@ -207,7 +281,7 @@ impl Battle {
             stats: Stats::default(),
             archetypes: [[Archetype::default(); crate::army::MAX_ARCHETYPES]; TEAMS],
             anchors: [[(0.0, 0.0); crate::army::MAX_DIVISIONS]; TEAMS],
-            centre: [(0.0, 0.0, 0.0); TEAMS],
+            enemy_at: [Mass::default(); TEAMS],
             cfg,
             seed,
             tick: 0,
@@ -355,12 +429,8 @@ impl Battle {
                 if gx != 0.0 || gy != 0.0 {
                     (gx, gy)
                 } else {
-                    let far = self.centre[foe(team as u8)];
-                    if far.2 > 0.0 {
-                        unit(far.0 - self.army.x[i], far.1 - self.army.y[i])
-                    } else {
-                        (0.0, 0.0)
-                    }
+                    let far = self.enemy_at[foe(team as u8)];
+                    unit(far.x - self.army.x[i], far.y - self.army.y[i])
                 }
             };
             let shot = crate::volley::aim(
@@ -654,16 +724,14 @@ impl Battle {
         self.grid
             .rebuild(&self.army.x, &self.army.y, self.army.len());
         self.grid.clear_fields();
-        self.centre = [(0.0, 0.0, 0.0); TEAMS];
+        self.enemy_at = [Mass::default(); TEAMS];
         for i in 0..self.army.len() {
             if !self.army.alive(i) {
                 continue;
             }
             let cell = self.grid.units.cell_of[i] as usize;
             let team = self.army.team[i] as usize;
-            self.centre[team].0 += self.army.x[i];
-            self.centre[team].1 += self.army.y[i];
-            self.centre[team].2 += 1.0;
+            self.enemy_at[team].add(self.army.x[i], self.army.y[i]);
             let a = &self.archetypes[team][self.army.kind[i] as usize];
             // Strength, not head count: a unit at a tenth of its health should
             // not make the line read as though it were fresh.
@@ -679,11 +747,8 @@ impl Battle {
             self.grid.strength[team][cell] += worth * seen.max(0.0);
             self.grid.count[team][cell] += 1.0;
         }
-        for c in self.centre.iter_mut() {
-            if c.2 > 0.0 {
-                c.0 /= c.2;
-                c.1 /= c.2;
-            }
+        for m in self.enemy_at.iter_mut() {
+            m.settle();
         }
     }
 
@@ -788,8 +853,20 @@ impl Battle {
                     s * (1.0 - cfg.guard_recall) + dy * cfg.guard_recall,
                 )
             } else {
-                let (s, c) = sin_cos(self.army.heading[i]);
-                (c, s)
+                // Nobody within a cell, which for an army crossing four hundred
+                // units of ground is nearly the whole approach. Holding the
+                // deployment heading here is not a fallback, it is a rout in
+                // slow motion: the press damping zeroes the forward term for
+                // everybody but the leading edge, and what is left is the push
+                // away from your own side's thickest part -- so an army with
+                // nothing to walk at expands like a gas instead of advancing.
+                // Measured: two armies drawn up four hundred and fifty apart
+                // were five hundred and sixty apart two hundred ticks later,
+                // both of them backing away, and every man who died was shot.
+                //
+                // So march at the enemy. The nearest part of him, not his
+                // centre -- see `Mass::nearest`.
+                self.enemy_at[foe(team as u8)].nearest(self.army.x[i], self.army.y[i])
             };
 
             // The friendly gradient is normalised separately: it and the enemy
@@ -1237,6 +1314,123 @@ mod tests {
             gap < red_advance.abs().max(blue_advance.abs()) * 0.05,
             "red closed {red_advance:.3} and blue closed {blue_advance:.3} over \
              the same flat ground -- one side is being carried"
+        );
+    }
+
+    /// How wide each side stands across the front, as a standard deviation.
+    ///
+    /// The measurement every other formation test in this file was missing.
+    /// They all read the axis the armies face along, so a line that collapsed
+    /// sideways while its centre stayed exactly where it was would pass all of
+    /// them.
+    fn frontage(b: &Battle) -> [f32; 2] {
+        let mut sum = [0.0f64; 2];
+        let mut sq = [0.0f64; 2];
+        let mut n = [0.0f64; 2];
+        for i in 0..b.army.len() {
+            if !b.army.alive(i) {
+                continue;
+            }
+            let t = b.army.team[i] as usize;
+            let y = b.army.y[i] as f64;
+            sum[t] += y;
+            sq[t] += y * y;
+            n[t] += 1.0;
+        }
+        let spread = |t: usize| {
+            let k = n[t].max(1.0);
+            (sq[t] / k - (sum[t] / k) * (sum[t] / k)).max(0.0).sqrt() as f32
+        };
+        [spread(0), spread(1)]
+    }
+
+    /// The two armies have to find each other.
+    ///
+    /// They did not. A man who could sense no enemy held his deployment
+    /// heading, and a heading is not a destination: the press damping zeroes
+    /// the forward term for everybody but the leading edge, so what was left
+    /// was the push away from your own side's thickest part, and an army with
+    /// nothing to walk at expands like a gas. Two armies drawn up four hundred
+    /// and fifty units apart were five hundred and sixty apart two hundred
+    /// ticks later -- both of them backing away from a fight neither could see
+    /// -- and every man who died in the first six hundred ticks was shot by an
+    /// engine. It was only ever hidden because both sides used to advance:
+    /// once one of them stood still, nothing closed the distance.
+    #[test]
+    fn the_attacker_finds_the_defence_instead_of_marching_past_it() {
+        // Two tight bodies on a wide field: dense enough that the press
+        // damping bites, and far enough apart that the approach is ground
+        // neither can see across. That combination is the whole bug, and it
+        // does not appear at the musters the other tests use because a small
+        // muster gets a small field -- four hundred units of no-man's-land is
+        // something only a big battle has.
+        let mut cfg = Config::for_muster(4_000);
+        cfg.field_size = 900.0;
+        cfg.grid_dim = 256;
+        cfg.max_units = 9_000;
+        cfg.deploy_width = 0.10;
+        cfg.deploy_depth = 0.03;
+        cfg.terrain_relief = 0.0;
+        cfg.wood_cover = 0.0;
+        cfg.sanitize();
+
+        let mut b = Battle::new(cfg, 7);
+        let start = centres(&b);
+        let apart = (start[1] - start[0]).abs();
+        for _ in 0..1200 {
+            if b.decided() {
+                break;
+            }
+            b.tick();
+        }
+        let now = centres(&b);
+        let closed = (now[1] - now[0]).abs();
+        assert!(
+            closed < apart * 0.75,
+            "the armies formed up {apart:.0} apart and are {closed:.0} apart \
+             after twelve hundred ticks -- they are not looking for each other"
+        );
+
+        // And the fight has to be a fight. With nothing to walk at, the press
+        // damping leaves a man only the push away from his own side's thickest
+        // part, so an army expands like a gas instead of advancing: the two
+        // sides drifted *further* apart and shelled the gap between them, and
+        // thirty-two men died in twelve hundred ticks.
+        let dead: u32 = (0..TEAMS).map(|t| b.counters.killed_fighting[t]).sum();
+        let shot: u32 = (0..TEAMS).map(|t| b.counters.shot_kills[t]).sum();
+        let hand = dead - shot;
+        assert!(
+            hand * 4 > dead && hand > 100,
+            "{hand} of {dead} men died at arm's length -- this is a \
+             bombardment across ground neither army will cross"
+        );
+    }
+
+    /// A defence that reforms must still be a line when it has reformed.
+    ///
+    /// A division's home is one anchor, and the men of a division are drawn up
+    /// across a band hundreds of units wide, so an anchor that is a *point*
+    /// gathers the whole body into a dot the moment nobody is in sight -- which
+    /// at deployment is everybody. The press damping happens to prevent it
+    /// today, which is not a reason to leave it unmeasured: it is one edit to
+    /// the steering away from being true.
+    #[test]
+    fn a_guard_that_reforms_is_still_a_line() {
+        let mut cfg = flat();
+        // Out of each other's sight, so this measures reforming and nothing
+        // else.
+        cfg.deploy_separation = 0.9;
+        cfg.sanitize();
+        let mut b = Battle::new(cfg, 3);
+        let drawn_up = frontage(&b);
+        b.tick_many(400);
+        let now = frontage(&b);
+        assert!(
+            now[1] > drawn_up[1] * 0.8,
+            "blue formed up {:.1} wide and reformed {:.1} wide -- the line \
+             collapsed into its own anchors",
+            drawn_up[1],
+            now[1]
         );
     }
 

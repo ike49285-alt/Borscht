@@ -127,11 +127,12 @@ config_params! {
     /// the dead under arrows. It is now more than half. That is not drift, it
     /// is what this battle now is -- an assault on a defended position, where
     /// the defence's whole case is that it shoots first and further. Turn this
-    /// down and the case goes with it: at 0.6 the defender takes six of
-    /// twenty-four, at 0.35 two, at 0.2 none at all, and the battles stop
-    /// finishing -- thirteen of twenty-four still fighting at forty thousand
-    /// ticks. At 1.0 it is twelve against eleven with one battle unfinished,
-    /// which is the best row on every axis at once.
+    /// down and the case goes with it: at 0.6 the defender took six of
+    /// twenty-four, at 0.35 two, at 0.2 none at all.
+    ///
+    /// The share of the dead shot down is about a third. It read as more than
+    /// half when that was last written, and that figure was measuring a bug:
+    /// two lines that never close spend the whole battle shooting.
     missile_lethality: f32 = 1.0, "combat", 0.0, 20.0;
     /// How much woodland shelters what is standing under it from missiles.
     ///
@@ -162,20 +163,27 @@ config_params! {
     /// they live here and are applied once at deploy. The roster stays the
     /// baseline both sides are read against.
     ///
-    /// The four were swept as a grid, twenty-four battles a point, half of them
-    /// with the doctrines swapped so that the simulator's positional bias
-    /// cancels instead of being tuned against. The surface is monotone and the
-    /// defence is fragile: at a reload of 1.4 the guard wins nothing at all
-    /// however far it shoots, and every point of range it gives up has to be
-    /// bought back twice over. The defaults are the point where the attacker
-    /// takes twelve of thirty-two and the defender fifteen.
+    /// Swept as a grid, twenty-four battles a point, half of them with the
+    /// doctrines swapped so that the simulator's positional bias cancels
+    /// instead of being tuned against.
+    ///
+    /// The first sweep of this was worthless and its numbers are gone: it was
+    /// taken while the two armies could not find each other across open
+    /// ground, so what it measured was a bombardment. Re-swept once they
+    /// closed, the surface is a knife edge rather than the gentle slope it
+    /// looked like, and half a step either way is total -- at 1.0 range and
+    /// 1.6 reload the attacker wins twenty-four of twenty-four, and at 1.8
+    /// range and 1.2 reload the defender does. The defaults sit on the edge:
+    /// twenty-one of forty to the attacker and nineteen to the defender, over
+    /// both directions. A balance point found by measurement, not a robust
+    /// setting.
     attacker_range: f32 = 0.60, "faction", 0.1, 3.0;
     /// Ticks the attacking side takes to reload, against the roster.
     attacker_reload: f32 = 0.55, "faction", 0.1, 3.0;
     /// How far the guarding side's missile arms shoot, against the roster.
-    guard_range: f32 = 2.40, "faction", 0.1, 4.0;
+    guard_range: f32 = 1.20, "faction", 0.1, 4.0;
     /// Ticks the guarding side takes to reload, against the roster.
-    guard_reload: f32 = 1.20, "faction", 0.1, 3.0;
+    guard_reload: f32 = 1.30, "faction", 0.1, 3.0;
     /// How hard a guard falls back on its formation when nothing is in sight.
     ///
     /// A defender that has lost sight of the enemy walks back to where it
