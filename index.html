@@ -1,5 +1,5 @@
 <title>Borscht</title>
-<meta name="description" content="A shedding card game in the family of Uno, played against three computer opponents.">
+<meta name="description" content="A shedding card game in the family of Uno, for 2 to 4 players, people or computers.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bagel+Fat+One&family=Rethink+Sans:wght@400;600;700&display=swap">
@@ -56,7 +56,7 @@ h1 { font-family: var(--display); font-weight: 400; font-size: 2.2rem; line-heig
 .link { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 
 /* opponents */
-.seats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.seats { display: grid; grid-template-columns: repeat(var(--n, 3), minmax(0, 1fr)); gap: 10px; }
 @media (max-width: 560px) { .seats { gap: 6px; } }
 .seat { position: relative; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: grid; gap: 8px; min-width: 0; transition: border-color .2s, background .2s; }
 .seat.active { border-color: var(--accent); background: var(--felt); }
@@ -131,16 +131,42 @@ details { border-top: 1px solid var(--line); padding-top: 12px; color: var(--mut
 details summary { cursor: pointer; font-weight: 600; color: var(--fg); }
 details ul { padding-left: 1.2em; max-width: 68ch; display: grid; gap: 4px; }
 details b { color: var(--fg); }
+
+/* hidden hands and the pass-the-device screen */
+.hidden-hand { display: grid; place-items: center; gap: 4px; color: var(--muted); text-align: center; align-self: center; width: 100%; }
+.hidden-hand b { color: var(--fg); }
+.overlay.blind { background: var(--bg); }
+.blind .sheet { background: var(--felt); box-shadow: none; }
+.blind .eyebrow { font-size: .8rem; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); font-weight: 600; }
+.blind .big-name { font-family: var(--display); font-size: 2.6rem; line-height: 1.05; color: var(--accent); overflow-wrap: anywhere; }
+.blind .log { margin: 0 auto; text-align: left; }
+
+/* setup */
+.sheet.setup { text-align: left; width: min(460px, 100%); max-height: 100%; overflow-y: auto; }
+.setup fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 10px; min-width: 0; }
+.setup legend { font-size: .8rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); font-weight: 600; padding: 0; margin-bottom: 8px; }
+.seg { display: inline-flex; border: 2px solid var(--accent); border-radius: 999px; overflow: hidden; flex: none; }
+.seg label { position: relative; }
+.seg input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.seg span { display: block; padding: 5px 13px; font-weight: 600; color: var(--accent); font-size: .9rem; }
+.seg input:checked + span { background: var(--accent); color: var(--accent-fg); }
+.seg input:focus-visible + span { outline: 3px solid var(--fg); outline-offset: -4px; }
+.seatrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.seatrow .num { width: 1.2em; font-family: var(--display); color: var(--muted); }
+.seatrow input[type="text"] { flex: 1 1 130px; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+.seatrow input[type="text"]:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+.setup .hint { font-size: .88rem; color: var(--muted); margin: 0; }
+.setup .row-end { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 </style>
 
 <div class="wrap">
   <header>
     <h1>Borscht</h1>
     <div class="score" id="score"></div>
-    <button class="link" id="newgame" type="button">New deal</button>
+    <button class="link" id="newgame" type="button">New game…</button>
   </header>
 
-  <section class="seats" id="seats" aria-label="Opponents"></section>
+  <section class="seats" id="seats" aria-label="Players"></section>
 
   <section class="table" aria-label="Table">
     <div class="piles">
@@ -154,9 +180,9 @@ details b { color: var(--fg); }
     </div>
   </section>
 
-  <section class="mine" aria-label="Your hand">
+  <section class="mine" aria-label="Hand">
     <div class="mine-head">
-      <h2 id="mycount">Your hand</h2>
+      <h2 id="mycount">Hand</h2>
       <div class="actions">
         <button class="btn" id="drawbtn" type="button">Draw a card</button>
         <button class="btn solid shout" id="callbtn" type="button">Borscht!</button>
@@ -168,15 +194,50 @@ details b { color: var(--fg); }
   <details>
     <summary>How to play</summary>
     <ul>
+      <li>Two to four players, any mix of people and computers. People share one device and pass it around.</li>
+      <li>Between people's turns a cover screen hides every hand. Hand the device over, then the next player taps to see their cards.</li>
       <li>Everyone starts with 7 cards. Get rid of all of yours first.</li>
       <li>Play a card that matches the bowl's <b>color</b> or its <b>number or symbol</b>. Playable cards lift up with a ring.</li>
       <li>Four colors: <b>Beet</b>, <b>Dill</b>, <b>Carrot</b> and <b>Cabbage</b>.</li>
-      <li><b>⊘ Skip</b> jumps the next player. <b>⇄ Reverse</b> flips the direction. <b>+2</b> makes the next player draw 2 and lose their turn.</li>
+      <li><b>⊘ Skip</b> jumps the next player. <b>⇄ Reverse</b> flips the direction (with two players it works as a Skip). <b>+2</b> makes the next player draw 2 and lose their turn.</li>
       <li><b>Smetana</b> (wild) goes on anything and you pick the color. <b>Smetana +4</b> also makes the next player draw 4 and lose their turn.</li>
       <li>Can't play? Draw one. If it fits you may play it, otherwise your turn passes.</li>
       <li>When you are about to play your second-last card, press <b>Borscht!</b> first. Forget, and you draw 2.</li>
     </ul>
   </details>
+</div>
+
+<div class="overlay" id="setup" hidden>
+  <form class="sheet setup" id="setupForm" aria-labelledby="setupTitle">
+    <h3 id="setupTitle">New game</h3>
+    <fieldset>
+      <legend>Number of players</legend>
+      <div class="seg" id="countSeg">
+        <label><input type="radio" name="count" id="count2" value="2"><span>2</span></label>
+        <label><input type="radio" name="count" id="count3" value="3"><span>3</span></label>
+        <label><input type="radio" name="count" id="count4" value="4"><span>4</span></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Seats, in turn order</legend>
+      <div id="seatRows" style="display:grid;gap:8px"></div>
+    </fieldset>
+    <p class="hint" id="setupHint"></p>
+    <div class="row-end">
+      <button class="btn" type="button" id="setupCancel">Cancel</button>
+      <button class="btn solid" type="submit">Deal</button>
+    </div>
+  </form>
+</div>
+
+<div class="overlay blind" id="blind" hidden>
+  <div class="sheet" role="dialog" aria-labelledby="blindName">
+    <div class="eyebrow">Pass the device to</div>
+    <div class="big-name" id="blindName"></div>
+    <p id="blindText"></p>
+    <ul class="log" id="blindLog"></ul>
+    <button class="btn solid" id="reveal" type="button">Show my cards</button>
+  </div>
 </div>
 
 <div class="overlay" id="picker" hidden>
@@ -191,20 +252,41 @@ details b { color: var(--fg); }
     <h3 id="overTitle"></h3>
     <p id="overText"></p>
     <button class="btn solid" id="again" type="button">Deal again</button>
+    <button class="link" id="changePlayers" type="button">Change players</button>
   </div>
 </div>
 
 <script>
 const COLORS = ['beet', 'dill', 'carrot', 'cabbage'];
 const CNAME = { beet: 'Beet', dill: 'Dill', carrot: 'Carrot', cabbage: 'Cabbage' };
-const NAMES = ['You', 'Baba Olya', 'Uncle Petro', 'Mila'];
+const BOT_NAMES = ['Baba Olya', 'Uncle Petro', 'Mila', 'Dyadya Kolya'];
 const SYM = { skip: '⊘', rev: '⇄', d2: '+2', w4: '+4', wild: '' };
 const VNAME = { skip: 'Skip', rev: 'Reverse', d2: '+2', wild: 'Smetana', w4: 'Smetana +4' };
 const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
+const DEFAULT_CFG = {
+  count: 4,
+  seats: [
+    { name: 'Player 1', human: true },
+    { name: 'Baba Olya', human: false },
+    { name: 'Uncle Petro', human: false },
+    { name: 'Mila', human: false },
+  ],
+};
+
+let CFG = loadJSON('borscht-setup', DEFAULT_CFG);
+if (!Array.isArray(CFG.seats) || CFG.seats.length !== 4 || ![2, 3, 4].includes(CFG.count)) CFG = JSON.parse(JSON.stringify(DEFAULT_CFG));
+let WINS = loadJSON('borscht-wins-by-name', {});
 let S = null;
 let botTimer = null;
 let lastTop = null;
+
+function loadJSON(key, fallback) {
+  try { const v = JSON.parse(localStorage.getItem(key)); if (v && typeof v === 'object' && !Array.isArray(v)) return v; } catch (e) {}
+  return JSON.parse(JSON.stringify(fallback));
+}
+function saveJSON(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {} }
 
 function shuffle(a) {
   for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
@@ -221,36 +303,47 @@ function makeDeck() {
   for (let i = 0; i < 4; i++) { add(null, 'wild'); add(null, 'w4'); }
   return shuffle(d);
 }
-function loadWins() {
-  try { const w = JSON.parse(localStorage.getItem('borscht-wins')); if (Array.isArray(w) && w.length === 4) return w; } catch (e) {}
-  return [0, 0, 0, 0];
-}
-function saveWins() { try { localStorage.setItem('borscht-wins', JSON.stringify(S.wins)); } catch (e) {} }
 
 const top = () => S.discard[S.discard.length - 1];
-const step = (p, n) => (((p + S.dir * n) % 4) + 4) % 4;
-const vb = (p, you, they) => (p === 0 ? you : they);
+const step = (p, n) => (((p + S.dir * n) % S.N) + S.N) % S.N;
+const nm = p => esc(S.players[p].name);
+const isHuman = p => S.players[p].human;
+const humanCount = () => S.players.filter(x => x.human).length;
 const label = c => (c.c ? CNAME[c.c] + ' ' : '') + (VNAME[c.v] || c.v);
 function log(msg) { S.log.unshift(msg); S.log.length = Math.min(S.log.length, 4); }
 
+/* Whose cards are face up right now, or -1 when every hand stays hidden. */
+function viewer() {
+  if (humanCount() === 1) return S.players.findIndex(x => x.human);
+  if (isHuman(S.turn) && (S.phase === 'play' || S.phase === 'choose' || S.phase === 'passing')) return S.turn;
+  return -1;
+}
+
 function newGame() {
   clearTimeout(botTimer);
+  const players = CFG.seats.slice(0, CFG.count).map((s, i) => ({
+    name: (s.name || '').trim() || (s.human ? `Player ${i + 1}` : BOT_NAMES[i]),
+    human: !!s.human,
+  }));
+  const N = players.length;
   S = {
-    deck: makeDeck(), discard: [], hands: [[], [], [], []],
+    players, N,
+    deck: makeDeck(), discard: [], hands: players.map(() => []),
     turn: 0, dir: 1, color: null, phase: 'play', called: false,
-    drawn: null, pending: null, calls: [false, false, false, false],
-    log: [], winner: null, wins: S ? S.wins : loadWins(),
+    drawn: null, note: '', pending: null, calls: players.map(() => false),
+    log: [], winner: null,
+    lastRevealed: players.filter(x => x.human).length === 1 ? players.findIndex(x => x.human) : -1,
   };
-  for (let i = 0; i < 7; i++) for (let p = 0; p < 4; p++) S.hands[p].push(S.deck.pop());
+  for (let i = 0; i < 7; i++) for (let p = 0; p < N; p++) S.hands[p].push(S.deck.pop());
   let first = S.deck.pop();
   while (!/^\d$/.test(first.v)) { S.deck.unshift(first); first = S.deck.pop(); }
   S.discard.push(first); S.color = first.c;
-  log('New deal. You go first.');
+  log(`New deal. ${nm(0)} goes first.`);
   advance();
 }
 
 function canPlay(card) {
-  if (S.turn === 0 && S.drawn !== null && card.id !== S.drawn) return false;
+  if (S.drawn !== null && card.id !== S.drawn) return false;
   return card.c === null || card.c === S.color || card.v === top().v;
 }
 
@@ -266,7 +359,7 @@ function draw(p, n) {
     const c = S.deck.pop(); S.hands[p].push(c); got.push(c);
   }
   S.calls[p] = false;
-  if (p === 0) S.called = false;
+  if (p === S.turn) S.called = false;
   return got;
 }
 
@@ -276,25 +369,33 @@ function play(p, card, chosen) {
   S.discard.push(card);
   S.color = card.c || chosen;
   S.drawn = null;
-  log(`${NAMES[p]} ${vb(p, 'play', 'plays')} ${label(card)}${card.c ? '' : ', calling ' + CNAME[S.color]}.`);
+  S.note = '';
+  log(`${nm(p)} plays ${label(card)}${card.c ? '' : ', calling ' + CNAME[S.color]}.`);
 
   if (h.length === 1) {
-    if (p === 0 && !S.called) { draw(0, 2); log('You forgot to call Borscht! Draw 2.'); }
-    else { S.calls[p] = true; if (p !== 0) log(`${NAMES[p]} calls “Borscht!”`); }
+    if (isHuman(p) && !S.called) { draw(p, 2); log(`${nm(p)} forgot to call Borscht! Draws 2.`); }
+    else { S.calls[p] = true; log(`${nm(p)} calls “Borscht!”`); }
   }
   S.called = false;
 
   if (!h.length) {
-    S.winner = p; S.phase = 'over'; S.wins[p]++; saveWins(); render(); return;
+    S.winner = p; S.phase = 'over';
+    const key = S.players[p].name;
+    WINS[key] = (WINS[key] || 0) + 1; saveJSON('borscht-wins-by-name', WINS);
+    render(); return;
   }
 
   let next = step(p, 1);
-  if (card.v === 'skip') { log(`${NAMES[next]} ${vb(next, 'are', 'is')} skipped.`); next = step(p, 2); }
-  else if (card.v === 'rev') { S.dir *= -1; next = step(p, 1); log('Play reverses direction.'); }
+  if (card.v === 'skip') { log(`${nm(next)} is skipped.`); next = step(p, 2); }
+  else if (card.v === 'rev') {
+    S.dir *= -1;
+    if (S.N === 2) { next = p; log(`Reverse skips ${nm(step(p, 1))}.`); }
+    else { next = step(p, 1); log('Play reverses direction.'); }
+  }
   else if (card.v === 'd2' || card.v === 'w4') {
     const n = card.v === 'd2' ? 2 : 4;
     draw(next, n);
-    log(`${NAMES[next]} ${vb(next, 'draw', 'draws')} ${n} and ${vb(next, 'lose', 'loses')} a turn.`);
+    log(`${nm(next)} draws ${n} and loses a turn.`);
     next = step(p, 2);
   }
   S.turn = next;
@@ -302,11 +403,15 @@ function play(p, card, chosen) {
 }
 
 function advance() {
-  S.drawn = null;
+  S.drawn = null; S.note = ''; S.called = false;
   if (S.phase === 'over') { render(); return; }
-  S.phase = S.turn === 0 ? 'play' : 'bot';
+  if (isHuman(S.turn)) {
+    S.phase = S.turn === S.lastRevealed ? 'play' : 'blind';
+  } else {
+    S.phase = 'bot';
+    botTimer = setTimeout(botTurn, 950);
+  }
   render();
-  if (S.turn !== 0) botTimer = setTimeout(botTurn, 950);
 }
 
 /* ---------- computer players ---------- */
@@ -336,16 +441,23 @@ function botTurn() {
   const opts = S.hands[p].filter(canPlay);
   if (opts.length) { botPlay(p, pick(p, opts)); return; }
   const [c] = draw(p, 1);
-  log(`${NAMES[p]} draws a card.`);
+  log(`${nm(p)} draws a card.`);
   if (c && canPlay(c)) { render(); botTimer = setTimeout(() => botPlay(p, c), 700); return; }
   S.turn = step(p, 1);
   advance();
 }
 
-/* ---------- your moves ---------- */
+/* ---------- people's moves ---------- */
+const myTurn = () => isHuman(S.turn) && S.phase === 'play';
+
+function onReveal() {
+  if (S.phase !== 'blind') return;
+  S.lastRevealed = S.turn; S.phase = 'play'; render();
+}
 function onCard(id) {
-  if (S.turn !== 0 || S.phase !== 'play') return;
-  const card = S.hands[0].find(c => c.id === id);
+  if (!myTurn()) return;
+  const p = S.turn;
+  const card = S.hands[p].find(c => c.id === id);
   if (!card) return;
   if (!canPlay(card)) {
     const el = document.querySelector(`#hand [data-id="${id}"]`);
@@ -353,27 +465,31 @@ function onCard(id) {
     return;
   }
   if (!card.c) { S.pending = id; S.phase = 'choose'; render(); return; }
-  play(0, card);
+  play(p, card);
 }
 function onChoose(color) {
-  const card = S.hands[0].find(c => c.id === S.pending);
+  if (S.phase !== 'choose') return;
+  const p = S.turn;
+  const card = S.hands[p].find(c => c.id === S.pending);
   S.pending = null; S.phase = 'play';
-  if (card) play(0, card, color); else render();
+  if (card) play(p, card, color); else render();
 }
 function onDraw() {
-  if (S.turn !== 0 || S.phase !== 'play') return;
-  if (S.drawn !== null) { log('You keep it and pass.'); S.turn = step(0, 1); advance(); return; }
-  const [c] = draw(0, 1);
-  if (!c) { log('The pot is empty. You pass.'); S.turn = step(0, 1); advance(); return; }
+  if (!myTurn()) return;
+  const p = S.turn;
+  if (S.drawn !== null) { log(`${nm(p)} keeps the card and passes.`); S.turn = step(p, 1); advance(); return; }
+  const [c] = draw(p, 1);
+  if (!c) { log(`The pot is empty. ${nm(p)} passes.`); S.turn = step(p, 1); advance(); return; }
   S.drawn = c.id;
-  if (canPlay(c)) { log(`You drew ${label(c)}. Play it or pass.`); render(); return; }
-  log(`You drew ${label(c)}. No match, so you pass.`);
-  S.phase = 'bot'; render();
-  botTimer = setTimeout(() => { S.turn = step(0, 1); advance(); }, 800);
+  log(`${nm(p)} draws a card.`);
+  if (canPlay(c)) { S.note = `You drew ${label(c)}. Play it or pass.`; render(); return; }
+  S.note = `You drew ${label(c)}. No match, so you pass.`;
+  S.phase = 'passing'; render();
+  botTimer = setTimeout(() => { S.turn = step(p, 1); advance(); }, 1100);
 }
 function onCall() {
-  if (S.turn !== 0 || S.phase !== 'play' || S.hands[0].length !== 2 || S.called) return;
-  S.called = true; log('You call “Borscht!”'); render();
+  if (!myTurn() || S.hands[S.turn].length !== 2 || S.called) return;
+  S.called = true; log(`${nm(S.turn)} calls “Borscht!”`); render();
 }
 
 /* ---------- drawing the table ---------- */
@@ -391,21 +507,26 @@ function backHTML(cls = '', tag = 'div', extra = '') {
 }
 
 function render() {
-  const myTurn = S.turn === 0 && S.phase === 'play';
+  const v = viewer();
+  const mine = myTurn();
+  const solo = humanCount() === 1;
 
-  $('score').innerHTML = NAMES.map((n, i) => `<span>${n} <b>${S.wins[i]}</b></span>`).join('');
+  $('score').innerHTML = S.players.map(x => `<span>${esc(x.name)} <b>${WINS[x.name] || 0}</b></span>`).join('');
 
-  $('seats').innerHTML = [1, 2, 3].map(p => {
+  const shown = S.players.map((_, i) => i).filter(i => !(solo && i === v));
+  $('seats').style.setProperty('--n', shown.length);
+  $('seats').innerHTML = shown.map(p => {
     const n = S.hands[p].length;
     const fan = '<i></i>'.repeat(Math.min(n, 12));
     const bubble = S.calls[p] && n === 1 ? '<span class="bubble">Borscht!</span>' : '';
+    const tag = isHuman(p) ? '' : ' · CPU';
     return `<div class="seat ${S.turn === p && S.phase !== 'over' ? 'active' : ''}">${bubble}
-      <div class="who"><span>${NAMES[p]}</span><span>${n} ${n === 1 ? 'card' : 'cards'}</span></div>
+      <div class="who"><span>${nm(p)}${tag}</span><span>${n} ${n === 1 ? 'card' : 'cards'}</span></div>
       <div class="fan" aria-hidden="true">${fan}</div></div>`;
   }).join('');
 
   $('drawpile').innerHTML = S.deck.length
-    ? backHTML(myTurn && S.drawn === null ? 'drawable' : '', 'button', `type="button" id="deckbtn" aria-label="Draw a card"`)
+    ? backHTML(mine && S.drawn === null ? 'drawable' : '', 'button', `type="button" id="deckbtn" aria-label="Draw a card"`)
     : '<div class="empty-pile"></div>';
   $('deckcount').textContent = `Pot · ${S.deck.length}`;
 
@@ -413,37 +534,102 @@ function render() {
   $('discard').innerHTML = cardHTML(t, 'big' + (t.id !== lastTop ? ' land' : ''));
   lastTop = t.id;
 
+  const who = S.players[S.turn].name;
   let turnText;
-  if (S.phase === 'over') turnText = S.winner === 0 ? 'You emptied your hand!' : `${NAMES[S.winner]} wins this round.`;
-  else if (S.phase === 'choose') turnText = 'Pick a color';
-  else if (S.turn === 0) turnText = S.drawn !== null && S.phase === 'play' ? 'Play the drawn card or pass' : (S.phase === 'play' ? 'Your turn' : 'Passing…');
-  else turnText = `${NAMES[S.turn]} is thinking…`;
+  if (S.phase === 'over') turnText = `${S.players[S.winner].name} wins this round.`;
+  else if (S.phase === 'blind') turnText = `Waiting for ${who}`;
+  else if (S.phase === 'choose') turnText = `${who}, pick a color`;
+  else if (S.phase === 'bot') turnText = `${who} is thinking…`;
+  else turnText = S.note || (solo ? 'Your turn' : `Your turn, ${who}`);
   $('turn').textContent = turnText;
 
   const order = S.dir === 1 ? 'Clockwise ↻' : 'Counter-clockwise ↺';
   $('facts').innerHTML = `<span class="chip"><span class="dot" style="background:var(--${S.color})"></span>${CNAME[S.color]}</span><span class="chip plain">${order}</span>`;
-  $('log').innerHTML = S.log.map(l => `<li>${l}</li>`).join('');
+  const logHTML = S.log.map(l => `<li>${l}</li>`).join('');
+  $('log').innerHTML = logHTML;
 
-  const hand = S.hands[0];
-  $('mycount').textContent = `Your hand · ${hand.length} ${hand.length === 1 ? 'card' : 'cards'}`;
-  $('hand').className = 'hand' + (myTurn ? '' : ' waiting');
-  $('hand').innerHTML = hand.map(c => cardHTML(c, myTurn ? (canPlay(c) ? 'ok' : 'no') : '', 'button')).join('');
+  if (v >= 0) {
+    const hand = S.hands[v];
+    $('mycount').textContent = `${solo ? 'Your hand' : S.players[v].name + "'s hand"} · ${hand.length} ${hand.length === 1 ? 'card' : 'cards'}`;
+    $('hand').className = 'hand' + (mine ? '' : ' waiting');
+    $('hand').innerHTML = hand.map(c => cardHTML(c, mine ? (canPlay(c) ? 'ok' : 'no') : '', 'button')).join('');
+  } else {
+    $('mycount').textContent = 'Hand';
+    $('hand').className = 'hand';
+    $('hand').innerHTML = `<div class="hidden-hand"><b>Hands are hidden</b><span>Cards show again once the next person taps in.</span></div>`;
+  }
 
   const db = $('drawbtn');
   db.textContent = S.drawn !== null ? 'Keep it and pass' : 'Draw a card';
-  db.disabled = !myTurn;
+  db.disabled = !mine;
   const cb = $('callbtn');
-  cb.disabled = !(myTurn && hand.length === 2 && !S.called);
+  cb.disabled = !(mine && S.hands[S.turn].length === 2 && !S.called);
   cb.textContent = S.called ? 'Called!' : 'Borscht!';
 
+  $('blind').hidden = S.phase !== 'blind';
+  if (S.phase === 'blind') {
+    $('blindName').textContent = who;
+    $('blindText').textContent = `Everyone else, look away. ${who}, tap when you're holding the device.`;
+    $('blindLog').innerHTML = logHTML;
+    $('reveal').textContent = `I'm ${who}. Show my cards`;
+  }
   $('picker').hidden = S.phase !== 'choose';
   $('over').hidden = S.phase !== 'over';
   if (S.phase === 'over') {
-    $('overTitle').textContent = S.winner === 0 ? 'You win the pot!' : `${NAMES[S.winner]} wins`;
-    const left = [0, 1, 2, 3].filter(p => p !== S.winner).map(p => `${NAMES[p]} ${S.hands[p].length}`).join(' · ');
+    $('overTitle').textContent = `${S.players[S.winner].name} wins`;
+    const left = S.players.map((x, p) => p).filter(p => p !== S.winner).map(p => `${S.players[p].name} ${S.hands[p].length}`).join(' · ');
     $('overText').textContent = `Cards left: ${left}`;
   }
 }
+
+/* ---------- setup ---------- */
+function readSetup() {
+  for (let i = 0; i < 4; i++) {
+    const nameEl = $('seatName' + i);
+    if (!nameEl) continue;
+    CFG.seats[i].name = nameEl.value;
+    CFG.seats[i].human = $('seatHuman' + i).checked;
+  }
+}
+function renderSetup() {
+  $('count' + CFG.count).checked = true;
+  $('seatRows').innerHTML = CFG.seats.slice(0, CFG.count).map((s, i) => `
+    <div class="seatrow">
+      <span class="num">${i + 1}</span>
+      <input type="text" id="seatName${i}" maxlength="18" value="${esc(s.name)}" aria-label="Seat ${i + 1} name" placeholder="${s.human ? 'Player ' + (i + 1) : BOT_NAMES[i]}">
+      <div class="seg" role="radiogroup" aria-label="Seat ${i + 1} is played by">
+        <label><input type="radio" name="kind${i}" id="seatHuman${i}" value="human" ${s.human ? 'checked' : ''}><span>Person</span></label>
+        <label><input type="radio" name="kind${i}" id="seatBot${i}" value="bot" ${s.human ? '' : 'checked'}><span>Computer</span></label>
+      </div>
+    </div>`).join('');
+  const humans = CFG.seats.slice(0, CFG.count).filter(s => s.human).length;
+  $('setupHint').textContent = humans === 0
+    ? 'At least one seat needs a person. Seat 1 will be switched to a person.'
+    : humans === 1
+      ? 'One person: your cards stay face up and there is no cover screen.'
+      : `${humans} people sharing one device: a cover screen hides every hand between turns.`;
+}
+function openSetup() {
+  clearTimeout(botTimer);
+  if (S && S.phase === 'bot') S.phase = 'paused';
+  renderSetup(); $('setup').hidden = false;
+}
+function closeSetup() {
+  $('setup').hidden = true;
+  if (S && S.phase === 'paused') advance();
+}
+
+$('countSeg').addEventListener('change', e => { readSetup(); CFG.count = Number(e.target.value); renderSetup(); });
+$('seatRows').addEventListener('change', e => { if (e.target.type === 'radio') { readSetup(); renderSetup(); } });
+$('setupCancel').addEventListener('click', closeSetup);
+$('setupForm').addEventListener('submit', e => {
+  e.preventDefault();
+  readSetup();
+  if (!CFG.seats.slice(0, CFG.count).some(s => s.human)) CFG.seats[0].human = true;
+  saveJSON('borscht-setup', CFG);
+  $('setup').hidden = true;
+  newGame();
+});
 
 $('swatches').innerHTML = COLORS.map(c => `<button class="swatch c-${c}" type="button" data-color="${c}">${CNAME[c]}</button>`).join('');
 $('swatches').addEventListener('click', e => { const b = e.target.closest('[data-color]'); if (b) onChoose(b.dataset.color); });
@@ -451,16 +637,19 @@ $('hand').addEventListener('click', e => { const b = e.target.closest('[data-id]
 $('drawpile').addEventListener('click', e => { if (e.target.closest('#deckbtn')) onDraw(); });
 $('drawbtn').addEventListener('click', onDraw);
 $('callbtn').addEventListener('click', onCall);
-$('newgame').addEventListener('click', newGame);
+$('reveal').addEventListener('click', onReveal);
+$('newgame').addEventListener('click', openSetup);
+$('changePlayers').addEventListener('click', () => { $('over').hidden = true; openSetup(); });
 $('again').addEventListener('click', newGame);
 
 function start(data) {
-  if (data && data.S) {
+  if (data && data.CFG) CFG = data.CFG;
+  if (data && data.S && data.S.players) {
     S = data.S;
-    if (S.phase === 'over' || S.phase === 'choose') render();
-    else advance();
+    if (S.phase === 'bot' || S.phase === 'passing' || S.phase === 'paused') advance();
+    else render();
   } else newGame();
 }
-window.claude?.hot?.snapshot?.(() => ({ S }));
+window.claude?.hot?.snapshot?.(() => ({ S, CFG }));
 window.claude?.hot?.ready ? window.claude.hot.ready(start) : start(window.claude?.hot?.data ?? {});
 </script>
