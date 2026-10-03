@@ -44,6 +44,7 @@
 @media (max-width: 560px) { :root { --cw: 58px; } }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.45; }
 .wrap { max-width: 980px; margin: 0 auto; padding-inline: 16px; padding-block: 16px 40px; display: grid; gap: 18px; }
 button { font: inherit; color: inherit; }
@@ -304,7 +305,7 @@ function makeDeck() {
   return shuffle(d);
 }
 
-const top = () => S.discard[S.discard.length - 1];
+const topCard = () => S.discard[S.discard.length - 1];
 const step = (p, n) => (((p + S.dir * n) % S.N) + S.N) % S.N;
 const nm = p => esc(S.players[p].name);
 const isHuman = p => S.players[p].human;
@@ -344,7 +345,7 @@ function newGame() {
 
 function canPlay(card) {
   if (S.drawn !== null && card.id !== S.drawn) return false;
-  return card.c === null || card.c === S.color || card.v === top().v;
+  return card.c === null || card.c === S.color || card.v === topCard().v;
 }
 
 function draw(p, n) {
@@ -530,7 +531,7 @@ function render() {
     : '<div class="empty-pile"></div>';
   $('deckcount').textContent = `Pot · ${S.deck.length}`;
 
-  const t = top();
+  const t = topCard();
   $('discard').innerHTML = cardHTML(t, 'big' + (t.id !== lastTop ? ' land' : ''));
   lastTop = t.id;
 
