@@ -1,0 +1,466 @@
+<title>Borscht</title>
+<meta name="description" content="A shedding card game in the family of Uno, played against three computer opponents.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bagel+Fat+One&family=Rethink+Sans:wght@400;600;700&display=swap">
+<style>
+/* Layout: a kitchen table seen from your chair. Opponents across the top, the pot in the middle, your hand at the bottom. */
+:root {
+  --bg: #f4eef1;
+  --felt: #e8dde2;
+  --fg: #2b1821;
+  --muted: #76606b;
+  --line: #d5c4cc;
+  --accent: #a81d4b;
+  --accent-fg: #ffffff;
+  --shadow: 0 1px 2px rgb(60 20 40 / .18), 0 6px 14px rgb(60 20 40 / .12);
+
+  /* card inks are physical objects: the same in both themes */
+  --beet: #b0204f;
+  --dill: #3a8a3a;
+  --carrot: #e5732a;
+  --cabbage: #5a4db1;
+  --wildink: #231a1f;
+  --paper: #ffffff;
+
+  --display: "Bagel Fat One", "Arial Black", system-ui, sans-serif;
+  --body: "Rethink Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --cw: 76px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1b1117; --felt: #281a22; --fg: #f3e7ec; --muted: #a8919c; --line: #3f2b36;
+    --accent: #e0517f; --accent-fg: #1b1117;
+    --shadow: 0 1px 2px rgb(0 0 0 / .5), 0 6px 14px rgb(0 0 0 / .35);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1b1117; --felt: #281a22; --fg: #f3e7ec; --muted: #a8919c; --line: #3f2b36;
+  --accent: #e0517f; --accent-fg: #1b1117;
+  --shadow: 0 1px 2px rgb(0 0 0 / .5), 0 6px 14px rgb(0 0 0 / .35);
+  color-scheme: dark;
+}
+@media (max-width: 560px) { :root { --cw: 58px; } }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.45; }
+.wrap { max-width: 980px; margin: 0 auto; padding-inline: 16px; padding-block: 16px 40px; display: grid; gap: 18px; }
+button { font: inherit; color: inherit; }
+button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font-family: var(--display); font-weight: 400; font-size: 2.2rem; line-height: 1; margin: 0; color: var(--accent); letter-spacing: .01em; }
+.score { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.score b { color: var(--fg); }
+.link { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+
+/* opponents */
+.seats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 560px) { .seats { gap: 6px; } }
+.seat { position: relative; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: grid; gap: 8px; min-width: 0; transition: border-color .2s, background .2s; }
+.seat.active { border-color: var(--accent); background: var(--felt); }
+.seat .who { display: flex; justify-content: space-between; gap: 6px; font-weight: 600; font-size: .9rem; }
+.seat .who span:last-child { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fan { display: flex; height: 34px; overflow: hidden; }
+.fan i { flex: none; width: 23px; height: 34px; border-radius: 4px; background: var(--beet); border: 2px solid var(--paper); box-shadow: 0 1px 2px rgb(0 0 0 / .25); margin-right: -13px; }
+.bubble { position: absolute; top: -10px; right: 8px; background: var(--accent); color: var(--accent-fg); font-family: var(--display); font-size: .8rem; padding: 2px 9px; border-radius: 999px; }
+
+/* the pot */
+.table { background: var(--felt); border-radius: 18px; padding: 20px 16px; display: flex; align-items: center; justify-content: center; gap: 22px 28px; flex-wrap: wrap; }
+.piles { display: flex; gap: 18px; align-items: flex-end; }
+.pile { display: grid; justify-items: center; gap: 6px; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+.status { display: grid; gap: 10px; min-width: 0; }
+.turn { font-family: var(--display); font-size: 1.35rem; line-height: 1.1; text-wrap: balance; }
+.facts { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 3px 11px 3px 4px; font-size: .85rem; }
+.chip .dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--paper); box-shadow: 0 0 0 1px var(--line); }
+.chip.plain { padding-left: 11px; }
+.log { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: .88rem; color: var(--muted); max-width: 36ch; }
+.log li:first-child { color: var(--fg); font-weight: 600; }
+
+/* cards */
+.card { position: relative; flex: none; width: var(--cw); aspect-ratio: 2 / 3; border-radius: calc(var(--cw) * .13); border: calc(var(--cw) * .055) solid var(--paper); background: var(--ink, var(--wildink)); box-shadow: var(--shadow); padding: 0; cursor: default; overflow: hidden; transition: transform .15s ease, opacity .15s; }
+.c-beet { --ink: var(--beet); } .c-dill { --ink: var(--dill); } .c-carrot { --ink: var(--carrot); } .c-cabbage { --ink: var(--cabbage); }
+.card .oval { position: absolute; left: 50%; top: 50%; width: 82%; height: 64%; transform: translate(-50%, -50%) rotate(-28deg); background: var(--paper); border-radius: 50%; display: grid; place-items: center; }
+.card .glyph { transform: rotate(28deg); font-family: var(--display); font-size: calc(var(--cw) * .44); line-height: 1; color: var(--ink); }
+.card .glyph.sym { font-family: var(--body); font-weight: 700; }
+.card .glyph.ul { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 2px; }
+.card .corner { position: absolute; font-family: var(--display); color: var(--paper); font-size: calc(var(--cw) * .2); line-height: 1; }
+.card .corner.tl { top: 5%; left: 8%; } .card .corner.br { bottom: 5%; right: 8%; transform: rotate(180deg); }
+.c-wild .oval { background: conic-gradient(var(--beet) 0 25%, var(--carrot) 0 50%, var(--dill) 0 75%, var(--cabbage) 0); }
+.c-wild .glyph { color: var(--paper); text-shadow: 0 1px 0 rgb(0 0 0 / .4), 0 0 6px rgb(0 0 0 / .4); }
+.card.back { background: var(--beet) repeating-linear-gradient(45deg, rgb(255 255 255 / .07) 0 6px, transparent 6px 12px); }
+.card.back .oval { background: var(--wildink); }
+.card.back .glyph { color: var(--paper); font-size: calc(var(--cw) * .17); letter-spacing: .02em; }
+.card.big { --cw: calc(var(--cw-base, 76px) * 1.22); }
+@media (max-width: 560px) { .card.big { --cw: 70px; } }
+button.card.drawable { cursor: pointer; }
+button.card.drawable:hover { transform: translateY(-3px); }
+.empty-pile { width: var(--cw); aspect-ratio: 2 / 3; border: 2px dashed var(--line); border-radius: 10px; }
+
+/* your hand */
+.mine { display: grid; gap: 12px; }
+.mine-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mine-head h2 { margin: 0; font-size: .8rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); font-weight: 600; }
+.hand { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; padding-top: 8px; min-height: calc(var(--cw) * 1.5 + 8px); }
+.hand .card.ok { cursor: pointer; transform: translateY(-8px); box-shadow: var(--shadow), 0 0 0 3px var(--accent); }
+.hand .card.ok:hover { transform: translateY(-12px); }
+.hand.waiting .card, .hand .card.no { opacity: .55; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.btn { border: 2px solid var(--accent); background: transparent; color: var(--accent); border-radius: 999px; padding: 8px 18px; font-weight: 700; cursor: pointer; }
+.btn.solid { background: var(--accent); color: var(--accent-fg); }
+.btn.shout { font-family: var(--display); font-weight: 400; font-size: 1.05rem; letter-spacing: .02em; }
+.btn:disabled { opacity: .35; cursor: not-allowed; }
+
+@keyframes land { from { transform: scale(1.25) rotate(-8deg); opacity: .3; } to { transform: none; opacity: 1; } }
+.land { animation: land .28s ease-out; }
+@keyframes nope { 0%,100% { translate: 0; } 25% { translate: -5px; } 75% { translate: 5px; } }
+.nope { animation: nope .22s 2; }
+@media (prefers-reduced-motion: reduce) { .land, .nope { animation: none; } .card { transition: none; } }
+
+/* overlays */
+.overlay { position: fixed; inset: 0; background: rgb(20 8 14 / .55); display: grid; place-items: center; padding: 16px; z-index: 10; }
+.sheet { background: var(--bg); color: var(--fg); border-radius: 18px; padding: 22px; width: min(380px, 100%); display: grid; gap: 16px; text-align: center; box-shadow: 0 20px 50px rgb(0 0 0 / .35); }
+.sheet h3 { margin: 0; font-family: var(--display); font-weight: 400; font-size: 1.6rem; color: var(--accent); text-wrap: balance; }
+.sheet p { margin: 0; color: var(--muted); }
+.swatches { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.swatch { border: 3px solid var(--paper); border-radius: 12px; padding: 18px 8px; color: var(--paper); font-family: var(--display); font-size: 1.1rem; cursor: pointer; background: var(--ink); box-shadow: var(--shadow); }
+
+details { border-top: 1px solid var(--line); padding-top: 12px; color: var(--muted); }
+details summary { cursor: pointer; font-weight: 600; color: var(--fg); }
+details ul { padding-left: 1.2em; max-width: 68ch; display: grid; gap: 4px; }
+details b { color: var(--fg); }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Borscht</h1>
+    <div class="score" id="score"></div>
+    <button class="link" id="newgame" type="button">New deal</button>
+  </header>
+
+  <section class="seats" id="seats" aria-label="Opponents"></section>
+
+  <section class="table" aria-label="Table">
+    <div class="piles">
+      <div class="pile"><div id="drawpile"></div><span id="deckcount">Pot</span></div>
+      <div class="pile"><div id="discard"></div><span>Bowl</span></div>
+    </div>
+    <div class="status">
+      <div class="turn" id="turn" aria-live="polite"></div>
+      <div class="facts" id="facts"></div>
+      <ul class="log" id="log"></ul>
+    </div>
+  </section>
+
+  <section class="mine" aria-label="Your hand">
+    <div class="mine-head">
+      <h2 id="mycount">Your hand</h2>
+      <div class="actions">
+        <button class="btn" id="drawbtn" type="button">Draw a card</button>
+        <button class="btn solid shout" id="callbtn" type="button">Borscht!</button>
+      </div>
+    </div>
+    <div class="hand" id="hand"></div>
+  </section>
+
+  <details>
+    <summary>How to play</summary>
+    <ul>
+      <li>Everyone starts with 7 cards. Get rid of all of yours first.</li>
+      <li>Play a card that matches the bowl's <b>color</b> or its <b>number or symbol</b>. Playable cards lift up with a ring.</li>
+      <li>Four colors: <b>Beet</b>, <b>Dill</b>, <b>Carrot</b> and <b>Cabbage</b>.</li>
+      <li><b>⊘ Skip</b> jumps the next player. <b>⇄ Reverse</b> flips the direction. <b>+2</b> makes the next player draw 2 and lose their turn.</li>
+      <li><b>Smetana</b> (wild) goes on anything and you pick the color. <b>Smetana +4</b> also makes the next player draw 4 and lose their turn.</li>
+      <li>Can't play? Draw one. If it fits you may play it, otherwise your turn passes.</li>
+      <li>When you are about to play your second-last card, press <b>Borscht!</b> first. Forget, and you draw 2.</li>
+    </ul>
+  </details>
+</div>
+
+<div class="overlay" id="picker" hidden>
+  <div class="sheet" role="dialog" aria-labelledby="pickTitle">
+    <h3 id="pickTitle">Pick the soup's color</h3>
+    <div class="swatches" id="swatches"></div>
+  </div>
+</div>
+
+<div class="overlay" id="over" hidden>
+  <div class="sheet" role="dialog" aria-labelledby="overTitle">
+    <h3 id="overTitle"></h3>
+    <p id="overText"></p>
+    <button class="btn solid" id="again" type="button">Deal again</button>
+  </div>
+</div>
+
+<script>
+const COLORS = ['beet', 'dill', 'carrot', 'cabbage'];
+const CNAME = { beet: 'Beet', dill: 'Dill', carrot: 'Carrot', cabbage: 'Cabbage' };
+const NAMES = ['You', 'Baba Olya', 'Uncle Petro', 'Mila'];
+const SYM = { skip: '⊘', rev: '⇄', d2: '+2', w4: '+4', wild: '' };
+const VNAME = { skip: 'Skip', rev: 'Reverse', d2: '+2', wild: 'Smetana', w4: 'Smetana +4' };
+const $ = id => document.getElementById(id);
+
+let S = null;
+let botTimer = null;
+let lastTop = null;
+
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+function makeDeck() {
+  let id = 0; const d = [];
+  const add = (c, v) => d.push({ id: id++, c, v });
+  for (const c of COLORS) {
+    add(c, '0');
+    for (let n = 1; n <= 9; n++) { add(c, String(n)); add(c, String(n)); }
+    for (const v of ['skip', 'rev', 'd2']) { add(c, v); add(c, v); }
+  }
+  for (let i = 0; i < 4; i++) { add(null, 'wild'); add(null, 'w4'); }
+  return shuffle(d);
+}
+function loadWins() {
+  try { const w = JSON.parse(localStorage.getItem('borscht-wins')); if (Array.isArray(w) && w.length === 4) return w; } catch (e) {}
+  return [0, 0, 0, 0];
+}
+function saveWins() { try { localStorage.setItem('borscht-wins', JSON.stringify(S.wins)); } catch (e) {} }
+
+const top = () => S.discard[S.discard.length - 1];
+const step = (p, n) => (((p + S.dir * n) % 4) + 4) % 4;
+const vb = (p, you, they) => (p === 0 ? you : they);
+const label = c => (c.c ? CNAME[c.c] + ' ' : '') + (VNAME[c.v] || c.v);
+function log(msg) { S.log.unshift(msg); S.log.length = Math.min(S.log.length, 4); }
+
+function newGame() {
+  clearTimeout(botTimer);
+  S = {
+    deck: makeDeck(), discard: [], hands: [[], [], [], []],
+    turn: 0, dir: 1, color: null, phase: 'play', called: false,
+    drawn: null, pending: null, calls: [false, false, false, false],
+    log: [], winner: null, wins: S ? S.wins : loadWins(),
+  };
+  for (let i = 0; i < 7; i++) for (let p = 0; p < 4; p++) S.hands[p].push(S.deck.pop());
+  let first = S.deck.pop();
+  while (!/^\d$/.test(first.v)) { S.deck.unshift(first); first = S.deck.pop(); }
+  S.discard.push(first); S.color = first.c;
+  log('New deal. You go first.');
+  advance();
+}
+
+function canPlay(card) {
+  if (S.turn === 0 && S.drawn !== null && card.id !== S.drawn) return false;
+  return card.c === null || card.c === S.color || card.v === top().v;
+}
+
+function draw(p, n) {
+  const got = [];
+  for (let i = 0; i < n; i++) {
+    if (!S.deck.length) {
+      const t = S.discard.pop();
+      S.deck = shuffle(S.discard); S.discard = [t];
+      if (!S.deck.length) break;
+      log('The bowl was shuffled back into the pot.');
+    }
+    const c = S.deck.pop(); S.hands[p].push(c); got.push(c);
+  }
+  S.calls[p] = false;
+  if (p === 0) S.called = false;
+  return got;
+}
+
+function play(p, card, chosen) {
+  const h = S.hands[p];
+  h.splice(h.indexOf(card), 1);
+  S.discard.push(card);
+  S.color = card.c || chosen;
+  S.drawn = null;
+  log(`${NAMES[p]} ${vb(p, 'play', 'plays')} ${label(card)}${card.c ? '' : ', calling ' + CNAME[S.color]}.`);
+
+  if (h.length === 1) {
+    if (p === 0 && !S.called) { draw(0, 2); log('You forgot to call Borscht! Draw 2.'); }
+    else { S.calls[p] = true; if (p !== 0) log(`${NAMES[p]} calls “Borscht!”`); }
+  }
+  S.called = false;
+
+  if (!h.length) {
+    S.winner = p; S.phase = 'over'; S.wins[p]++; saveWins(); render(); return;
+  }
+
+  let next = step(p, 1);
+  if (card.v === 'skip') { log(`${NAMES[next]} ${vb(next, 'are', 'is')} skipped.`); next = step(p, 2); }
+  else if (card.v === 'rev') { S.dir *= -1; next = step(p, 1); log('Play reverses direction.'); }
+  else if (card.v === 'd2' || card.v === 'w4') {
+    const n = card.v === 'd2' ? 2 : 4;
+    draw(next, n);
+    log(`${NAMES[next]} ${vb(next, 'draw', 'draws')} ${n} and ${vb(next, 'lose', 'loses')} a turn.`);
+    next = step(p, 2);
+  }
+  S.turn = next;
+  advance();
+}
+
+function advance() {
+  S.drawn = null;
+  if (S.phase === 'over') { render(); return; }
+  S.phase = S.turn === 0 ? 'play' : 'bot';
+  render();
+  if (S.turn !== 0) botTimer = setTimeout(botTurn, 950);
+}
+
+/* ---------- computer players ---------- */
+function favColor(p, except) {
+  const n = { beet: 0, dill: 0, carrot: 0, cabbage: 0 };
+  for (const c of S.hands[p]) if (c !== except && c.c) n[c.c]++;
+  const best = Math.max(...Object.values(n));
+  const tops = COLORS.filter(c => n[c] === best);
+  return tops[Math.floor(Math.random() * tops.length)];
+}
+function pick(p, opts) {
+  const threat = S.hands[step(p, 1)].length <= 2;
+  const score = c => {
+    let s;
+    if (c.v === 'w4') s = 0.5;
+    else if (c.v === 'wild') s = 1;
+    else if (/^\d$/.test(c.v)) s = 3 + (c.c === S.color ? 0.5 : 0);
+    else s = 2.5;
+    if (threat && (c.v === 'skip' || c.v === 'd2' || c.v === 'w4' || c.v === 'rev')) s += 5;
+    return s + Math.random() * 0.4;
+  };
+  return opts.reduce((a, b) => (score(b) > score(a) ? b : a));
+}
+function botPlay(p, c) { play(p, c, c.c ? null : favColor(p, c)); }
+function botTurn() {
+  const p = S.turn;
+  const opts = S.hands[p].filter(canPlay);
+  if (opts.length) { botPlay(p, pick(p, opts)); return; }
+  const [c] = draw(p, 1);
+  log(`${NAMES[p]} draws a card.`);
+  if (c && canPlay(c)) { render(); botTimer = setTimeout(() => botPlay(p, c), 700); return; }
+  S.turn = step(p, 1);
+  advance();
+}
+
+/* ---------- your moves ---------- */
+function onCard(id) {
+  if (S.turn !== 0 || S.phase !== 'play') return;
+  const card = S.hands[0].find(c => c.id === id);
+  if (!card) return;
+  if (!canPlay(card)) {
+    const el = document.querySelector(`#hand [data-id="${id}"]`);
+    if (el) { el.classList.remove('nope'); void el.offsetWidth; el.classList.add('nope'); }
+    return;
+  }
+  if (!card.c) { S.pending = id; S.phase = 'choose'; render(); return; }
+  play(0, card);
+}
+function onChoose(color) {
+  const card = S.hands[0].find(c => c.id === S.pending);
+  S.pending = null; S.phase = 'play';
+  if (card) play(0, card, color); else render();
+}
+function onDraw() {
+  if (S.turn !== 0 || S.phase !== 'play') return;
+  if (S.drawn !== null) { log('You keep it and pass.'); S.turn = step(0, 1); advance(); return; }
+  const [c] = draw(0, 1);
+  if (!c) { log('The pot is empty. You pass.'); S.turn = step(0, 1); advance(); return; }
+  S.drawn = c.id;
+  if (canPlay(c)) { log(`You drew ${label(c)}. Play it or pass.`); render(); return; }
+  log(`You drew ${label(c)}. No match, so you pass.`);
+  S.phase = 'bot'; render();
+  botTimer = setTimeout(() => { S.turn = step(0, 1); advance(); }, 800);
+}
+function onCall() {
+  if (S.turn !== 0 || S.phase !== 'play' || S.hands[0].length !== 2 || S.called) return;
+  S.called = true; log('You call “Borscht!”'); render();
+}
+
+/* ---------- drawing the table ---------- */
+function cardHTML(c, cls = '', tag = 'div') {
+  const kind = c.c ? 'c-' + c.c : 'c-wild';
+  const num = /^\d$/.test(c.v);
+  const g = num ? c.v : SYM[c.v];
+  const corner = num ? c.v : (c.v === 'wild' ? 'W' : SYM[c.v]);
+  const gcls = 'glyph' + (num ? '' : ' sym') + (c.v === '6' || c.v === '9' ? ' ul' : '');
+  const attrs = tag === 'button' ? ` type="button" data-id="${c.id}" aria-label="${label(c)}"` : ` aria-label="${label(c)}" role="img"`;
+  return `<${tag} class="card ${kind} ${cls}"${attrs}><span class="corner tl">${corner}</span><span class="oval"><span class="${gcls}">${g}</span></span><span class="corner br">${corner}</span></${tag}>`;
+}
+function backHTML(cls = '', tag = 'div', extra = '') {
+  return `<${tag} class="card back ${cls}" ${extra}><span class="oval"><span class="glyph">BORSCHT</span></span></${tag}>`;
+}
+
+function render() {
+  const myTurn = S.turn === 0 && S.phase === 'play';
+
+  $('score').innerHTML = NAMES.map((n, i) => `<span>${n} <b>${S.wins[i]}</b></span>`).join('');
+
+  $('seats').innerHTML = [1, 2, 3].map(p => {
+    const n = S.hands[p].length;
+    const fan = '<i></i>'.repeat(Math.min(n, 12));
+    const bubble = S.calls[p] && n === 1 ? '<span class="bubble">Borscht!</span>' : '';
+    return `<div class="seat ${S.turn === p && S.phase !== 'over' ? 'active' : ''}">${bubble}
+      <div class="who"><span>${NAMES[p]}</span><span>${n} ${n === 1 ? 'card' : 'cards'}</span></div>
+      <div class="fan" aria-hidden="true">${fan}</div></div>`;
+  }).join('');
+
+  $('drawpile').innerHTML = S.deck.length
+    ? backHTML(myTurn && S.drawn === null ? 'drawable' : '', 'button', `type="button" id="deckbtn" aria-label="Draw a card"`)
+    : '<div class="empty-pile"></div>';
+  $('deckcount').textContent = `Pot · ${S.deck.length}`;
+
+  const t = top();
+  $('discard').innerHTML = cardHTML(t, 'big' + (t.id !== lastTop ? ' land' : ''));
+  lastTop = t.id;
+
+  let turnText;
+  if (S.phase === 'over') turnText = S.winner === 0 ? 'You emptied your hand!' : `${NAMES[S.winner]} wins this round.`;
+  else if (S.phase === 'choose') turnText = 'Pick a color';
+  else if (S.turn === 0) turnText = S.drawn !== null && S.phase === 'play' ? 'Play the drawn card or pass' : (S.phase === 'play' ? 'Your turn' : 'Passing…');
+  else turnText = `${NAMES[S.turn]} is thinking…`;
+  $('turn').textContent = turnText;
+
+  const order = S.dir === 1 ? 'Clockwise ↻' : 'Counter-clockwise ↺';
+  $('facts').innerHTML = `<span class="chip"><span class="dot" style="background:var(--${S.color})"></span>${CNAME[S.color]}</span><span class="chip plain">${order}</span>`;
+  $('log').innerHTML = S.log.map(l => `<li>${l}</li>`).join('');
+
+  const hand = S.hands[0];
+  $('mycount').textContent = `Your hand · ${hand.length} ${hand.length === 1 ? 'card' : 'cards'}`;
+  $('hand').className = 'hand' + (myTurn ? '' : ' waiting');
+  $('hand').innerHTML = hand.map(c => cardHTML(c, myTurn ? (canPlay(c) ? 'ok' : 'no') : '', 'button')).join('');
+
+  const db = $('drawbtn');
+  db.textContent = S.drawn !== null ? 'Keep it and pass' : 'Draw a card';
+  db.disabled = !myTurn;
+  const cb = $('callbtn');
+  cb.disabled = !(myTurn && hand.length === 2 && !S.called);
+  cb.textContent = S.called ? 'Called!' : 'Borscht!';
+
+  $('picker').hidden = S.phase !== 'choose';
+  $('over').hidden = S.phase !== 'over';
+  if (S.phase === 'over') {
+    $('overTitle').textContent = S.winner === 0 ? 'You win the pot!' : `${NAMES[S.winner]} wins`;
+    const left = [0, 1, 2, 3].filter(p => p !== S.winner).map(p => `${NAMES[p]} ${S.hands[p].length}`).join(' · ');
+    $('overText').textContent = `Cards left: ${left}`;
+  }
+}
+
+$('swatches').innerHTML = COLORS.map(c => `<button class="swatch c-${c}" type="button" data-color="${c}">${CNAME[c]}</button>`).join('');
+$('swatches').addEventListener('click', e => { const b = e.target.closest('[data-color]'); if (b) onChoose(b.dataset.color); });
+$('hand').addEventListener('click', e => { const b = e.target.closest('[data-id]'); if (b) onCard(Number(b.dataset.id)); });
+$('drawpile').addEventListener('click', e => { if (e.target.closest('#deckbtn')) onDraw(); });
+$('drawbtn').addEventListener('click', onDraw);
+$('callbtn').addEventListener('click', onCall);
+$('newgame').addEventListener('click', newGame);
+$('again').addEventListener('click', newGame);
+
+function start(data) {
+  if (data && data.S) {
+    S = data.S;
+    if (S.phase === 'over' || S.phase === 'choose') render();
+    else advance();
+  } else newGame();
+}
+window.claude?.hot?.snapshot?.(() => ({ S }));
+window.claude?.hot?.ready ? window.claude.hot.ready(start) : start(window.claude?.hot?.data ?? {});
+</script>
