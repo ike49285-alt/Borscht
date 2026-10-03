@@ -1,7 +1,0 @@
-/target
-/web/borscht.wasm
-/web/params.js
-/out
-/runs
-node_modules
-*.borscht
